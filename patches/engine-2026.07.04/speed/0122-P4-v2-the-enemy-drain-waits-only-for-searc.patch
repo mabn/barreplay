@@ -1,0 +1,103 @@
+From 1405e0e8404ad7720ecc22e09e8df58dcbdb4418 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 01:07:12 +0000
+Subject: [PATCH] [barreplay] P4 v2: the enemy drain waits only for searches
+ whose scan reads the unit (toggle2 0x2000000)
+
+GenerateWeaponTargets reads only the LOS state of a candidate its ally team
+neither sees nor has on radar, and only aimPos of a seen one out of range,
+rejected by the same range test on the same inputs; the drain evaluates it.
+Radar-only candidates are still waited for (the slow update rewrites the
+position error).
+---
+ rts/Sim/Weapons/BrPipeTarget.cpp | 39 +++++++++++++++++++++++++++++++-
+ 1 file changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index d4d52b5..f576f53 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -26,6 +26,7 @@
+ #include "Sim/Misc/GlobalSynced.h"
+ #include "Sim/Misc/QuadField.h"
+ #include "Sim/Misc/TeamHandler.h"
++#include "System/SpringMath.h"
+ #include "Sim/Units/Unit.h"
+ #include "Sim/Units/Scripts/CobFile.h"
+ #include "Sim/Units/Scripts/CobOpCodes.h"
+@@ -87,6 +88,7 @@ namespace BrP4 {
+ 			long long slices = 0, launched = 0, notNative = 0, targetWeight = 0, full = 0;
+ 			long long drains[DR_N] = {};
+ 			long long waits = 0, waitCycles = 0, inlineRuns = 0, mismatches = 0, workerHooks = 0, slaveCopies = 0;
++			long long enemyUnseen = 0, enemyOutOfRange = 0; // P4 v2: overlaps the scan never reads
+ 			int lastFrame = 0;
+ 		} st;
+ 
+@@ -214,6 +216,7 @@ namespace BrP4 {
+ 			for (int r = 0; r < DR_N && k < int(sizeof(buf)); ++r)
+ 				k += snprintf(buf + k, sizeof(buf) - k, " %s=%lld", DrainName(r), st.drains[r]);
+ 			LOG("%s", buf);
++			LOG("[BR_P4] v2: enemy overlaps not waited for: unseen=%lld outOfRange=%lld", st.enemyUnseen, st.enemyOutOfRange);
+ 			LOG("[BR_P10] f=%d launched=%lld used=%lld stale=%lld argsDiffer=%lld notLaunched=%lld mismatches=%lld", gs->frameNum, p10.launched, p10.used, p10.stale, p10.args, p10.none, p10.mismatches);
+ 		}
+ 
+@@ -230,7 +233,7 @@ namespace BrP4 {
+ 		for (int r = 0; r < DR_N && k < size; ++r)
+ 			k += snprintf(buf + k, size - k, " %s=%lld", DrainName(r), st.drains[r]);
+ 		if (k < size)
+-			k += snprintf(buf + k, size - k, " [BR_P10] launched=%lld used=%lld stale=%lld argsDiffer=%lld notLaunched=%lld mismatches=%lld (P4 mismatches=%lld)", p10.launched, p10.used, p10.stale, p10.args, p10.none, p10.mismatches, st.mismatches);
++			k += snprintf(buf + k, size - k, " [BR_P4v2] unseen=%lld outOfRange=%lld [BR_P10] launched=%lld used=%lld stale=%lld argsDiffer=%lld notLaunched=%lld mismatches=%lld (P4 mismatches=%lld)", st.enemyUnseen, st.enemyOutOfRange, p10.launched, p10.used, p10.stale, p10.args, p10.none, p10.mismatches, st.mismatches);
+ 		if (k < size)
+ 			k += snprintf(buf + k, size - k, "\n");
+ 		return k;
+@@ -302,6 +305,38 @@ namespace BrP4 {
+ 		StatsLine();
+ 	}
+ 
++	// [barreplay] P4 v2 (toggle2 0x2000000): does search <t>'s scan read anything of
++	// enemy <u> beyond its LOS state and aimPos? GenerateWeaponTargets rejects a
++	// candidate its ally team neither sees nor has on radar after reading only
++	// the LOS state, and a seen one out of range after reading only aimPos, by
++	// the test below on the same inputs (the owner's position, the weapon's
++	// aimFromPos, range boost and height modifier, all as at the launch: moves,
++	// turns and LOS changes drain). Neither is written by u's slow update outside
++	// a drained path, so such a search need not finish before it. A radar-only
++	// candidate's position comes with its error, which the slow update rewrites,
++	// so it is still waited for.
++	static bool BrScanReadsUnit(const Task& t, const CUnit* u)
++	{
++		const unsigned short ls = u->losStatus[t.ownerAlly];
++
++		if ((ls & (LOS_INLOS | LOS_INRADAR)) == 0) {
++			st.enemyUnseen++;
++			return false;
++		}
++		if ((ls & LOS_INLOS) == 0)
++			return true;
++
++		const CWeapon* w = t.w;
++		const float3& targetPos = u->aimPos;
++		const float modRange = w->GetRange2D(w->autoTargetRangeBoost, (targetPos.y - w->aimFromPos.y) * w->weaponDef->heightmod);
++
++		if (w->owner->pos.SqDistance2D(targetPos) > Square(modRange)) {
++			st.enemyOutOfRange++;
++			return false;
++		}
++		return true;
++	}
++
+ 	void BeforeUnit(const CUnit* u)
+ 	{
+ 		CommitDone();
+@@ -331,6 +366,8 @@ namespace BrP4 {
+ 				continue;
+ 			if (teamHandler.Ally(t.ownerAlly, ua))
+ 				continue;
++			if ((g_brToggles2 & 0x2000000) != 0 && !BrScanReadsUnit(t, u))
++				continue;
+ 
+ 			last = i;
+ 		}
+-- 
+2.53.0
+

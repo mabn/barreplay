@@ -25,3 +25,7 @@ experiments/H49-headless-skip-smt-tiles.patch
 0007-cob-threaded-dispatch.patch
 0008-lua-threaded-dispatch.patch
 0009-weapon-targets-testtarget-last.patch
+0010-lua-callin-timers-only-while-profiling.patch
+0011-prefetch-in-unit-loops.patch
+0012-background-huge-page-collapse.patch
+0013-event-log-unit-sample-and-reloads.patch

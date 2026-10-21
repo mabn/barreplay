@@ -1,0 +1,44 @@
+From 1afd03b3ef8f860699556039389cae3e6b374879 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 06:58:15 +0000
+Subject: [PATCH 093/108] [barreplay] H96: g_brToggles2 declared at global
+ scope
+
+---
+ rts/System/Threading/ThreadPool.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/rts/System/Threading/ThreadPool.cpp b/rts/System/Threading/ThreadPool.cpp
+index a3fb099..2282d9d 100644
+--- a/rts/System/Threading/ThreadPool.cpp
++++ b/rts/System/Threading/ThreadPool.cpp
+@@ -3,6 +3,8 @@
+ #ifdef THREADPOOL
+ 
+ #include <immintrin.h>
++
++extern unsigned g_brToggles2; // [barreplay] H96 (defined in Sim/MoveTypes/Systems/GeneralMoveSystem.cpp)
+ #include "System/Sync/SyncChecker.h"
+ #include "ThreadPool.h"
+ #include "System/Exceptions.h"
+@@ -255,8 +257,6 @@ static bool DoTask(int tid, bool async)
+ }
+ 
+ 
+-extern unsigned g_brToggles2; // [barreplay] Sim/MoveTypes/Systems/BrParallelAir.h
+-
+ __FORCE_ALIGN_STACK__
+ static void WorkerLoop(int tid, bool async)
+ {
+@@ -283,7 +283,7 @@ static void WorkerLoop(int tid, bool async)
+ 	// two workers awake, and the main thread does a third of it. Scheduling
+ 	// only; every section's result is the same whoever runs its chunks.
+ 	while (!exitFlags[tid]) {
+-		const unsigned brMode = (g_brToggles2 >> 8) & 3;
++		const unsigned brMode = (::g_brToggles2 >> 8) & 3;
+ 		const auto spinlockEnd = spring_now() + ((brMode == 0)? ourSpinTime: spring_time::fromMicroSecs((brMode == 1)? 2000: 20000));
+ 		const auto sleepCap = (brMode == 0)? maxSleepTime: spring_time::fromMicroSecs(500);
+ 		      auto sleepTime   = spring_time::fromMicroSecs(1);
+-- 
+2.53.0
+

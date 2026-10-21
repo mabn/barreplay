@@ -1,0 +1,139 @@
+From 25a1367e357575871f3116b54c0c80874d8f4fdf Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 01:53:28 +0000
+Subject: [PATCH 90/90] [barreplay] P4: wait for the searches whose rays can
+ see a unit before TryTargetHeading turns it for a moment
+
+CWeapon::TryTargetHeading writes the owner's heading and dir vectors directly,
+calls TryTarget and writes them back. A running search's line-of-fire rays
+(TraceRay, TestCone) read the units of the searcher's own ally team and neutral
+units through those vectors, so a search by an ally running while the command
+AI turns the unit could see it turned: a line of fire blocked in order read as
+free (or the reverse). BeforeUnit only waits for enemies, so nothing caught it.
+Found with a race detector (two runs of each search on a worker, compared) and
+a thread polling TryTarget while the main thread marks its progress: verylarge1
+f65348, Glaucus 23172's commandAI slow update.
+---
+ rts/Sim/Weapons/BrPipeTarget.cpp | 45 +++++++++++++++++++++++++++++++-
+ rts/Sim/Weapons/BrPipeTarget.h   | 12 ++++++++-
+ rts/Sim/Weapons/Weapon.cpp       |  4 +++
+ 3 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index a19fe86..f31e093 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -75,7 +75,7 @@ namespace BrP4 {
+ 		} st;
+ 
+ 		const char* DrainName(int r) {
+-			static const char* names[DR_N] = {"lua", "cob", "kill", "damage", "quad", "move", "team", "transport", "explosion", "los", "feature", "enemy", "rays", "slave"};
++			static const char* names[DR_N] = {"lua", "cob", "kill", "damage", "quad", "move", "team", "transport", "explosion", "los", "feature", "enemy", "rays", "slave", "turn"};
+ 			return (r >= 0 && r < DR_N)? names[r]: "?";
+ 		}
+ 
+@@ -312,6 +312,49 @@ namespace BrP4 {
+ 		CommitThrough(last);
+ 	}
+ 
++	// CWeapon::TryTargetHeading writes a unit's heading and dir vectors, tests,
++	// and writes them back. A running search's line-of-fire rays read the units
++	// of its own ally team (TraceRay, TestCone) and neutral units through those
++	// vectors, never enemies, so BeforeUnit's rule misses this: the searches of
++	// the unit's allies, or of anyone when it is neutral, whose area holds it
++	// finish first.
++	void BeforeTurnSlow(const CUnit* u)
++	{
++		CommitDone();
++
++		const int n = published.load(std::memory_order_relaxed);
++		if (committed == n)
++			return;
++
++		const float ux = u->pos.x;
++		const float uz = u->pos.z;
++		const float ur = u->radius + margin;
++		const bool neutral = u->IsNeutral();
++		int last = -1;
++
++		for (int i = committed; i < n; ++i) {
++			const Task& t = tasks[i];
++			if (t.slave)
++				continue;
++			const float dx = ux - t.cx;
++			const float dz = uz - t.cz;
++			const float rr = t.r + ur;
++
++			if ((dx * dx + dz * dz) > (rr * rr))
++				continue;
++			if (!neutral && !teamHandler.Ally(t.ownerAlly, u->allyteam))
++				continue;
++
++			last = i;
++		}
++
++		if (last < 0)
++			return;
++
++		st.drains[DR_TURN]++;
++		CommitThrough(last);
++	}
++
+ 	bool DeferSlaveCopy(CWeapon* w)
+ 	{
+ 		// only while the master's own search is still to be applied
+diff --git a/rts/Sim/Weapons/BrPipeTarget.h b/rts/Sim/Weapons/BrPipeTarget.h
+index 19a230e..c2be1c7 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.h
++++ b/rts/Sim/Weapons/BrPipeTarget.h
+@@ -19,6 +19,10 @@
+ //     search's weapon and inside its area (the slow update writes the unit's
+ //     own health, paralysis, radar error and so on, which only the scan
+ //     reads);
++//   - before a unit is turned for a moment and back (CWeapon::TryTargetHeading,
++//     from the command AI), when it is an ALLY of a running search's weapon
++//     (or neutral) and inside its area: the line-of-fire rays read their own
++//     side's units through their dir vectors;
+ //   - when Lua calls a function that writes simulation state or reads a
+ //     weapon's target (BrLuaDrainingCall: Lua that only reads cannot see a
+ //     search running, since searches write nothing until applied);
+@@ -51,6 +55,12 @@ namespace BrP4 {
+ 
+ 	// before u's slow update (main)
+ 	void BeforeUnit(const CUnit* u);
++	// before u is turned for a moment and back (CWeapon::TryTargetHeading)
++	void BeforeTurnSlow(const CUnit* u);
++	inline void BeforeTurn(const CUnit* u) {
++		if (__builtin_expect(Active(), false))
++			BeforeTurnSlow(u);
++	}
+ 	// a slaved weapon's copy of its master's target, queued behind the
+ 	// master's search when that is still to be applied; false = copy now
+ 	bool DeferSlaveCopy(CWeapon* w);
+@@ -74,7 +84,7 @@ namespace BrP4 {
+ 	// "[BR_P4] ..." one line for the bench harness
+ 	int BenchLine(char* buf, int size);
+ 
+-	enum DrainReason { DR_LUA, DR_COB, DR_KILL, DR_DAMAGE, DR_QUAD, DR_MOVE, DR_TEAM, DR_TRANSPORT, DR_EXPLOSION, DR_LOS, DR_FEATURE, DR_ENEMY, DR_RAYS, DR_SLAVE, DR_N };
++	enum DrainReason { DR_LUA, DR_COB, DR_KILL, DR_DAMAGE, DR_QUAD, DR_MOVE, DR_TEAM, DR_TRANSPORT, DR_EXPLOSION, DR_LOS, DR_FEATURE, DR_ENEMY, DR_RAYS, DR_SLAVE, DR_TURN, DR_N };
+ }
+ 
+ #endif
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index 33ec49c..d0a0bed 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -1268,6 +1268,10 @@ bool CWeapon::TryTargetRotate(float3 pos, bool userTarget, bool manualFire)
+ bool CWeapon::TryTargetHeading(short heading, const SWeaponTarget& trg)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] P4: the owner turns for the test below, where the running
++	// searches' line-of-fire rays can see it (BrPipeTarget.h)
++	BrP4::BeforeTurn(owner);
++
+ 	const float3 tempfrontdir(owner->frontdir);
+ 	const float3 temprightdir(owner->rightdir);
+ 	const short tempHeading = owner->heading;
+-- 
+2.53.0
+

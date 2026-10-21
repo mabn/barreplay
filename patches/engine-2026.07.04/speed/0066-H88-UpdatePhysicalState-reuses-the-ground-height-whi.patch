@@ -1,0 +1,144 @@
+From 3e94146b0326eba74e6f3cf2025a110be7106fe5 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 04:05:52 +0000
+Subject: [PATCH 66/67] H88: UpdatePhysicalState reuses the ground height while
+ the unit's x/z and the height map are unchanged (toggle 0x100000)
+
+(cherry picked from commit 75e818affacaed97e91720ecdfe7fc4589be356d)
+---
+ rts/Map/ReadMap.cpp             |  1 +
+ rts/Map/ReadMap.h               |  4 ++++
+ rts/Sim/Objects/SolidObject.cpp |  7 ++++++-
+ rts/Sim/Objects/SolidObject.h   |  2 ++
+ rts/Sim/Units/Unit.cpp          | 20 +++++++++++++++++++-
+ rts/Sim/Units/Unit.h            |  8 ++++++++
+ 6 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Map/ReadMap.cpp b/rts/Map/ReadMap.cpp
+index e8d228c..13d3edd 100644
+--- a/rts/Map/ReadMap.cpp
++++ b/rts/Map/ReadMap.cpp
+@@ -111,6 +111,7 @@ CR_REG_METADATA(CReadMap, (
+ 
+ // initialized in CGame::LoadMap
+ CReadMap* readMap = nullptr;
++unsigned g_brHeightMapVersion = 0;
+ 
+ MapDimensions mapDims;
+ 
+diff --git a/rts/Map/ReadMap.h b/rts/Map/ReadMap.h
+index a84fe2c..8ceac76 100644
+--- a/rts/Map/ReadMap.h
++++ b/rts/Map/ReadMap.h
+@@ -15,6 +15,9 @@
+ #include "System/creg/creg_cond.h"
+ #include "System/Misc/RectangleOverlapHandler.h"
+ 
++// [barreplay] H88: bumped by every synced corner-height write (CReadMap::SetHeight)
++extern unsigned g_brHeightMapVersion;
++
+ #define USE_HEIGHTMAP_DIGESTS
+ 
+ class CCamera;
+@@ -317,6 +320,7 @@ extern MapDimensions mapDims;
+ 
+ inline float CReadMap::AddHeight(const int idx, const float a) { return SetHeight(idx, a, 1); }
+ inline float CReadMap::SetHeight(const int idx, const float h, const int add) {
++	++g_brHeightMapVersion; // [barreplay] H88: every synced corner-height write
+ 	return SetHeightValue((*heightMapSyncedPtr)[idx], idx, h, add);
+ }
+ 
+diff --git a/rts/Sim/Objects/SolidObject.cpp b/rts/Sim/Objects/SolidObject.cpp
+index 8d3105c..f7aa8c4 100644
+--- a/rts/Sim/Objects/SolidObject.cpp
++++ b/rts/Sim/Objects/SolidObject.cpp
+@@ -100,10 +100,15 @@ void CSolidObject::PostLoad()
+ 
+ 
+ void CSolidObject::UpdatePhysicalState(float eps)
++{
++	UpdatePhysicalStateAt(eps, CGround::GetHeightReal(pos.x, pos.z));
++}
++
++// [barreplay] H88: the same, with the ground height under pos given
++void CSolidObject::UpdatePhysicalStateAt(float eps, float groundHeight)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	const float waterLevel = CGround::GetWaterLevel(pos.x, pos.z);
+-	const float groundHeight = CGround::GetHeightReal(pos.x, pos.z);
+ 	// Get height of whichever surface is higher between ground and water
+ 	const float topSurfaceHeight = std::max(groundHeight, waterLevel);
+ 
+diff --git a/rts/Sim/Objects/SolidObject.h b/rts/Sim/Objects/SolidObject.h
+index 00df653..954a318 100644
+--- a/rts/Sim/Objects/SolidObject.h
++++ b/rts/Sim/Objects/SolidObject.h
+@@ -145,6 +145,8 @@ public:
+ 
+ 	virtual void UpdatePhysicalState(float eps);
+ 
++	void UpdatePhysicalStateAt(float eps, float groundHeight); // [barreplay] H88
++
+ 	void Move(const float3& v, bool relative);
+ 
+ 	// this should be called whenever the direction
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 99dd767..0b84139 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -29,6 +29,7 @@
+ #include "Map/Ground.h"
+ #include "Map/MapInfo.h"
+ #include "Map/ReadMap.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ 
+ #include "Rendering/GroundFlash.h"
+ #include "Rendering/Units/UnitDrawer.h"
+@@ -1845,7 +1846,24 @@ void CUnit::UpdatePhysicalState(float eps)
+ 	const bool inWater    = IsInWater();
+ 	const bool underWater = IsUnderWater();
+ 
+-	CSolidObject::UpdatePhysicalState(eps);
++	// [barreplay] H88 (toggle 0x100000): a unit that has not moved in x/z
++	// (buildings, landed and parked units) stands over the same ground as last
++	// time unless the height map was written since, so the height there is
++	// what the last call read; reuse it instead of reading four corners again.
++	// x and z are compared bit for bit, so it is the very same GetHeightReal
++	// argument.
++	if ((g_brToggles & 0x100000) != 0) {
++		if (pos.x != brPhysX || pos.z != brPhysZ || g_brHeightMapVersion != brPhysHmv || !brPhysValid) {
++			brPhysX = pos.x;
++			brPhysZ = pos.z;
++			brPhysHmv = g_brHeightMapVersion;
++			brPhysGround = CGround::GetHeightReal(pos.x, pos.z);
++			brPhysValid = true;
++		}
++		CSolidObject::UpdatePhysicalStateAt(eps, brPhysGround);
++	} else {
++		CSolidObject::UpdatePhysicalState(eps);
++	}
+ 
+ 	if (IsInAir() != inAir) {
+ 		if (IsInAir()) {
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index 81cd737..fa84a39 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -548,6 +548,14 @@ public:
+ private:
+ 	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
+ 	bool stunned = false;
++
++	// [barreplay] H88: the ground height under (brPhysX, brPhysZ) at height-map
++	// version brPhysHmv, as UpdatePhysicalState last read it
++	bool brPhysValid = false;
++	unsigned brPhysHmv = 0;
++	float brPhysX = 0.0f;
++	float brPhysZ = 0.0f;
++	float brPhysGround = 0.0f;
+ };
+ 
+ struct GlobalUnitParams {
+-- 
+2.53.0
+

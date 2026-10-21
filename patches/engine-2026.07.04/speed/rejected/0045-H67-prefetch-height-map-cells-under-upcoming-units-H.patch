@@ -1,0 +1,109 @@
+From 35687cf5ed40470bbf9d02ac500139bed03d6a11 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 03:07:16 +0000
+Subject: [PATCH] H67 prefetch height-map cells under upcoming units; H68
+ prefetch aircraft command queue fronts
+
+---
+ rts/Map/Ground.cpp                              | 10 ++++++++++
+ rts/Map/Ground.h                                |  3 +++
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp | 15 ++++++++++++++-
+ rts/Sim/Units/UnitHandler.cpp                   |  7 ++++++-
+ 4 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Map/Ground.cpp b/rts/Map/Ground.cpp
+index 736e21b..5dabf5f 100644
+--- a/rts/Map/Ground.cpp
++++ b/rts/Map/Ground.cpp
+@@ -464,6 +464,16 @@ float CGround::GetHeightAboveWater(float x, float z, bool synced)
+ 	return std::max(0.0f, GetHeightReal(x, z, synced) - GetWaterLevel(x, z, synced));
+ }
+ 
++void CGround::PrefetchHeightReal(float x, float z)
++{
++	const float* hm = readMap->GetSharedCornerHeightMap(true);
++	x = std::clamp(x, 0.0f, float3::maxxpos) / SQUARE_SIZE;
++	z = std::clamp(z, 0.0f, float3::maxzpos) / SQUARE_SIZE;
++	const int hs = int(x) + int(z) * mapDims.mapxp1;
++	__builtin_prefetch(hm + hs);
++	__builtin_prefetch(hm + hs + mapDims.mapxp1);
++}
++
+ float CGround::GetHeightReal(float x, float z, bool synced)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Map/Ground.h b/rts/Map/Ground.h
+index 5044024..2f23340 100644
+--- a/rts/Map/Ground.h
++++ b/rts/Map/Ground.h
+@@ -17,6 +17,9 @@ public:
+ 	/// Returns the height above water at the specified position, cropped to a non-negative value
+ 	static float GetHeightAboveWater(float x, float z, bool synced = true);
+ 	/// Returns the real height at the specified position, can be below 0
++	// [barreplay] H67: prefetch the corner-height cells GetHeightReal(x, z, true)
++	// will read, for loops that know a unit's position a few units ahead
++	static void PrefetchHeightReal(float x, float z);
+ 	static float GetHeightReal(float x, float z, bool synced = true);
+ 	static float GetOrigHeight(float x, float z);
+ 
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index e142133..d8cea0b 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -3,6 +3,8 @@
+ // #undef NDEBUG
+ 
+ #include "GeneralMoveSystem.h"
++#include "Map/Ground.h"
++#include "Sim/Units/CommandAI/CommandAI.h"
+ 
+ #include <vector>
+ 
+@@ -43,7 +45,18 @@ void GeneralMoveSystem::Update() {
+         view.each([&brK](GeneralMoveType& unitId){
+             constexpr size_t PF = 8;
+             if (brK + PF < brOrder.size()) __builtin_prefetch(brOrder[brK + PF]);
+-            if (brK + PF / 2 < brOrder.size()) __builtin_prefetch(brOrder[brK + PF / 2]->moveType);
++            if (brK + PF / 2 < brOrder.size()) {
++                const CUnit* u4 = brOrder[brK + PF / 2];
++                __builtin_prefetch(u4->moveType);
++                CGround::PrefetchHeightReal(u4->pos.x, u4->pos.z); // H67
++                if (u4->commandAI != nullptr) __builtin_prefetch(u4->commandAI); // H68
++            }
++            // H68: aircraft read their command queue's front every frame
++            if (brK + 2 < brOrder.size()) {
++                const CCommandAI* cai = brOrder[brK + 2]->commandAI;
++                if (cai != nullptr && !cai->commandQue.empty())
++                    __builtin_prefetch(&cai->commandQue.front());
++            }
+             ++brK;
+             CUnit* unit = unitHandler.GetUnit(unitId.value);
+             AMoveType* moveType = unit->moveType;
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 1e398d4..d2d2d75 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -3,6 +3,7 @@
+ #include <cassert>
+ 
+ #include "UnitHandler.h"
++#include "Map/Ground.h"
+ #include "Unit.h"
+ #include "UnitDefHandler.h"
+ #include "UnitMemPool.h"
+@@ -401,7 +402,11 @@ void CUnitHandler::UpdateUnits()
+ 	for (size_t i = 0; i < activeUnitCount; ++i) {
+ 		// [barreplay] H66: prefetch the unit 8 ahead and its move type 4 ahead
+ 		if (i + 8 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 8]);
+-		if (i + 4 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 4]->moveType);
++		if (i + 4 < activeUnits.size()) {
++			const CUnit* u4 = activeUnits[i + 4];
++			__builtin_prefetch(u4->moveType);
++			CGround::PrefetchHeightReal(u4->pos.x, u4->pos.z); // H67
++		}
+ 		CUnit* unit = activeUnits[i];
+ 
+ 		unit->SanityCheck();
+-- 
+2.53.0
+

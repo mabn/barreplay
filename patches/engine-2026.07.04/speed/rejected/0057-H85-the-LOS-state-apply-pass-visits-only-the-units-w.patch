@@ -1,0 +1,62 @@
+From a9af1553e9175902ec4eb510ba44316fe4ff916f Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 02:05:01 +0000
+Subject: [PATCH 57/62] H85: the LOS-state apply pass visits only the units
+ whose status changed (toggle 0x10000)
+
+---
+ rts/Sim/Units/UnitHandler.cpp | 31 ++++++++++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index c959db7..bf9bb55 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -517,14 +517,43 @@ void CUnitHandler::UpdateUnitLosStates()
+ 
+ 		newStatus.resize(n * nat);
+ 
++		// [barreplay] H85 (toggle 0x10000): the parallel pass marks the units whose
++		// status changed and the serial pass visits only those, in the same order.
++		// A unit not marked had new == cur, and nothing between the two passes can
++		// change its status (the applies only fire unsynced events), so the old
++		// pass would have found it equal and done nothing.
++		static std::vector<uint8_t> changed;
++		const bool onlyChanged = ((g_brToggles & 0x10000) != 0);
++		if (onlyChanged)
++			changed.assign(n, 0);
++
+ 		for_mt_chunk(0, int(n), [&](const int i) {
+ 			CUnit* unit = activeUnits[i];
++			uint8_t diff = 0;
+ 			for (int at = 0; at < nat; ++at) {
+ 				const unsigned short cur = unit->losStatus[at];
+-				newStatus[i * nat + at] = ((cur & LOS_ALL_MASK_BITS) == LOS_ALL_MASK_BITS)? cur: unit->CalcLosStatus(at);
++				const unsigned short ns = ((cur & LOS_ALL_MASK_BITS) == LOS_ALL_MASK_BITS)? cur: unit->CalcLosStatus(at);
++				newStatus[i * nat + at] = ns;
++				diff |= (ns != cur);
+ 			}
++			if (onlyChanged)
++				changed[i] = diff;
+ 		}, 1, BrChunkMax());
+ 
++		if (onlyChanged) {
++			for (size_t i = 0; i < n; ++i) {
++				if (changed[i] == 0)
++					continue;
++				CUnit* unit = activeUnits[i];
++				for (int at = 0; at < nat; ++at) {
++					const unsigned short s = newStatus[i * nat + at];
++					if (s != unit->losStatus[at])
++						unit->SetLosStatus(at, s);
++				}
++			}
++			return;
++		}
++
+ 		for (size_t i = 0; i < n; ++i) {
+ 			if ((n - i) > 8) __builtin_prefetch(&activeUnits[i + 8]->losStatus[0]);
+ 			CUnit* unit = activeUnits[i];
+-- 
+2.53.0
+

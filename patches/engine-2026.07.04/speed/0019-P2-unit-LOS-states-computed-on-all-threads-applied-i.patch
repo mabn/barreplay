@@ -1,0 +1,294 @@
+From 5d1ad195a3b592d764c4c1a6c521b1b207bf440f Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 00:52:20 +0000
+Subject: [PATCH 19/43] P2: unit LOS states computed on all threads, applied in
+ order (toggle bit 1); N1: BAR's AA-priority AllowWeaponTarget natively when
+ its Lua path is verified (toggle bit 2)
+
+---
+ rts/Lua/LuaHandleSynced.cpp   | 178 ++++++++++++++++++++++++++++++++++
+ rts/Sim/Units/UnitHandler.cpp |  36 +++++++
+ rts/System/EventHandler.h     |  10 ++
+ 3 files changed, 224 insertions(+)
+
+diff --git a/rts/Lua/LuaHandleSynced.cpp b/rts/Lua/LuaHandleSynced.cpp
+index a1ea095..f9ccaa5 100644
+--- a/rts/Lua/LuaHandleSynced.cpp
++++ b/rts/Lua/LuaHandleSynced.cpp
+@@ -1,6 +1,11 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaHandleSynced.h"
++#include <strings.h>
++#include "LuaRules.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
++#include "Sim/Units/Unit.h"
++#include "Sim/Units/UnitHandler.h"
+ 
+ #include "LuaInclude.h"
+ 
+@@ -1804,6 +1809,155 @@ int CSyncedLuaHandle::AllowWeaponTargetCheck(unsigned int attackerID, unsigned i
+  * @see Script.SetWatchAllowTarget
+  * @see Script.SetWatchWeapon
+  */
++// [barreplay] N1 (toggle bit 2): BAR's only AllowWeaponTarget handler, "AA
++// Targeting Priority", multiplies the priority by a per-target-unitDef constant
++// (bombers 0.1, transports/builders/gunships 1, fighters 2, scouts 100; others
++// untouched) and always allows. It is ~3100 Lua calls a frame in the late game.
++// When the callin's whole Lua path is exactly that code - the files hashed, the
++// installed global, the handler's list (one gadget), no pending gadget reorder,
++// the gadget's upvalues - the same float product is computed here instead. Every
++// fact the fast path relies on is checked again each frame; anything different
++// and the Lua callin runs as before.
++namespace {
++	struct BrFastAA {
++		int frame = -3;
++		bool ok = false;
++		bool validated = false;
++		const void* installed = nullptr;
++		const void* listEntry = nullptr;
++		std::vector<float> mult; // per unitDefID
++		std::vector<uint8_t> has;
++	};
++	BrFastAA brFastAA;
++
++	uint64_t BrFnv(const std::string& s) {
++		uint64_t h = 0xcbf29ce484222325ull;
++		for (const unsigned char c: s) { h ^= c; h *= 0x100000001b3ull; }
++		return h;
++	}
++
++	bool BrUpvalue(lua_State* L, int funcIdx, const char* name) {
++		for (int i = 1; ; ++i) {
++			const char* n = lua_getupvalue(L, funcIdx, i);
++			if (n == nullptr)
++				return false;
++			if (strcmp(n, name) == 0)
++				return true;
++			lua_pop(L, 1);
++		}
++	}
++
++	bool BrEndsWithNoCase(const char* s, const char* suffix) {
++		const size_t a = strlen(s), b = strlen(suffix);
++		return (a >= b && strcasecmp(s + a - b, suffix) == 0);
++	}
++
++	bool BrFileHash(const char* path, uint64_t want) {
++		CFileHandler fh(path, SPRING_VFS_ZIP);
++		std::string data;
++		return (fh.FileExists() && fh.LoadStringData(data) && BrFnv(data) == want);
++	}
++
++	// the per-frame part; pushes nothing (restores the stack)
++	bool BrCheckFastAA(lua_State* L, bool full) {
++		const int top = lua_gettop(L);
++		bool ok = false;
++
++		do {
++			lua_getglobal(L, "AllowWeaponTarget");
++			const int f = lua_gettop(L);
++			if (!lua_isfunction(L, f) || lua_iscfunction(L, f))
++				break;
++			if (!full && lua_topointer(L, f) != brFastAA.installed)
++				break;
++
++			if (!BrUpvalue(L, f, "reorderNeeded") || lua_toboolean(L, -1))
++				break;
++			lua_pop(L, 1);
++
++			if (!BrUpvalue(L, f, "self") || !lua_istable(L, -1))
++				break;
++			lua_getfield(L, -1, "AllowWeaponTargetList");
++			if (!lua_istable(L, -1) || lua_objlen(L, -1) != 1)
++				break;
++			lua_rawgeti(L, -1, 1);
++			const int g = lua_gettop(L);
++			if (!lua_istable(L, g))
++				break;
++			if (!full && lua_topointer(L, g) != brFastAA.listEntry)
++				break;
++
++			if (full) {
++				if (!BrUpvalue(L, f, "selffunc") || !lua_isfunction(L, -1))
++					break;
++				lua_Debug ar;
++				lua_getinfo(L, ">S", &ar);
++				if (ar.source == nullptr || !BrEndsWithNoCase(ar.source, "luarules/gadgets.lua") || ar.linedefined != 2126)
++					break;
++
++				lua_getfield(L, g, "ghInfo");
++				if (!lua_istable(L, -1))
++					break;
++				lua_getfield(L, -1, "filename");
++				if (!lua_isstring(L, -1) || !BrEndsWithNoCase(lua_tostring(L, -1), "gadgets/unit_aa_targeting_priority.lua"))
++					break;
++				lua_pop(L, 2);
++
++				lua_getfield(L, g, "AllowWeaponTarget");
++				const int af = lua_gettop(L);
++				if (!lua_isfunction(L, af) || lua_iscfunction(L, af))
++					break;
++				lua_pushvalue(L, af);
++				lua_getinfo(L, ">S", &ar);
++				if (ar.source == nullptr || !BrEndsWithNoCase(ar.source, "gadgets/unit_aa_targeting_priority.lua") || ar.linedefined != 102)
++					break;
++
++				if (!BrFileHash("luarules/gadgets.lua", 0x420ce44b07243035ull) || !BrFileHash("luarules/gadgets/unit_aa_targeting_priority.lua", 0xd2a0cfbc9bc4062ull))
++					break;
++
++				// spGetUnitDefID must be the engine's Spring.GetUnitDefID
++				if (!BrUpvalue(L, af, "spGetUnitDefID") || !lua_iscfunction(L, -1))
++					break;
++				lua_CFunction gu = lua_tocfunction(L, -1);
++				lua_pop(L, 1);
++				lua_getglobal(L, "Spring");
++				if (!lua_istable(L, -1))
++					break;
++				lua_getfield(L, -1, "GetUnitDefID");
++				if (!lua_iscfunction(L, -1) || lua_tocfunction(L, -1) != gu)
++					break;
++				lua_pop(L, 2);
++
++				if (!BrUpvalue(L, af, "airPriorityMultiplier") || !lua_istable(L, -1))
++					break;
++				const int t = lua_gettop(L);
++				brFastAA.mult.assign(unitDefHandler->NumUnitDefs() + 1, 0.0f);
++				brFastAA.has.assign(unitDefHandler->NumUnitDefs() + 1, 0);
++				bool bad = false;
++				lua_pushnil(L);
++				while (lua_next(L, t) != 0) {
++					if (lua_type(L, -2) != LUA_TNUMBER || lua_type(L, -1) != LUA_TNUMBER) { bad = true; lua_pop(L, 2); break; }
++					const int k = int(lua_tonumber(L, -2));
++					if (k < 0 || size_t(k) >= brFastAA.mult.size() || float(k) != lua_tonumber(L, -2)) { bad = true; lua_pop(L, 2); break; }
++					brFastAA.mult[k] = lua_tonumber(L, -1);
++					brFastAA.has[k] = 1;
++					lua_pop(L, 1);
++				}
++				if (bad)
++					break;
++
++				brFastAA.installed = lua_topointer(L, f);
++				brFastAA.listEntry = lua_topointer(L, g);
++			}
++
++			ok = true;
++		} while (false);
++
++		lua_settop(L, top);
++		return ok;
++	}
++}
++
+ bool CSyncedLuaHandle::AllowWeaponTarget(
+ 	unsigned int attackerID,
+ 	unsigned int targetID,
+@@ -1817,6 +1971,30 @@ bool CSyncedLuaHandle::AllowWeaponTarget(
+ 	if (!watchAllowTargetDefs[attackerWeaponDefID])
+ 		return ret;
+ 
++	if ((g_brToggles & 4) != 0 && GetName() == "LuaRules" && targetPriority != nullptr && int(targetID) >= 0 && int(attackerWeaponNum) >= 0) {
++		if (brFastAA.frame != gs->frameNum) {
++			brFastAA.frame = gs->frameNum;
++			if (!brFastAA.validated) {
++				brFastAA.validated = true;
++				brFastAA.ok = BrCheckFastAA(L, true);
++				LOG("[barreplay] N1 native AA targeting priority: %s", brFastAA.ok ? "on" : "off (the Lua path differs)");
++			} else if (brFastAA.ok) {
++				brFastAA.ok = BrCheckFastAA(L, false);
++				if (!brFastAA.ok)
++					LOG("[barreplay] N1 native AA targeting priority: off from frame %d", gs->frameNum);
++			}
++		}
++		if (brFastAA.ok) {
++			const CUnit* target = unitHandler.GetUnit(targetID);
++			if (target != nullptr) {
++				const int udid = target->unitDef->id;
++				if (size_t(udid) < brFastAA.has.size() && brFastAA.has[udid])
++					*targetPriority = *targetPriority * brFastAA.mult[udid];
++				return true;
++			}
++		}
++	}
++
+ 	LUA_CALL_IN_CHECK(L, true);
+ 	luaL_checkstack(L, 2 + 5 + 2, __func__);
+ 
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 1e398d4..2c168de 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -3,6 +3,7 @@
+ #include <cassert>
+ 
+ #include "UnitHandler.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Unit.h"
+ #include "UnitDefHandler.h"
+ #include "UnitMemPool.h"
+@@ -337,6 +338,41 @@ void CUnitHandler::UpdateUnitMoveTypes()
+ void CUnitHandler::UpdateUnitLosStates()
+ {
+ 	ZoneScopedC(tracy::Color::Goldenrod);
++	// [barreplay] P2 (toggle bit 1): a unit's new LOS status is a pure function
++	// of its own state and the LOS maps, neither of which this loop changes;
++	// what it does change goes through the Unit{Entered,Left}{Los,Radar} events,
++	// and when no SYNCED client receives those (a replay has no skirmish AIs),
++	// nothing they do can reach synced state either. So compute every status
++	// on all threads first, then apply them in the loop's order, firing the
++	// same events at the same points: SetLosStatus with an unchanged status
++	// does nothing, so only the changed ones are applied.
++	if ((g_brToggles & 2) != 0 && ThreadPool::HasThreads() && !eventHandler.HasSyncedLosClients()) {
++		static std::vector<unsigned short> newStatus;
++
++		const size_t n = activeUnits.size();
++		const int nat = teamHandler.ActiveAllyTeams();
++
++		newStatus.resize(n * nat);
++
++		for_mt_chunk(0, int(n), [&](const int i) {
++			CUnit* unit = activeUnits[i];
++			for (int at = 0; at < nat; ++at) {
++				const unsigned short cur = unit->losStatus[at];
++				newStatus[i * nat + at] = ((cur & LOS_ALL_MASK_BITS) == LOS_ALL_MASK_BITS)? cur: unit->CalcLosStatus(at);
++			}
++		});
++
++		for (size_t i = 0; i < n; ++i) {
++			if ((n - i) > 8) __builtin_prefetch(&activeUnits[i + 8]->losStatus[0]);
++			CUnit* unit = activeUnits[i];
++			for (int at = 0; at < nat; ++at) {
++				const unsigned short s = newStatus[i * nat + at];
++				if (s != unit->losStatus[at])
++					unit->SetLosStatus(at, s);
++			}
++		}
++		return;
++	}
+ 	// [barreplay] H66: prefetch ahead (same iteration as the range-for)
+ 	for (auto it = activeUnits.begin(), end = activeUnits.end(); it != end; ++it) {
+ 		if ((end - it) > 8) __builtin_prefetch(&(*(it + 8))->losStatus[0]);
+diff --git a/rts/System/EventHandler.h b/rts/System/EventHandler.h
+index 4f05e03..2e9ea5d 100644
+--- a/rts/System/EventHandler.h
++++ b/rts/System/EventHandler.h
+@@ -125,6 +125,16 @@ class CEventHandler
+ 		void UnitMoved(const CUnit* unit);
+ 		// [barreplay] P1: the parallel move-type loop needs nobody to listen
+ 		bool HasUnitMovedClients() const { return !listUnitMoved.empty(); }
++		// [barreplay] P2: may a LOS event's receiver change synced state?
++		bool HasSyncedLosClients() const {
++			for (const auto* l: {&listUnitEnteredLos, &listUnitLeftLos, &listUnitEnteredRadar, &listUnitLeftRadar}) {
++				for (const CEventClient* ec: *l) {
++					if (ec->GetSynced())
++						return true;
++				}
++			}
++			return false;
++		}
+ 		void UnitMoveFailed(const CUnit* unit);
+ 		void UnitArrivedAtGoal(const CUnit* unit);
+ 
+-- 
+2.53.0
+

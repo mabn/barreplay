@@ -1,0 +1,47 @@
+From 2d16ba2bc608f1272ba347925018ea3e29282d13 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 03:41:02 +0000
+Subject: [PATCH 63/67] H87: a headless demo replay queues no unsynced
+ height-map updates (toggle 0x80000); their rectangle queue blew up to 4 GiB
+ in StageSplitTooLarge
+
+(cherry picked from commit ce3f7abd3e285d0dca13eecbe7579980330f6715)
+---
+ rts/Map/ReadMap.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/rts/Map/ReadMap.cpp b/rts/Map/ReadMap.cpp
+index 9bf6ad0..e8d228c 100644
+--- a/rts/Map/ReadMap.cpp
++++ b/rts/Map/ReadMap.cpp
+@@ -6,6 +6,9 @@
+ 
+ #include "xsimd/xsimd.hpp"
+ #include "ReadMap.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
++#include "Game/GameVersion.h"
++#include "Game/GameSetup.h"
+ #include "MapDamage.h"
+ #include "MapInfo.h"
+ #include "MetalMap.h"
+@@ -543,6 +546,17 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
+ 	UpdateFaceNormals(centerRect, initialize);
+ 	UpdateSlopemap(centerRect, initialize); // must happen after UpdateFaceNormals()!
+ 
++	// [barreplay] H87 (toggle 0x80000): in a headless demo replay nothing draws,
++	// and the unsynced update below feeds only drawing (normals, textures, the
++	// ROAM mesh) and the UnsyncedHeightMapUpdate callin, which no synced state
++	// can hear in demo playback. Its rectangle queue is also where runaway memory
++	// was caught twice (a 4 GiB vector of rectangles split from garbage ones in
++	// CRectangleOverlapHandler::StageSplitTooLarge; the draw-side normal update
++	// once overflowed its arrays, see UpdateDraw), so skip it all.
++	static const bool brHeadless = SpringVersion::IsHeadless();
++	if (brHeadless && (g_brToggles & 0x80000) != 0 && gameSetup != nullptr && gameSetup->hostDemo)
++		return;
++
+ 	// push the unsynced update; initial one without LOS check
+ 	if (initialize) {
+ 		unsyncedHeightMapUpdates.push_back(cornerRect);
+-- 
+2.53.0
+

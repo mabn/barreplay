@@ -1,0 +1,78 @@
+From 2c991a0d52e4960889a4c3c1058eaf1b57c5dfbc Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 04:00:36 +0000
+Subject: [PATCH] [barreplay] P7 v3: no window in a frame with fewer than
+ BARREPLAY_P7_MINUNITS (6000) active units; phase A records each unit's index,
+ so the per-frame clear of a MaxUnits-sized map goes
+
+Measured against the speed32-like settings: +7.6% at 1,405 units, +2.9% at
+3,719, -1.5% at 9,961 (the window's fixed costs - waking the workers, the
+main thread waiting for them at the LOS point - against a small overlap).
+---
+ rts/Sim/Misc/LosHandler.cpp | 25 ++++++++++++++++++++-----
+ 1 file changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index dceaa2d..d8ba37a 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -866,7 +866,9 @@ namespace BrP7 {
+ 		bool launched = false, all = false;
+ 		std::vector<CUnit*> units;    // the active units when the window opened
+ 		std::vector<uint8_t> needs;   // per unit: a bit per LOS type, UpdateUnit would act
+-		std::vector<int> idxOf;       // unit id -> index in units (-1)
++		std::vector<int> idxOf;       // unit id -> index in units; written by phase A, checked against units
++		size_t minUnits = 0;          // BARREPLAY_P7_MINUNITS: fewer active units, no window
++		bool minUnitsRead = false;
+ 		std::vector<CUnit*> marked;
+ 		std::atomic_flag lock = ATOMIC_FLAG_INIT;
+ 		struct Stats { long long frames = 0, allFrames = 0, marks = 0, needed = 0, scanned = 0; } st;
+@@ -900,6 +902,7 @@ void CLosHandler::BrP7PhaseA(int chunk)
+ 	const size_t b = size_t(chunk) * CHUNK, e = std::min(units.size(), b + CHUNK);
+ 	for (size_t n = b; n < e; ++n) {
+ 		const CUnit* u = units[n];
++		idxOf[u->id] = int(n);
+ 		uint8_t m = 0;
+ 		for (size_t t = 0; t < losTypes.size(); ++t)
+ 			m |= uint8_t(losTypes[t]->BrNeedsUpdate(u)) << t;
+@@ -916,8 +919,21 @@ void CLosHandler::BrP7Begin()
+ 	return;
+ 	#endif
+ 
++	// [barreplay] P7 v3: the window's fixed costs (waking the workers, waiting
++	// for them at the LOS point) are larger than the overlap in a frame with
++	// few units: measured +7.6% at 1,405 units, +2.9% at 3,719, -1.5% at 9,961
++	if (!minUnitsRead) {
++		minUnitsRead = true;
++		const char* e = getenv("BARREPLAY_P7_MINUNITS");
++		minUnits = (e != nullptr)? size_t(std::max(0, atoi(e))): 6000;
++	}
++	if (unitHandler.GetActiveUnits().size() < minUnits)
++		return;
++
+ 	units = unitHandler.GetActiveUnits();
+ 	needs.assign(units.size(), 0);
++	if (idxOf.size() != size_t(unitHandler.MaxUnits()))
++		idxOf.assign(unitHandler.MaxUnits(), -1);
+ 	marked.clear();
+ 	all = false;
+ 	launched = true;
+@@ -952,12 +968,11 @@ bool CLosHandler::BrP7Finish()
+ 	} else {
+ 		// a unit whose inputs changed in the window: tested again, every type
+ 		if (!marked.empty()) {
+-			idxOf.assign(unitHandler.MaxUnits(), -1);
+-			for (size_t n = 0; n < units.size(); ++n)
+-				idxOf[units[n]->id] = int(n);
++			// phase A wrote every unit's index; an entry left from an earlier
++			// frame names another unit (or none) and fails the check
+ 			for (const CUnit* u: marked) {
+ 				const int i = idxOf[u->id];
+-				if (i >= 0 && units[i] == u)
++				if (i >= 0 && size_t(i) < units.size() && units[i] == u)
+ 					needs[i] = 0xFF;
+ 			}
+ 			st.marks += marked.size();
+-- 
+2.53.0
+

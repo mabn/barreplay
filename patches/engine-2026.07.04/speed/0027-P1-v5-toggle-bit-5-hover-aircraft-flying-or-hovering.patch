@@ -1,0 +1,130 @@
+From 6b6856425cbff8d32b5a4bbe92926a878dfe3cba Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 07:24:58 +0000
+Subject: [PATCH 27/43] P1 v5 (toggle bit 5): hover aircraft flying or
+ hovering, and stunned/unfinished aircraft, in parallel; hover RNG draws wait
+ (SerialPoint)
+
+---
+ rts/Sim/MoveTypes/HoverAirMoveType.cpp        | 11 +++++++
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 31 ++++++++++++++++---
+ 2 files changed, 38 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/HoverAirMoveType.cpp b/rts/Sim/MoveTypes/HoverAirMoveType.cpp
+index e0f68b8..4ffbae1 100644
+--- a/rts/Sim/MoveTypes/HoverAirMoveType.cpp
++++ b/rts/Sim/MoveTypes/HoverAirMoveType.cpp
+@@ -2,6 +2,7 @@
+ 
+ 
+ #include "HoverAirMoveType.h"
++#include "Systems/BrParallelAir.h"
+ #include "Game/Players/Player.h"
+ #include "Map/Ground.h"
+ #include "Map/MapInfo.h"
+@@ -420,6 +421,8 @@ void CHoverAirMoveType::UpdateHovering()
+ 	const float  maxSqGoalDist = Square(GetGoalRadius());
+ 	const float absHoverFactor = math::fabs(owner->unitDef->dlHoverFactor) * 0.5f;
+ 
++	// [barreplay] P1: draws from the synced RNG in loop order
++	BrParAir::SerialPoint();
+ 	randomWind.x = (randomWind.x * 0.9f + (gsRNG.NextFloat() - 0.5f) * 0.5f);
+ 	randomWind.z = (randomWind.z * 0.9f + (gsRNG.NextFloat() - 0.5f) * 0.5f);
+ 
+@@ -507,6 +510,7 @@ void CHoverAirMoveType::UpdateFlying()
+ 						static const CMatrix44f rotCW(0.0f, -math::QUARTERPI, 0.0f);
+ 
+ 						// make sure the point is on the circle, go there in a straight line
++						BrParAir::SerialPoint();
+ 						if (gsRNG.NextFloat() > 0.5f) {
+ 							goalPos = circlingPos + (rotCCW.Mul(relPos.Normalize2D()) * goalDistance);
+ 						} else {
+@@ -524,6 +528,7 @@ void CHoverAirMoveType::UpdateFlying()
+ 					if (relPos.x < 0.0001f && relPos.x > -0.0001f)
+ 						relPos.x = 0.0001f;
+ 
++					BrParAir::SerialPoint();
+ 					const float rotY = 0.6f + gsRNG.NextFloat() * 0.6f;
+ 					const float sign = (gsRNG.NextFloat() > 0.5f) ? 1.0f : -1.0f;
+ 					const CMatrix44f rot(0.0f, rotY * sign, 0.0f);
+@@ -618,6 +623,7 @@ void CHoverAirMoveType::UpdateLanding()
+ 		} else {
+ 			if (goalPos.SqDistance2D(pos) < (30.0f * 30.0f)) {
+ 				// randomly pick another landing spot and try again
++				BrParAir::SerialPoint();
+ 				goalPos += (gsRNG.NextVector() * 300.0f);
+ 				goalPos.ClampInBounds();
+ 
+@@ -993,6 +999,11 @@ bool CHoverAirMoveType::Update()
+ 		} break;
+ 	}
+ 
++	// [barreplay] P1: keep a script call in order (and count it)
++	if ((lastSpd == ZeroVector) != (owner->speed == ZeroVector) && BrParAir::Active()) {
++		BrParAir::stats.scriptCalls++;
++		BrParAir::SerialPoint();
++	}
+ 	if (lastSpd == ZeroVector && owner->speed != ZeroVector) { owner->script->StartMoving(false); }
+ 	if (lastSpd != ZeroVector && owner->speed == ZeroVector) { owner->script->StopMoving(); }
+ 
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 1db1b3a..0d00e8b 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -27,6 +27,7 @@
+ #include "Sim/Misc/ModInfo.h"
+ #include "Sim/MoveTypes/StaticMoveType.h"
+ #include "Sim/MoveTypes/StrafeAirMoveType.h"
++#include "Sim/MoveTypes/HoverAirMoveType.h"
+ 
+ #include <cstdio>
+ #include <cstdlib>
+@@ -237,19 +238,41 @@ namespace BrParAir {
+ 	static bool ParallelSafeWhy(const CUnit* u, int& w) {
+ 		const AMoveType* mt = u->moveType;
+ 
+-		if (typeid(*mt) != typeid(CStrafeAirMoveType))
++		const bool hover = (typeid(*mt) == typeid(CHoverAirMoveType));
++		if (!hover && typeid(*mt) != typeid(CStrafeAirMoveType))
++			return (w = WHY_TYPE, false);
++		if (hover && (g_brToggles & 0x20) == 0)
+ 			return (w = WHY_TYPE, false);
+ 		if (u->UsingScriptMoveType() || mt->UseHeading())
+ 			return (w = WHY_SCRIPT, false);
+ 
+-		const CStrafeAirMoveType* amt = static_cast<const CStrafeAirMoveType*>(mt);
++		const AAirMoveType* amt = static_cast<const AAirMoveType*>(mt);
+ 		if (amt->collide)
+ 			return (w = WHY_COLLIDE, false);
+-		if (u->IsStunned() || u->beingBuilt || u->UnderFirstPersonControl() || u->GetTransporter() != nullptr)
++		if (u->UnderFirstPersonControl() || u->GetTransporter() != nullptr)
+ 			return (w = WHY_STUN, false);
+-		if (u->speed.w > (MAX_UNIT_SPEED * 0.5f) || u->speed == ZeroVector)
++		if (u->speed.w > (MAX_UNIT_SPEED * 0.5f))
++			return (w = WHY_SPEED, false);
++
++		// v5: the stunned / unfinished path of both Update()s is the unit's own
++		// physics and nothing else (collide is off, so no collision queries)
++		if ((u->IsStunned() && !u->IsCrashing()) || u->beingBuilt)
++			return (w = WHY_STUN, (g_brToggles & 0x20) != 0);
++
++		if (u->speed == ZeroVector)
+ 			return (w = WHY_SPEED, false);
+ 
++		if (hover) {
++			// v5: flying or hovering hover aircraft; state changes in those paths
++			// only set the unit's own flags, RNG draws wait (SerialPoint)
++			const CHoverAirMoveType* h = static_cast<const CHoverAirMoveType*>(mt);
++			if (h->wantToStop || u->IsCrashing())
++				return (w = WHY_STATE, false);
++			if (amt->aircraftState == AAirMoveType::AIRCRAFT_FLYING || amt->aircraftState == AAirMoveType::AIRCRAFT_HOVERING)
++				return true;
++			return (w = WHY_STATE, false);
++		}
++
+ 		if (amt->aircraftState == AAirMoveType::AIRCRAFT_FLYING)
+ 			return (w = WHY_STATE, !u->IsCrashing());
+ 		if (amt->aircraftState == AAirMoveType::AIRCRAFT_CRASHING)
+-- 
+2.53.0
+

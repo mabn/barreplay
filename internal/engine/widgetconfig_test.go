@@ -124,3 +124,12 @@ func TestEnableWidgetSelfHealsStaleBackup(t *testing.T) {
 		t.Errorf("stale backup not restored as the real config; got:\n%s", got)
 	}
 }
+
+// The seeded config must switch the Widget Selector's load column off: with it
+// on, BAR wraps every widget callin in its profiler (widget_profiling.lua).
+func TestWidgetConfigSwitchesOffSelectorProfiler(t *testing.T) {
+	lua := widgetConfigLua("BAR Replay Snapshotter")
+	if !strings.Contains(lua, `data = { ["Widget Selector"] = { profiler = false } }`) {
+		t.Fatalf("seeded widget config does not switch off the selector's profiler:\n%s", lua)
+	}
+}

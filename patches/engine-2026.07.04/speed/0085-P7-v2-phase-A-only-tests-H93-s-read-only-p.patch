@@ -1,0 +1,418 @@
+From c8ea8012ba51bf82d36b9fe9cd227a143836e6b0 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 16:07:20 +0000
+Subject: [PATCH 85/90] [barreplay] P7 v2: phase A only tests (H93's read-only
+ predicate, every type, on the workers in the script tick); the LOS point runs
+ the real UpdateUnit for the flagged and the marked units in order, so a unit
+ that changed or died in the window takes exactly its ordinary path
+
+---
+ rts/Sim/Misc/LosHandler.cpp | 257 +++++++++---------------------------
+ rts/Sim/Misc/LosHandler.h   |  13 --
+ 2 files changed, 60 insertions(+), 210 deletions(-)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 849c7fe..dceaa2d 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -652,155 +652,6 @@ void ILosType::Update()
+ }
+ 
+ 
+-// [barreplay] P7 (BrLosOverlap.h): Update()'s work in two halves. Phase A
+-// (on a worker, in the script tick) runs the per-unit loop, the delayed
+-// queues, the filter and the raycasts, keeping the squares a recalculated
+-// instance has to be removed with; phase B (at the LOS point) removes and adds
+-// the squares and does the cache bookkeeping, exactly as Update() would.
+-void ILosType::BrPhaseA(const std::vector<CUnit*>& units)
+-{
+-	for (CUnit* u: units) {
+-		UpdateUnit(u, false);
+-	}
+-
+-	brPlanned = false;
+-	brOld.clear();
+-
+-	// delayed delete
+-	while (!delayedDeleteQue.empty() && delayedDeleteQue.front().timeoutTime < gs->frameNum) {
+-		UnrefInstance(delayedDeleteQue.front().instance);
+-		delayedDeleteQue.pop_front();
+-	}
+-
+-	// relos after terraform is delayed
+-	while (!delayedTerraQue.empty() && delayedTerraQue.front().timeoutTime < gs->frameNum) {
+-		SLosInstance* li = delayedTerraQue.front().instance;
+-		li->isQueuedForTerraform = false;
+-		if (!li->isQueuedForUpdate)
+-			losUpdate.push_back(li);
+-
+-		delayedTerraQue.pop_front();
+-	}
+-
+-	if (losUpdate.empty())
+-		return;
+-
+-	losRemove.clear();
+-	losRemove.reserve(losUpdate.size());
+-	losAdd.clear();
+-	losAdd.reserve(losUpdate.size());
+-	losDeleted.clear();
+-	losDeleted.reserve(losUpdate.size());
+-
+-	if (algoType == LOS_ALGO_RAYCAST) {
+-		losRecalc.clear();
+-		losRecalc.reserve(losUpdate.size());
+-	}
+-
+-	for (SLosInstance* li: losUpdate) {
+-		const auto status = OptimizeInstanceUpdate(li);
+-		li->isQueuedForUpdate = false;
+-
+-		switch (status) {
+-			case SLosInstance::TLosStatus::NEW: {
+-				if (algoType == LOS_ALGO_RAYCAST) losRecalc.push_back(li);
+-				losAdd.push_back(li);
+-			} break;
+-			case SLosInstance::TLosStatus::REACTIVATE: {
+-				losAdd.push_back(li);
+-			} break;
+-			case SLosInstance::TLosStatus::RECALC: {
+-				losRemove.push_back(li);
+-				if (algoType == LOS_ALGO_RAYCAST) {
+-					losRecalc.push_back(li);
+-					li->brKeepOld = true; // removed in phase B with the squares it has now
+-				}
+-				losAdd.push_back(li);
+-			} break;
+-			case SLosInstance::TLosStatus::REMOVE: {
+-				losRemove.push_back(li);
+-				losDeleted.push_back(li);
+-			} break;
+-			case SLosInstance::TLosStatus::NONE: {
+-			} break;
+-			default: assert(false);
+-		}
+-
+-		if (status == SLosInstance::TLosStatus::REMOVE) {
+-			li->status &= SLosInstance::TLosStatus::RECALC;
+-		} else {
+-			li->status = SLosInstance::TLosStatus::NONE;
+-		}
+-	}
+-
+-	// raycast terrain (serially: this already runs beside the other types)
+-	if (algoType == LOS_ALGO_RAYCAST) {
+-		for (SLosInstance* li: losRecalc) {
+-			assert(li->refCount > 0);
+-			if (li->brKeepOld) {
+-				li->brOldIdx = int(brOld.size());
+-				brOld.emplace_back(li, std::move(li->squares));
+-			}
+-			li->squares.clear();
+-			losMaps[li->allyteam].PrepareRaycast(li);
+-		}
+-	}
+-
+-	losUpdate.clear();
+-	brPlanned = true;
+-}
+-
+-void ILosType::BrPhaseB()
+-{
+-	if (!brPlanned)
+-		return;
+-
+-	brPlanned = false;
+-
+-	// remove sight (a recalculated instance with its old squares)
+-	for (SLosInstance* li: losRemove) {
+-		if (li->brKeepOld) {
+-			std::vector<SLosInstance::RLE>& old = brOld[li->brOldIdx].second;
+-			std::swap(li->squares, old);
+-			LosRemove(li);
+-			std::swap(li->squares, old);
+-			li->brKeepOld = false;
+-			li->brOldIdx = -1;
+-		} else {
+-			LosRemove(li);
+-		}
+-	}
+-
+-	// add sight
+-	for (SLosInstance* li: losAdd) {
+-		assert(li->refCount > 0);
+-		LosAdd(li);
+-	}
+-
+-	// delete / move to cache unused instances
+-	if (algoType == LOS_ALGO_RAYCAST) {
+-		while (!losCache.empty() && ((losCache.size() + losDeleted.size()) > CACHE_SIZE)) {
+-			SLosInstance* li = losCache.front();
+-			losCache.pop_front();
+-			li->isCached = false;
+-			DeleteInstance(li);
+-		}
+-
+-		for (SLosInstance* li: losDeleted) {
+-			assert(li->refCount == 0);
+-			AddInstanceToCache(li);
+-		}
+-	} else {
+-		assert(losCache.empty());
+-		for (SLosInstance* li: losDeleted) {
+-			DeleteInstance(li);
+-		}
+-	}
+-
+-	brOld.clear();
+-}
+-
+-
+ void ILosType::UpdateHeightMapSynced(SRectangle rect)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+@@ -968,8 +819,7 @@ void CLosHandler::SetGlobalLOS(const int allyTeamId, const bool newState)
+ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7: phase A owns the instances while it runs
+-	BrP7::Mark(unit);
++	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit), true);
+ 	}
+@@ -979,8 +829,7 @@ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int we
+ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7: phase A owns the instances while it runs
+-	BrP7::Mark(unit);
++	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+ 	}
+@@ -990,8 +839,7 @@ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7: phase A owns the instances while it runs
+-	BrP7::Mark(unit);
++	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+ 	}
+@@ -1001,8 +849,7 @@ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ void CLosHandler::UnitLoaded(const CUnit* unit, const CUnit* transport)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7: phase A owns the instances while it runs
+-	BrP7::Mark(unit);
++	BrP7::Mark(unit); // [barreplay] P7
+ 	if (!unit->IsStunned())
+ 		return;
+ 
+@@ -1016,42 +863,48 @@ void CLosHandler::UnitLoaded(const CUnit* unit, const CUnit* transport)
+ namespace BrP7 {
+ 	std::atomic<int> open{0};
+ 	namespace {
+-		bool launched = false, joined = false, all = false;
+-		std::vector<CUnit*> units; // the active units when phase A started
++		bool launched = false, all = false;
++		std::vector<CUnit*> units;    // the active units when the window opened
++		std::vector<uint8_t> needs;   // per unit: a bit per LOS type, UpdateUnit would act
++		std::vector<int> idxOf;       // unit id -> index in units (-1)
+ 		std::vector<CUnit*> marked;
+ 		std::atomic_flag lock = ATOMIC_FLAG_INIT;
+-		struct Stats { long long frames = 0, allFrames = 0, marks = 0, joinsEarly = 0; } st;
++		struct Stats { long long frames = 0, allFrames = 0, marks = 0, needed = 0, scanned = 0; } st;
+ 		int lastLog = 0;
+ 
+-		auto phaseA = [](const int idx) { losHandler->BrP7PhaseA(idx); };
++		auto phaseA = [](const int chunk) { losHandler->BrP7PhaseA(chunk); };
+ 		decltype(for_mt_background(0, 1, phaseA)) task;
++		constexpr int CHUNK = 256;
+ 	}
+ 
+ 	void MarkSlow(const CUnit* unit) {
+ 		while (lock.test_and_set(std::memory_order_acquire)) {}
+ 		marked.push_back(const_cast<CUnit*>(unit));
+-		st.marks++;
+ 		lock.clear(std::memory_order_release);
+ 	}
+ 	void MarkAllSlow() {
+ 		all = true;
+ 	}
+-	void JoinSlow() {
+-		if (!launched || joined)
+-			return;
+-		st.joinsEarly++;
+-		wait_for_mt_background(task);
+-		joined = true;
+-	}
++	void JoinSlow() {}
+ 	void Begin() {
+ 		if (losHandler != nullptr)
+ 			losHandler->BrP7Begin();
+ 	}
+ }
+ 
+-void CLosHandler::BrP7PhaseA(int idx)
++// phase A, one chunk of units: H93's test of every type (UpdateUnit's tests in
++// its order, reads only), the bit set where UpdateUnit would act
++void CLosHandler::BrP7PhaseA(int chunk)
+ {
+-	losTypes[idx]->BrPhaseA(BrP7::units);
++	using namespace BrP7;
++	const size_t b = size_t(chunk) * CHUNK, e = std::min(units.size(), b + CHUNK);
++	for (size_t n = b; n < e; ++n) {
++		const CUnit* u = units[n];
++		uint8_t m = 0;
++		for (size_t t = 0; t < losTypes.size(); ++t)
++			m |= uint8_t(losTypes[t]->BrNeedsUpdate(u)) << t;
++		needs[n] = m;
++	}
+ }
+ 
+ void CLosHandler::BrP7Begin()
+@@ -1064,55 +917,67 @@ void CLosHandler::BrP7Begin()
+ 	#endif
+ 
+ 	units = unitHandler.GetActiveUnits();
++	needs.assign(units.size(), 0);
+ 	marked.clear();
+ 	all = false;
+-	joined = false;
+ 	launched = true;
+ 	open.store(1, std::memory_order_release);
+-	task = for_mt_background(0, losTypes.size(), phaseA);
++	task = for_mt_background(0, int((units.size() + CHUNK - 1) / CHUNK), phaseA);
+ }
+ 
+-void CLosHandler::BrP7JoinA()
+-{
+-	BrP7::JoinSlow();
+-}
++void CLosHandler::BrP7JoinA() {}
+ 
+-// at the LOS point: false when phase A did not run (the ordinary update follows)
++// at the LOS point: false when the window did not open (the ordinary update runs)
+ bool CLosHandler::BrP7Finish()
+ {
+ 	using namespace BrP7;
+ 	if (!launched)
+ 		return false;
+ 
+-	if (!joined) {
+-		wait_for_mt_background(task);
+-		joined = true;
+-	}
++	wait_for_mt_background(task);
+ 	open.store(0, std::memory_order_release);
+ 	launched = false;
+ 	st.frames++;
+ 
+-	for_mt(0, losTypes.size(), [&](const int idx) {
+-		ILosType* lt = losTypes[idx];
+-		lt->BrPhaseB();
+-
+-		if (all) {
+-			// a write phase A cannot follow: the whole ordinary update again
++	if (all) {
++		// a Lua write: the ordinary update, every unit tested again
++		st.allFrames++;
++		for_mt(0, losTypes.size(), [&](const int idx) {
++			ILosType* lt = losTypes[idx];
+ 			for (CUnit* u: unitHandler.GetActiveUnits()) {
+ 				lt->UpdateUnit(u, false);
+ 			}
+-		} else {
+-			for (CUnit* u: marked) {
+-				lt->UpdateUnit(u, false);
++			lt->Update();
++		});
++	} else {
++		// a unit whose inputs changed in the window: tested again, every type
++		if (!marked.empty()) {
++			idxOf.assign(unitHandler.MaxUnits(), -1);
++			for (size_t n = 0; n < units.size(); ++n)
++				idxOf[units[n]->id] = int(n);
++			for (const CUnit* u: marked) {
++				const int i = idxOf[u->id];
++				if (i >= 0 && units[i] == u)
++					needs[i] = 0xFF;
+ 			}
++			st.marks += marked.size();
+ 		}
+-		lt->Update();
+-	});
++		for_mt(0, losTypes.size(), [&](const int idx) {
++			ILosType* lt = losTypes[idx];
++			const uint8_t bit = uint8_t(1u << idx);
++			for (size_t n = 0, m = units.size(); n < m; ++n) {
++				if ((needs[n] & bit) != 0)
++					lt->UpdateUnit(units[n], false);
++			}
++			lt->Update();
++		});
++	}
+ 
+-	st.allFrames += all;
+ 	if (getenv("BARREPLAY_P7_STATS") != nullptr && (gs->frameNum - lastLog) >= 900) {
+ 		lastLog = gs->frameNum;
+-		LOG("[BR_P7] f=%d frames=%lld allFrames=%lld marks=%lld joinsEarly=%lld", gs->frameNum, st.frames, st.allFrames, st.marks, st.joinsEarly);
++		size_t nn = 0;
++		for (const uint8_t v: needs) nn += __builtin_popcount(v);
++		LOG("[BR_P7] f=%d frames=%lld allFrames=%lld marks=%lld needed=%zu of %zu", gs->frameNum, st.frames, st.allFrames, st.marks, nn, units.size() * losTypes.size());
+ 	}
+ 	marked.clear();
+ 	all = false;
+@@ -1186,8 +1051,6 @@ void CLosHandler::Update()
+ void CLosHandler::UpdateHeightMapSynced(SRectangle rect)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7: the recalc marks touch the instances
+-	BrP7::MarkAll();
+ 	// [barreplay] H94 (toggle 0x40000000): the sensor types on all threads. Each
+ 	// type's update touches only its own instances, cache and queues (and reads
+ 	// the instances' own fields), and does exactly what it did, in its own
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index 2cb04d7..0044ffc 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -79,10 +79,6 @@ public:
+ 	bool isCached;
+ 	bool isQueuedForUpdate;
+ 	bool isQueuedForTerraform;
+-
+-	// [barreplay] P7: recalculated in phase A, its old squares kept for phase B
+-	bool brKeepOld = false;
+-	int brOldIdx = -1;
+ };
+ 
+ 
+@@ -140,10 +136,6 @@ public:
+ 	// (each of its other paths returns with nothing written); reads only
+ 	bool BrNeedsUpdate(const CUnit* unit) const;
+ 
+-	// [barreplay] P7 (BrLosOverlap.h): Update() in two halves around the
+-	// script tick; phase A also runs the per-unit loop over <units>
+-	void BrPhaseA(const std::vector<CUnit*>& units);
+-	void BrPhaseB();
+ 
+ private:
+ 	//void PostLoad();
+@@ -204,11 +196,6 @@ private:
+ 	std::vector<SLosInstance*> losDeleted;
+ 	std::vector<SLosInstance*> losRecalc;
+ 
+-	// [barreplay] P7: phase A's lists are waiting for phase B; the squares the
+-	// recalculated instances must be removed with
+-	bool brPlanned = false;
+-	std::vector<std::pair<SLosInstance*, std::vector<SLosInstance::RLE>>> brOld;
+-
+ 	static constexpr int CACHE_SIZE = 4096;
+ };
+ 
+-- 
+2.53.0
+

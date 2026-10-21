@@ -1,0 +1,164 @@
+From a058be03d1d24db00ae90698ddd8f353d9f81aa3 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 11:00:38 +0000
+Subject: [PATCH 1/3] measure7: targeting-scan and aircraft-loop dependency
+ counters (measurement only)
+
+---
+ rts/Game/GameHelper.cpp                       | 16 ++++++++++--
+ rts/Net/NetCommands.cpp                       | 10 ++++++++
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 25 +++++++++++++++++++
+ 3 files changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index 37b0384..171a780 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -381,6 +381,7 @@ static inline void QueryUnits(TFilter filter, TQuery& query)
+ 	QuadFieldQuery qfQuery;
+ 	quadField.GetQuads(qfQuery, query.pos, query.radius);
+ 	const int tempNum = gs->GetTempNum();
++	brTgtCalls++;
+ 
+ 	for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) { //FIXME
+ 		if (!filter.Team(t))
+@@ -654,6 +655,9 @@ namespace {
+ 
+ 
+ 
++// [barreplay] measurement counters (measure7 branch only)
++long long brTgtCalls = 0, brTgtVisited = 0, brTgtLos = 0, brTgtRange = 0, brTgtTest = 0, brTgtLua = 0, brTgtLuaNo = 0;
++
+ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets)
+ {
+ 	const CUnit*  weaponOwner = weapon->owner;
+@@ -707,6 +711,7 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 					continue;
+ 
+ 				targetUnit->tempNum = tempNum;
++				brTgtVisited++;
+ 
+ 				// [barreplay] TestTarget (virtual, const, reads a dozen fields
+ 				// of the target) moved below the LOS and range rejections:
+@@ -725,17 +730,22 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 					targetPos = weapon->GetUnitPositionWithError(targetUnit);
+ 					targetPriority *= tgtPriorityMults[1];
+ 				} else {
++					brTgtLos++;
+ 					continue;
+ 				}
+ 
+ 				const float modRange = weapon->GetRange2D(rangeBoost, (targetPos.y - aimPosHeight) * heightMod);
+ 				const float sqDist2D = ownerPos.SqDistance2D(targetPos);
+ 
+-				if (sqDist2D > Square(modRange))
++				if (sqDist2D > Square(modRange)) {
++					brTgtRange++;
+ 					continue;
++				}
+ 
+-				if (!weapon->TestTarget(testPos, SWeaponTarget(targetUnit)))
++				if (!weapon->TestTarget(testPos, SWeaponTarget(targetUnit))) {
++					brTgtTest++;
+ 					continue;
++				}
+ 
+ 				const float3 worldTargetDir = (targetPos - ownerPos).SafeNormalize();
+ 				const float angleOffset =  (1.f - worldMainDir.dot(worldTargetDir));
+@@ -775,6 +785,8 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 				}
+ 
+ 				const bool allowTarget = eventHandler.AllowWeaponTarget(weaponOwner->id, targetUnit->id, weapon->weaponNum, weaponDef->id, &targetPriority);
++				brTgtLua++;
++				brTgtLuaNo += !allowTarget;
+ 
+ 				// Lua call may have changed tempNum, so needs to be set again
+ 				targetUnit->tempNum = tempNum;
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 0fc410b..5d418a2 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -23,6 +23,8 @@
+ // truncated right after the window for fast iteration. Zero effect unless the
+ // env vars are set; never touches synced state.
+ extern "C" void __gcov_dump(void) __attribute__((weak));
++extern long long brTgtCalls, brTgtVisited, brTgtLos, brTgtRange, brTgtTest, brTgtLua, brTgtLuaNo;
++extern long long brGmsUnits, brGmsAir, brGmsRng, brGmsTgtDep, brGmsNbrDep, brGmsNbrAny;
+ 
+ namespace {
+ 	inline long long brNowNs(clockid_t c) {
+@@ -721,6 +723,8 @@ void CGame::ClientReadNet()
+ 						if (about == g_brBench.start) {
+ 							g_brBench.parkHere();
+ 							g_brBench.countersOn();
++							brTgtCalls = brTgtVisited = brTgtLos = brTgtRange = brTgtTest = brTgtLua = brTgtLuaNo = 0;
++							brGmsUnits = brGmsAir = brGmsRng = brGmsTgtDep = brGmsNbrDep = brGmsNbrAny = 0;
+ 						}
+ 						const long long t0 = brNowNs(CLOCK_THREAD_CPUTIME_ID);
+ 						const long long w0 = brNowNs(CLOCK_MONOTONIC);
+@@ -743,6 +747,12 @@ void CGame::ClientReadNet()
+ 								if (FILE* f = fopen(g_brBench.out, "a")) { fputs(line, f); fclose(f); }
+ 							}
+ 							fputs(line, stderr); fflush(stderr);
++							{
++								char m[600];
++								snprintf(m, sizeof(m), "[BARREPLAY_MEASURE] tgtCalls=%lld visited=%lld losRej=%lld rangeRej=%lld testRej=%lld lua=%lld luaNo=%lld | gmsUnits=%lld air=%lld rngUsers=%lld tgtDep=%lld nbrAny=%lld nbrDep=%lld\n",
++									brTgtCalls, brTgtVisited, brTgtLos, brTgtRange, brTgtTest, brTgtLua, brTgtLuaNo, brGmsUnits, brGmsAir, brGmsRng, brGmsTgtDep, brGmsNbrAny, brGmsNbrDep);
++								if (g_brBench.out) { if (FILE* f = fopen(g_brBench.out, "a")) { fputs(m, f); fclose(f); } }
++							}
+ 							// An instrumented (-fprofile-generate) build writes its
+ 							// profile at exit, which _exit skips: dump it first, so a
+ 							// training run can stop right after a late-game window.
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index e142133..b31d20e 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -27,6 +27,10 @@ void GeneralMoveSystem::Init() {
+     Sim::systemUtils.OnPostLoad().connect<&CMoveMath::InitRangeIsBlockedHashes>();
+ }
+ 
++// [barreplay] measurement counters (measure7 branch only)
++long long brGmsUnits = 0, brGmsAir = 0, brGmsRng = 0, brGmsTgtDep = 0, brGmsNbrDep = 0, brGmsNbrAny = 0;
++static std::vector<int> brStamp;
++
+ void GeneralMoveSystem::Update() {
+     RECOIL_DETAILED_TRACY_ZONE;
+     auto view = Sim::registry.view<GeneralMoveType>();
+@@ -47,6 +51,25 @@ void GeneralMoveSystem::Update() {
+             ++brK;
+             CUnit* unit = unitHandler.GetUnit(unitId.value);
+             AMoveType* moveType = unit->moveType;
++            {
++                if (brStamp.size() <= size_t(unit->id)) brStamp.resize(unit->id + 1024, -1);
++                brGmsUnits++;
++                brGmsAir += (unit->unitDef->canfly ? 1 : 0);
++                if (unit->curTarget.type == Target_Unit && unit->curTarget.unit != nullptr) {
++                    const int tid = unit->curTarget.unit->id;
++                    if (size_t(tid) < brStamp.size() && brStamp[tid] == gs->frameNum) brGmsTgtDep++;
++                }
++                QuadFieldQuery qf;
++                quadField.GetUnitsExact(qf, unit->pos, unit->radius + 6.0f);
++                bool any = false, dep = false;
++                for (const CUnit* n: *qf.units) {
++                    if (n == unit) continue;
++                    any = true;
++                    if (size_t(n->id) < brStamp.size() && brStamp[n->id] == gs->frameNum) dep = true;
++                }
++                brGmsNbrAny += any; brGmsNbrDep += dep;
++            }
++            const auto brRng0 = gsRNG.GetGenState();
+ 
+             #ifndef NDEBUG
+             unit->SanityCheck();
+@@ -54,6 +77,8 @@ void GeneralMoveSystem::Update() {
+ 
+             if (moveType->Update())
+                 eventHandler.UnitMoved(unit);
++            brGmsRng += (gsRNG.GetGenState() != brRng0);
++            brStamp[unit->id] = gs->frameNum;
+ 
+             // this unit is not coming back, kill it now without any death
+             // sequence (s.t. deathScriptFinished becomes true immediately)
+-- 
+2.53.0
+

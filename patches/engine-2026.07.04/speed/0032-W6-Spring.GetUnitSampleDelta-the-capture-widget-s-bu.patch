@@ -1,0 +1,278 @@
+From 5d199407323a317dc28696f0efc78ab112672d4a Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 12:24:59 +0000
+Subject: [PATCH 32/43] =?UTF-8?q?W6:=20Spring.GetUnitSampleDelta=20?=
+ =?UTF-8?q?=E2=80=94=20the=20capture=20widget's=20bulk=20sample=20loop=20i?=
+ =?UTF-8?q?n=20the=20engine?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Lua/LuaEngineEventLog.cpp | 218 ++++++++++++++++++++++++++++++++++
+ rts/Lua/LuaEngineEventLog.h   |   1 +
+ 2 files changed, 219 insertions(+)
+
+diff --git a/rts/Lua/LuaEngineEventLog.cpp b/rts/Lua/LuaEngineEventLog.cpp
+index d1606bf..220888a 100644
+--- a/rts/Lua/LuaEngineEventLog.cpp
++++ b/rts/Lua/LuaEngineEventLog.cpp
+@@ -12,6 +12,7 @@
+ #include "Sim/Projectiles/ProjectileHandler.h"
+ #include "Sim/Units/Unit.h"
+ #include "Sim/Units/UnitDef.h"
++#include "Sim/Units/UnitDefHandler.h"
+ #include "Sim/Units/UnitHandler.h"
+ #include "Sim/Units/UnitTypes/Builder.h"
+ #include "Sim/Units/UnitTypes/Factory.h"
+@@ -22,6 +23,7 @@
+ #include "System/EventHandler.h"
+ 
+ #include <vector>
++#include <cmath>
+ 
+ namespace {
+ 
+@@ -224,6 +226,7 @@ bool LuaEngineEventLog::PushEntries(lua_State* L)
+ 	REGISTER_LUA_CFUNC(GetLoggedExplosions);
+ 	REGISTER_LUA_CFUNC(GetLoggedDamage);
+ 	REGISTER_LUA_CFUNC(GetUnitSampleData);
++	REGISTER_LUA_CFUNC(GetUnitSampleDelta);
+ 	REGISTER_LUA_CFUNC(GetLoggedReloads);
+ 	return true;
+ }
+@@ -393,3 +396,218 @@ int LuaEngineEventLog::GetUnitSampleData(lua_State* L)
+ 	lua_pushnumber(L, stride);
+ 	return 3;
+ }
++
++
++/***
++ * [barreplay] W6: the capture widget's re-simulation sample loop (full view,
++ * bulk read), in C++. Every value is computed with the same float operations
++ * the widget's Lua loop performs on the numbers Spring.GetUnitSampleData would
++ * return (lua_Number is float: x + 0.5, v * sampleEvery + 0.5, b * 255 + 0.5,
++ * floor, the same clamps), compared against a predictor state kept here instead
++ * of in the widget's tables, so the same units come out changed with the same
++ * columns, in GetAllUnits' order. The dead list (predictor entries not seen this
++ * sample) comes out in ascending id order where the Lua loop's pairs() order is
++ * arbitrary; the .brp decoder treats it as a set.
++ *
++ * GetUnitSampleDelta(allyTeams, sampleEvery, keyframe, frame, unknownTeam, shieldDefs, doVis, out)
++ * fills <out>: n, cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct (n
++ * entries each), dead, total, sid + sdef (recorded units whose def is in
++ * <shieldDefs>, for the widget's own shield read), nv, vid, vlo, vhi.
++ *
++ * @function Spring.GetUnitSampleDelta
++ */
++namespace {
++	struct BrSamplePrev {
++		float x = 0.0f, z = 0.0f, dvx = 0.0f, dvz = 0.0f, hp = 0.0f, maxhp = 0.0f, b = 0.0f, def = 0.0f, team = 0.0f, t = 0.0f;
++		int f = -1;
++		bool live = false;
++	};
++	struct BrVisPrev {
++		float lo = 0.0f, hi = 0.0f;
++		int f = -1;
++		bool live = false;
++	};
++	std::vector<BrSamplePrev> brPrev;
++	std::vector<BrVisPrev> brVisPrev;
++
++	// the widget's mathFloor(v + 0.5) with v and 0.5 as lua_Number (float)
++	inline float BrQ(float v) { return std::floor(v + 0.5f); }
++
++	// fill out[name] with arr[0..n) as numbers, reusing (and trimming) a table already there
++	void BrPutArray(lua_State* L, int outIdx, const char* name, const std::vector<float>& arr) {
++		lua_getfield(L, outIdx, name);
++		int prevLen = 0;
++		if (lua_istable(L, -1)) {
++			prevLen = lua_objlen(L, -1);
++		} else {
++			lua_pop(L, 1);
++			lua_createtable(L, arr.size(), 0);
++			lua_pushvalue(L, -1);
++			lua_setfield(L, outIdx, name);
++		}
++		const int t = lua_gettop(L);
++		for (size_t i = 0; i < arr.size(); ++i) {
++			lua_pushnumber(L, arr[i]);
++			lua_rawseti(L, t, int(i + 1));
++		}
++		for (int i = int(arr.size()) + 1; i <= prevLen; ++i) {
++			lua_pushnil(L);
++			lua_rawseti(L, t, i);
++		}
++		lua_pop(L, 1);
++	}
++}
++
++int LuaEngineEventLog::GetUnitSampleDelta(lua_State* L)
++{
++	if (!CLuaHandle::GetHandleFullRead(L) || !lua_istable(L, 8))
++		return 0;
++
++	std::vector<int> allyTeams;
++	if (lua_istable(L, 1)) {
++		const int n = lua_objlen(L, 1);
++		for (int i = 1; i <= n; i++) {
++			lua_rawgeti(L, 1, i);
++			allyTeams.push_back(lua_isnumber(L, -1) ? lua_toint(L, -1) : -1);
++			lua_pop(L, 1);
++		}
++	}
++	const float se = lua_tonumber(L, 2);
++	const bool keyframe = lua_toboolean(L, 3);
++	const int frame = lua_toint(L, 4);
++	const float unknownTeam = lua_tonumber(L, 5);
++	static std::vector<uint8_t> shieldDef;
++	shieldDef.assign(unitDefHandler->NumUnitDefs() + 1, 0);
++	if (lua_istable(L, 6)) {
++		const int n = lua_objlen(L, 6);
++		for (int i = 1; i <= n; i++) {
++			lua_rawgeti(L, 6, i);
++			const int d = lua_toint(L, -1);
++			if (d >= 0 && size_t(d) < shieldDef.size())
++				shieldDef[d] = 1;
++			lua_pop(L, 1);
++		}
++	}
++	const bool doVis = lua_toboolean(L, 7);
++	const int nva = doVis ? int(allyTeams.size()) : 0;
++
++	const auto& units = unitHandler.GetActiveUnits();
++	const size_t idCap = unitHandler.MaxUnits() + 1;
++	if (brPrev.size() < idCap) brPrev.resize(idCap);
++	if (brVisPrev.size() < idCap) brVisPrev.resize(idCap);
++
++	if (keyframe) {
++		for (auto& p: brPrev)
++			p.live = false;
++	}
++
++	static std::vector<float> cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct, dead, sid, sdef, vid, vlo, vhi;
++	for (auto* v: {&cid, &cdef, &cteam, &cx, &cz, &chp, &cmax, &cdvx, &cdvz, &cb, &ct, &dead, &sid, &sdef, &vid, &vlo, &vhi})
++		v->clear();
++
++	for (const CUnit* u: units) {
++		float buildee = 0.0f;
++		if (const CBuilder* b = dynamic_cast<const CBuilder*>(u); b != nullptr && b->curBuild) {
++			buildee = b->curBuild->id;
++		} else if (const CFactory* f = dynamic_cast<const CFactory*>(u); f != nullptr && f->curBuild) {
++			buildee = f->curBuild->id;
++		}
++		const float unitID = u->id;
++
++		float qx = BrQ(u->pos.x);
++		if (qx > 32767.0f) qx = 32767.0f; else if (qx < -32768.0f) qx = -32768.0f;
++		float qz = BrQ(u->pos.z);
++		if (qz > 32767.0f) qz = 32767.0f; else if (qz < -32768.0f) qz = -32768.0f;
++		float qhp = BrQ(u->health);
++		if (qhp < 0.0f) qhp = 0.0f;
++		float qmax = BrQ(u->maxHealth);
++		if (qmax < 0.0f) qmax = 0.0f;
++		float qdvx = std::floor(float(u->speed.x) * se + 0.5f);
++		if (qdvx > 32767.0f) qdvx = 32767.0f; else if (qdvx < -32768.0f) qdvx = -32768.0f;
++		float qdvz = std::floor(float(u->speed.z) * se + 0.5f);
++		if (qdvz > 32767.0f) qdvz = 32767.0f; else if (qdvz < -32768.0f) qdvz = -32768.0f;
++		float qb = std::floor(float(u->buildProgress) * 255.0f + 0.5f);
++		if (qb > 255.0f) qb = 255.0f; else if (qb < 0.0f) qb = 0.0f;
++		const float defID = u->unitDef->id;
++		float qdef = defID;
++		if (qdef > 65535.0f || qdef < 0.0f) qdef = 0.0f;
++		float qteam = u->team;
++		if (qteam > 255.0f || qteam < 0.0f) qteam = unknownTeam;
++		float qt = buildee;
++		if (qt > 65535.0f || qt < 0.0f) qt = 0.0f;
++
++		BrSamplePrev& p = brPrev[u->id];
++		if (p.live && !keyframe
++			&& p.dvx == qdvx && p.dvz == qdvz
++			&& p.x + qdvx == qx && p.z + qdvz == qz
++			&& p.hp == qhp && p.maxhp == qmax && p.b == qb
++			&& p.def == qdef && p.team == qteam && p.t == qt) {
++			p.x = qx; p.z = qz; p.f = frame;
++		} else {
++			cid.push_back(unitID); cdef.push_back(qdef); cteam.push_back(qteam);
++			cx.push_back(qx); cz.push_back(qz); chp.push_back(qhp); cmax.push_back(qmax);
++			cdvx.push_back(qdvx); cdvz.push_back(qdvz); cb.push_back(qb); ct.push_back(qt);
++			p.x = qx; p.z = qz; p.dvx = qdvx; p.dvz = qdvz;
++			p.hp = qhp; p.maxhp = qmax; p.def = qdef; p.team = qteam; p.b = qb; p.t = qt; p.f = frame;
++			p.live = true;
++		}
++
++		if (u->id <= 65535 && u->unitDef->id >= 0 && size_t(u->unitDef->id) < shieldDef.size() && shieldDef[u->unitDef->id]) {
++			sid.push_back(unitID);
++			sdef.push_back(defID);
++		}
++
++		if (doVis && u->id <= 65535) {
++			float lo = 0.0f, hi = 0.0f, scale = 1.0f;
++			for (int a = 1; a <= nva; ++a) {
++				const int at = allyTeams[a - 1];
++				const float bits = teamHandler.IsValidAllyTeam(at) ? float(u->losStatus[at]) : 0.0f;
++				const float m = bits - std::floor(bits / 4.0f) * 4.0f; // Lua 5.1 float %
++				if (a <= 8)
++					lo = lo + m * scale;
++				else
++					hi = hi + m * scale;
++				scale = (a == 8) ? 1.0f : scale * 4.0f;
++			}
++			BrVisPrev& v = brVisPrev[u->id];
++			if (!v.live) {
++				v.lo = lo; v.hi = hi; v.f = frame; v.live = true;
++				vid.push_back(unitID); vlo.push_back(lo); vhi.push_back(hi);
++			} else {
++				if (keyframe || v.lo != lo || v.hi != hi) {
++					vid.push_back(unitID); vlo.push_back(lo); vhi.push_back(hi);
++				}
++				v.lo = lo; v.hi = hi; v.f = frame;
++			}
++		}
++	}
++
++	if (!keyframe) {
++		for (size_t id = 0; id < brPrev.size(); ++id) {
++			BrSamplePrev& p = brPrev[id];
++			if (p.live && p.f != frame) {
++				dead.push_back(float(id));
++				p.live = false;
++			}
++		}
++	}
++	if (doVis) {
++		for (auto& v: brVisPrev) {
++			if (v.live && v.f != frame)
++				v.live = false;
++		}
++	}
++
++	const int out = 8;
++	BrPutArray(L, out, "cid", cid); BrPutArray(L, out, "cdef", cdef); BrPutArray(L, out, "cteam", cteam);
++	BrPutArray(L, out, "cx", cx); BrPutArray(L, out, "cz", cz); BrPutArray(L, out, "chp", chp);
++	BrPutArray(L, out, "cmax", cmax); BrPutArray(L, out, "cdvx", cdvx); BrPutArray(L, out, "cdvz", cdvz);
++	BrPutArray(L, out, "cb", cb); BrPutArray(L, out, "ct", ct); BrPutArray(L, out, "dead", dead);
++	BrPutArray(L, out, "sid", sid); BrPutArray(L, out, "sdef", sdef);
++	BrPutArray(L, out, "vid", vid); BrPutArray(L, out, "vlo", vlo); BrPutArray(L, out, "vhi", vhi);
++	lua_pushnumber(L, cid.size()); lua_setfield(L, out, "n");
++	lua_pushnumber(L, vid.size()); lua_setfield(L, out, "nv");
++	lua_pushnumber(L, units.size()); lua_setfield(L, out, "total");
++	lua_pushboolean(L, true);
++	return 1;
++}
+diff --git a/rts/Lua/LuaEngineEventLog.h b/rts/Lua/LuaEngineEventLog.h
+index bdf2193..067b3b0 100644
+--- a/rts/Lua/LuaEngineEventLog.h
++++ b/rts/Lua/LuaEngineEventLog.h
+@@ -62,6 +62,7 @@ private:
+ 	static int GetLoggedExplosions(lua_State* L);
+ 	static int GetLoggedDamage(lua_State* L);
+ 	static int GetUnitSampleData(lua_State* L);
++	static int GetUnitSampleDelta(lua_State* L);
+ 	static int GetLoggedReloads(lua_State* L);
+ };
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,172 @@
+From e23d847f5b8779621f2440118d5ed41d3077df1e Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 23:47:52 +0000
+Subject: [PATCH] [barreplay] P8: Lua writes in the loop counted by name
+ (BARREPLAY_P8_STATS); with toggle2 0x800000 the data-only writes (rules
+ params, team resources) make no unit ready
+
+---
+ rts/Lua/LuaUtils.cpp            | 21 +++++++++++++++++++--
+ rts/Lua/LuaUtils.h              | 10 ++++++++--
+ rts/Sim/Units/BrWeaponVectors.h |  9 +++++++++
+ rts/Sim/Units/UnitHandler.cpp   | 26 ++++++++++++++++++++++++++
+ 4 files changed, 62 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index 499e350..d1d18ea 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -17,7 +17,8 @@ unsigned g_brLuaWrites = 0;
+ int BrLuaDrainingCall(lua_State* L)
+ {
+ 	++g_brLuaWrites;
+-	BrP8::EnsureAll(); // [barreplay] P8: Lua can change anything a weapon vector reads
++	// [barreplay] P8: Lua can change anything a weapon vector reads
++	BrP8::LuaWrite(static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2))), lua_toboolean(L, lua_upvalueindex(3)));
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	// [barreplay] P7: a Lua write in the script tick can change any LOS input
+ 	BrP7::MarkAll();
+@@ -25,13 +26,29 @@ int BrLuaDrainingCall(lua_State* L)
+ 	return f(L);
+ }
+ 
++// [barreplay] P8: synced writes that change only Lua data (rules params) or a
++// team's resources, neither of which any weapon vector reads
++bool BrLuaDataWrite(const char* key)
++{
++	static const char* const names[] = {
++		"SetGameRulesParam", "SetTeamRulesParam", "SetUnitRulesParam", "SetFeatureRulesParam", "SetPlayerRulesParam",
++		"AddTeamResource", "UseTeamResource", "SetTeamResource", "SetTeamShareLevel", "ShareTeamResource",
++		"AddUnitResource", "UseUnitResource",
++	};
++	for (const char* n: names)
++		if (std::strcmp(n, key) == 0)
++			return true;
++	return false;
++}
++
+ // the Lua unit scripts' functions: pieces, and values that go through
+ // CUnitScript::SetUnitVal and the engine's own write paths, all of which mark
+ // what they change for P7 themselves
+ int BrLuaDrainingCallLus(lua_State* L)
+ {
+ 	++g_brLuaWrites;
+-	BrP8::EnsureAll(); // [barreplay] P8: Lua can change anything a weapon vector reads
++	// [barreplay] P8: Lua can change anything a weapon vector reads
++	BrP8::LuaWrite(static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2))), false);
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	const lua_CFunction f = reinterpret_cast<lua_CFunction>(lua_touserdata(L, lua_upvalueindex(1)));
+ 	return f(L);
+diff --git a/rts/Lua/LuaUtils.h b/rts/Lua/LuaUtils.h
+index 5d43e22..ebf5346 100644
+--- a/rts/Lua/LuaUtils.h
++++ b/rts/Lua/LuaUtils.h
+@@ -376,11 +376,16 @@ static inline void LuaPushString(lua_State* L, const string& str) {
+ // pipelined target searches; Lua that only reads cannot see them running
+ int BrLuaDrainingCall(lua_State* L);
+ int BrLuaDrainingCallLus(lua_State* L);
++// [barreplay] P8: the writes that change only Lua data or team resources
++bool BrLuaDataWrite(const char* key);
+ static inline void BrPushDrainingRawNamedCFunc(lua_State* L, const char* key, lua_CFunction func)
+ {
+ 	lua_pushstring(L, key);
+ 	lua_pushlightuserdata(L, reinterpret_cast<void*>(func));
+-	lua_pushcclosure(L, BrLuaDrainingCall, 1);
++	// [barreplay] P8: the name (a literal) and whether it writes data only
++	lua_pushlightuserdata(L, const_cast<char*>(key));
++	lua_pushboolean(L, BrLuaDataWrite(key));
++	lua_pushcclosure(L, BrLuaDrainingCall, 3);
+ 	lua_rawset(L, -3);
+ }
+ // the Lua unit scripts' variant (no P7 mark-all; see LuaUtils.cpp)
+@@ -388,7 +393,8 @@ static inline void BrPushDrainingRawNamedCFuncLus(lua_State* L, const char* key,
+ {
+ 	lua_pushstring(L, key);
+ 	lua_pushlightuserdata(L, reinterpret_cast<void*>(func));
+-	lua_pushcclosure(L, BrLuaDrainingCallLus, 1);
++	lua_pushlightuserdata(L, const_cast<char*>(key)); // [barreplay] P8: the name
++	lua_pushcclosure(L, BrLuaDrainingCallLus, 2);
+ 	lua_rawset(L, -3);
+ }
+ 
+diff --git a/rts/Sim/Units/BrWeaponVectors.h b/rts/Sim/Units/BrWeaponVectors.h
+index b9b6a5b..38bbb5f 100644
+--- a/rts/Sim/Units/BrWeaponVectors.h
++++ b/rts/Sim/Units/BrWeaponVectors.h
+@@ -42,6 +42,7 @@ namespace BrP8 {
+ 	void EnsureSlow(const CUnit* unit);
+ 	void EnsureObjSlow(const CSolidObject* obj);
+ 	void EnsureAllSlow();
++	void LuaWriteSlow(const char* name, bool dataOnly);
+ 
+ 	inline void Ensure(const CUnit* unit) {
+ 		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
+@@ -57,6 +58,14 @@ namespace BrP8 {
+ 		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
+ 			EnsureAllSlow();
+ 	}
++	// a Lua write function is entered: every unit made ready, except, with
++	// toggle2 0x800000, for the writes that touch only Lua data or team
++	// resources (rules params, resources: nothing a weapon vector reads);
++	// counted by name for BARREPLAY_P8_STATS
++	inline void LuaWrite(const char* name, bool dataOnly) {
++		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
++			LuaWriteSlow(name, dataOnly);
++	}
+ }
+ 
+ #endif
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index bacb7ad..bbd34a6 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "UnitHandler.h"
+ #include "BrWeaponVectors.h"
++#include <algorithm>
++#include <unordered_map>
+ #include <cstring>
+ #include <immintrin.h>
+ #include <memory>
+@@ -957,6 +959,21 @@ namespace BrP8 {
+ 		EnsureIdx(size_t(k));
+ 	}
+ 
++	namespace { std::unordered_map<const char*, long long> luaTally; long long luaAll = 0, luaSkipped = 0; }
++
++	void LuaWriteSlow(const char* name, bool dataOnly)
++	{
++		static const bool stats = (getenv("BARREPLAY_P8_STATS") != nullptr);
++		if (stats && name != nullptr)
++			luaTally[name] += 1;
++		if (dataOnly && (g_brToggles2 & 0x800000) != 0) {
++			luaSkipped += 1;
++			return;
++		}
++		luaAll += 1;
++		EnsureAllSlow();
++	}
++
+ 	void EnsureAllSlow()
+ 	{
+ 		st.all.fetch_add(1, std::memory_order_relaxed);
+@@ -1013,6 +1030,15 @@ namespace BrP8 {
+ 			LOG("[BR_P8] f=%d pipelined frames=%lld avgUnits=%.0f byMain/frame=%.1f waits/frame=%.2f ensureAll/frame=%.2f",
+ 				gs->frameNum, st.frames, double(st.units) / st.frames, double(st.byMain.load()) / st.frames,
+ 				double(st.waits.load()) / st.frames, double(st.all.load()) / st.frames);
++			std::vector<std::pair<long long, const char*>> top;
++			for (const auto& e: luaTally)
++				top.emplace_back(e.second, e.first);
++			std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++			char buf[512];
++			int k = snprintf(buf, sizeof(buf), "[BR_P8] f=%d Lua writes in the loop: ensureAll=%lld skipped(data)=%lld top:", gs->frameNum, luaAll, luaSkipped);
++			for (size_t j = 0; j < top.size() && j < 8 && k < int(sizeof(buf)); ++j)
++				k += snprintf(buf + k, sizeof(buf) - k, " %s=%lld", top[j].second, top[j].first);
++			LOG("%s", buf);
+ 		}
+ 	}
+ }
+-- 
+2.53.0
+

@@ -1,0 +1,59 @@
+From b3892f9e6499f129a1b0dd020bc8cb047e213f45 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 17:43:04 +0000
+Subject: [PATCH 41/43] H79: GetQuads finds each row's run of quads by its two
+ ends (toggle 0x1000)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Misc/QuadField.cpp | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 4a3dbb4..720dcda 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -154,6 +154,40 @@ void CQuadField::GetQuads(QuadFieldQuery& qfq, float3 pos, float radius)
+ 	// qsx and qsz are always equal
+ 	const float maxSqLength = (radius + quadSizeX * 0.72f) * (radius + quadSizeZ * 0.72f);
+ 
++	// [barreplay] H79 (toggle 0x1000): the same quads in the same order, found
++	// per row instead of tested one by one. In a row the distance test is
++	// dx*dx + dz*dz < maxSqLength with dz fixed, and dx = pos.x - (quad centre x)
++	// falls as x grows; IEEE rounding is monotone, so dx*dx (and the sum) first
++	// does not grow, then does not shrink, and the quads that pass form one
++	// unbroken run. Find its two ends with the very same float expressions and
++	// push the run.
++	if ((g_brToggles & 0x1000) != 0) {
++		const float halfX = quadSizeX * 0.5f;
++		const float halfZ = quadSizeZ * 0.5f;
++		const auto passes = [&](int x, float dzSq) {
++			const float dx = pos.x - (x * quadSizeX + halfX);
++			return ((dx * dx + dzSq) < maxSqLength);
++		};
++		for (int z = min.y; z <= max.y; ++z) {
++			const float dz = pos.z - (z * quadSizeZ + halfZ);
++			const float dzSq = dz * dz;
++			int xa = min.x;
++			while (xa <= max.x && !passes(xa, dzSq))
++				++xa;
++			if (xa > max.x)
++				continue;
++			int xb = max.x;
++			while (xb > xa && !passes(xb, dzSq))
++				--xb;
++			for (int x = xa; x <= xb; ++x) {
++				assert(x < numQuadsX);
++				assert(z < numQuadsZ);
++				qfq.quads->push_back(z * numQuadsX + x);
++			}
++		}
++		return;
++	}
++
+ 	for (int z = min.y; z <= max.y; ++z) {
+ 		for (int x = min.x; x <= max.x; ++x) {
+ 			assert(x < numQuadsX);
+-- 
+2.53.0
+

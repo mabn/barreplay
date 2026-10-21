@@ -77,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.12.0"
-local widgetDate = "2026-10-15"
+local widgetVersion = "1.13.1"
+local widgetDate = "2026-10-21"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -138,6 +138,33 @@ local engineLog = {
 	explosions = false, -- switched on in Initialize
 	damage = false,
 	dropped = 0, -- events the engine dropped from a full buffer
+	-- Spring.GetUnitSampleData (same patched engine, revision 4+): every
+	-- unit's sampled state in ONE call — the values GetUnitTeam/Position/
+	-- DefID/Health/Velocity/IsBuilding/LosState return under full read, in
+	-- GetAllUnits' order — instead of ~8 Lua->C calls per unit per sample.
+	sample = resim and type(Spring.GetUnitSampleData) == "function" and Spring.GetUnitSampleData or nil,
+	-- Spring.GetLoggedReloads (same engine): every change of a weapon's
+	-- reload frame, so launcher slots read a table instead of calling
+	-- GetUnitWeaponState per ready slot per frame. Switched on with the
+	-- projectile log (third flag of SetEngineEventLog).
+	reloadsAvailable = resim and type(Spring.GetLoggedReloads) == "function",
+	reloads = false,
+	reloadBuf = {},
+	sampleBuf = {},
+	-- Spring.GetUnitSampleDelta (patched engine): the bulk sample loop run in
+	-- the engine, predictor state kept there, only the changed rows coming
+	-- back. Engaged and left at a keyframe, where both predictors start over.
+	delta = resim and type(Spring.GetUnitSampleDelta) == "function" and Spring.GetUnitSampleDelta or nil,
+	deltaOn = false,
+	deltaOut = {},
+	-- Spring.DrainLoggedDamageColumns / TakeLoggedDamageColumns (patched
+	-- engine): drainDamage + recordHitAt run in the engine, which keeps the
+	-- H record's columns and hands them over packed, the same bytes. Used
+	-- once the damage log is on (columns), engineHits counting what it holds.
+	columnsAvailable = resim and type(Spring.DrainLoggedDamageColumns) == "function"
+		and type(Spring.TakeLoggedDamageColumns) == "function",
+	columns = false,
+	engineHits = 0,
 }
 -- Output path for resim mode. Spring's LuaIO sandbox rejects absolute paths
 -- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
@@ -804,6 +831,22 @@ local function buildVisAllies()
 	end
 end
 
+-- losMaskFrom is losMask over the raw bits a bulk sample carries for the
+-- same visAllies (engineLog.sample), one per ally team after offset.
+local function losMaskFrom(bd, offset)
+	local lo, hi, scale = 0, 0, 1
+	for i = 1, #visAllies do
+		local bits = bd[offset + i]
+		if i <= 8 then
+			lo = lo + (bits % 4) * scale
+		else
+			hi = hi + (bits % 4) * scale
+		end
+		scale = (i == 8) and 1 or scale * 4
+	end
+	return lo, hi
+end
+
 local function losMask(unitID)
 	local lo, hi, scale = 0, 0, 1
 	for i = 1, #visAllies do
@@ -910,7 +953,29 @@ local shields = (function()
 		}))
 	end
 
-	return { read = read, write = write }
+	-- isShieldDef: whether read can return anything for this def (read's own
+	-- first checks), so a loop can skip the call for every other unit.
+	local function isShieldDef(defID)
+		return spGetUnitShieldState ~= nil and fullOf(defID) ~= false
+	end
+
+	-- defList: every def isShieldDef accepts (for the engine-side sample loop)
+	local defs = nil
+	local function defList()
+		if defs == nil then
+			defs = {}
+			if spGetUnitShieldState ~= nil and UnitDefs then
+				for defID, _ in pairs(UnitDefs) do
+					if fullOf(defID) ~= false then
+						defs[#defs + 1] = defID
+					end
+				end
+			end
+		end
+		return defs
+	end
+
+	return { read = read, write = write, isShieldDef = isShieldDef, defList = defList }
 end)()
 
 -- noteView keeps myAllyTeam current and, in the uploader, writes a "view"
@@ -950,11 +1015,19 @@ local function sample(frame)
 	local spec, fullView = spGetSpectatingState()
 	local all = spec and fullView
 	noteView(frame, spec, fullView)
-	local units = spGetAllUnits()
-	local total = #units
-
+	-- Full view on a patched engine: the whole sample in one engine call
+	-- (engineLog.sample). Same values, same order, so the same stream.
 	local keyframe = (sampleIdx % keyframeEvery == 0)
 	sampleIdx = sampleIdx + 1
+	local delta = all and engineLog.delta ~= nil
+	if delta ~= engineLog.deltaOn then
+		keyframe = true -- switching predictors: both start over here
+		engineLog.deltaOn = delta
+	end
+	local bulk = all and engineLog.sample ~= nil and not delta
+	local units = (not bulk and not delta) and spGetAllUnits() or nil
+	local total = units and #units or 0
+
 	if keyframe then
 		prev = {} -- decoder state resets at a keyframe; mirror it
 	end
@@ -977,18 +1050,143 @@ local function sample(frame)
 	if doVis and visAllies == nil then
 		buildVisAllies()
 	end
+	if delta then
+		-- The bulk loop below, run in the engine (same values, same float
+		-- arithmetic, same order). Shields are still read here, in order.
+		local o = engineLog.deltaOut
+		engineLog.delta(doVis and visAllies or {}, sampleEvery, keyframe, frame, unknownTeam, shields.defList(), doVis, o)
+		n, recorded = o.n, o.total
+		cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct =
+			o.cid, o.cdef, o.cteam, o.cx, o.cz, o.chp, o.cmax, o.cdvx, o.cdvz, o.cb, o.ct
+		local ids, defs, shieldRead = o.sid, o.sdef, shields.read
+		for k = 1, #ids do
+			local sp, son = shieldRead(ids[k], defs[k], frame)
+			if sp ~= nil then
+				local j = #sid + 1
+				sid[j], spow[j], sflag[j] = ids[k], sp, son and 1 or 0
+			end
+		end
+		nv, vid, vlo, vhi = o.nv, o.vid, o.vlo, o.vhi
+	end
+	local bd, stride = nil, 0
+	if bulk then
+		local cnt
+		bd, cnt, stride = engineLog.sample(doVis and visAllies or {}, engineLog.sampleBuf)
+		engineLog.sampleBuf = bd
+		total = cnt
+	end
+
+	if bd then
+		-- The re-simulation's loop over a bulk sample (full view, patched
+		-- engine): the general loop below with what cannot happen here taken
+		-- out — every unit is recorded (all; nothing is buried in a re-sim),
+		-- there are no enemies or last-known entries (lastKnown was emptied
+		-- above), and the bulk read never returns nil. Same quantization, same
+		-- predictor, same order: the same stream (TestEngineLogMatchesResim).
+		local shieldRead, isShieldDef = shields.read, shields.isShieldDef
+		local nva = doVis and #visAllies or 0
+		local se = sampleEvery
+		for i = 1, total do
+			local base = (i - 1) * stride
+			local unitID = bd[base + 1]
+			recorded = recorded + 1
+			local qx = mathFloor(bd[base + 4] + 0.5)
+			if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
+			local qz = mathFloor(bd[base + 5] + 0.5)
+			if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
+			local qhp = mathFloor(bd[base + 6] + 0.5)
+			if qhp < 0 then qhp = 0 end
+			local qmax = mathFloor(bd[base + 7] + 0.5)
+			if qmax < 0 then qmax = 0 end
+			local qdvx = mathFloor(bd[base + 9] * se + 0.5)
+			if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
+			local qdvz = mathFloor(bd[base + 10] * se + 0.5)
+			if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
+			local qb = mathFloor(bd[base + 8] * 255 + 0.5)
+			if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
+			local defID = bd[base + 3]
+			local qdef = defID
+			if qdef > 65535 or qdef < 0 then qdef = 0 end
+			local qteam = bd[base + 2]
+			if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+			local qt = bd[base + 11]
+			if qt > 65535 or qt < 0 then qt = 0 end
+			local p = prev[unitID]
+			if p ~= nil and not keyframe
+				and p.dvx == qdvx and p.dvz == qdvz
+				and p.x + qdvx == qx and p.z + qdvz == qz
+				and p.hp == qhp and p.maxhp == qmax and p.b == qb
+				and p.def == qdef and p.team == qteam and p.t == qt then
+				p.x, p.z, p.f = qx, qz, frame
+			else
+				n = n + 1
+				cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
+				cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
+				cdvx[n], cdvz[n], cb[n], ct[n] = qdvx, qdvz, qb, qt
+				if p == nil then
+					prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
+						hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, t = qt, f = frame }
+				else
+					p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
+					p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = qhp, qmax, qdef, qteam, qb, qt, frame
+				end
+			end
+			if unitID <= 65535 and isShieldDef(defID) then
+				local sp, son = shieldRead(unitID, defID, frame)
+				if sp ~= nil then
+					local k = #sid + 1
+					sid[k], spow[k], sflag[k] = unitID, sp, son and 1 or 0
+				end
+			end
+			if doVis and unitID <= 65535 then
+				local lo, hi, scale = 0, 0, 1
+				for a = 1, nva do
+					local bits = bd[base + 11 + a]
+					if a <= 8 then
+						lo = lo + (bits % 4) * scale
+					else
+						hi = hi + (bits % 4) * scale
+					end
+					scale = (a == 8) and 1 or scale * 4
+				end
+				local v = visPrev[unitID]
+				if v == nil then
+					visPrev[unitID] = { lo = lo, hi = hi, f = frame }
+					nv = nv + 1
+					vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
+				else
+					if keyframe or v.lo ~= lo or v.hi ~= hi then
+						nv = nv + 1
+						vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
+					end
+					v.lo, v.hi, v.f = lo, hi, frame
+				end
+			end
+		end
+		total = 0 -- the general loop below has nothing left to do
+	end
 
 	for i = 1, total do
-		local unitID = units[i]
-		local team = spGetUnitTeam(unitID)
+		local base = (i - 1) * stride
+		local unitID = bd and bd[base + 1] or units[i]
+		local team
+		if bd then team = bd[base + 2] else team = spGetUnitTeam(unitID) end
 		local isAlly = (team ~= nil and allyTeamOf[team] == myAllyTeam)
 		if (all or isAlly or recordEnemies)
 			and (buried[unitID] == nil or unburied(unitID, team)) then
 			local isEnemy = recordEnemies and not all and not isAlly
 			local g = isEnemy and lastKnown[unitID] or nil
-			local x, y, z = spGetUnitPosition(unitID)
-			local defID = spGetUnitDefID(unitID)
-			local hp, maxHp, _, _, buildProgress = spGetUnitHealth(unitID)
+			local x, z, defID, hp, maxHp, buildProgress
+			if bd then
+				defID, x, z = bd[base + 3], bd[base + 4], bd[base + 5]
+				hp, maxHp, buildProgress = bd[base + 6], bd[base + 7], bd[base + 8]
+			else
+				local _y
+				x, _y, z = spGetUnitPosition(unitID)
+				defID = spGetUnitDefID(unitID)
+				local _p, _c
+				hp, maxHp, _p, _c, buildProgress = spGetUnitHealth(unitID)
+			end
 			if hp ~= nil and hp <= 0 and not resim then
 				-- Readable but dead: the engine still holds a killed unit for its
 				-- death sequence. Bury it here rather than waiting for the
@@ -1005,10 +1203,17 @@ local function sample(frame)
 				buried[unitID] = { x = x, z = z, def = defID, team = team }
 				lastKnown[unitID] = nil
 			else
-				local vx, vy, vz = spGetUnitVelocity(unitID)
-				-- Build/assist/repair target (nil for non-builders, idle
-				-- builders, and units the widget cannot read).
-				local tgt = spGetUnitIsBuilding ~= nil and spGetUnitIsBuilding(unitID) or nil
+				local vx, vz, tgt
+				if bd then
+					-- the bulk read's "no buildee" is 0, which encodes as nil does
+					vx, vz, tgt = bd[base + 9], bd[base + 10], bd[base + 11]
+				else
+					local _vy
+					vx, _vy, vz = spGetUnitVelocity(unitID)
+					-- Build/assist/repair target (nil for non-builders, idle
+					-- builders, and units the widget cannot read).
+					tgt = spGetUnitIsBuilding ~= nil and spGetUnitIsBuilding(unitID) or nil
+				end
 				recorded = recorded + 1
 				-- Radar-only enemies read back nils (def/health unreadable, the
 				-- position wobbled): carry the last-known identity/health from
@@ -1086,7 +1291,12 @@ local function sample(frame)
 					end
 				end
 				if doVis and unitID <= 65535 then
-					local lo, hi = losMask(unitID)
+					local lo, hi
+					if bd then
+						lo, hi = losMaskFrom(bd, base + 11)
+					else
+						lo, hi = losMask(unitID)
+					end
 					local v = visPrev[unitID]
 					if v == nil then
 						visPrev[unitID] = { lo = lo, hi = hi, f = frame }
@@ -1113,8 +1323,8 @@ local function sample(frame)
 
 	-- Dead list: every predictor entry not seen this sample. (After a keyframe
 	-- reset there are no stale entries by construction.)
-	local dead = {}
-	if not keyframe then
+	local dead = delta and engineLog.deltaOut.dead or {}
+	if not keyframe and not delta then
 		for id, p in pairs(prev) do
 			if p.f ~= frame then
 				dead[#dead + 1] = id
@@ -1471,6 +1681,27 @@ function engineLog.drainDamage()
 	if not engineLog.damage then
 		return
 	end
+	if engineLog.columns then
+		while true do
+			local added, full, dropped, seen, named, weapon, cause, fromProj =
+				Spring.DrainLoggedDamageColumns(hitStart, 60000)
+			if added == nil then
+				return -- no full read (yet): the log keeps it for the next drain
+			end
+			engineLog.engineHits = engineLog.engineHits + added
+			hitTotal = hitTotal + added
+			engineLog.dropped = engineLog.dropped + dropped
+			dmgSeen = dmgSeen + seen
+			dmgNamedAttacker = dmgNamedAttacker + named
+			dmgNamedWeapon = dmgNamedWeapon + weapon
+			dmgEngineCause = dmgEngineCause + cause
+			dmgFromProjectile = dmgFromProjectile + fromProj
+			if not full then
+				return
+			end
+			flushDamage(spGetGameFrame(), true) -- recordHitAt's full buffer
+		end
+	end
 	local v, n, dropped = Spring.GetLoggedDamage(engineLog.dmgBuf)
 	if v == nil then
 		return -- no full read (yet): the log keeps it for the next drain
@@ -1522,7 +1753,13 @@ flushDamage = function(frame, force)
 		end
 	end
 	local b = hits
-	if b.n > 0 then
+	if engineLog.columns then
+		if engineLog.engineHits > 0 then
+			writeRecord("H", PackU32({ hitStart }) .. PackU32({ engineLog.engineHits })
+				.. Spring.TakeLoggedDamageColumns())
+			engineLog.engineHits = 0
+		end
+	elseif b.n > 0 then
 		writeRecord("H", table.concat({
 			PackU32({ hitStart }), PackU32({ b.n }),
 			PackU16(b.df), PackU16(b.v), PackU16(b.vd), PackU8(b.vt),
@@ -1914,6 +2151,13 @@ local projectiles = (function()
 	local boomAt = {}    -- projectileID -> frame an interceptor targeting it exploded
 	local closedRow = {} -- projectileID -> { buf, n, f }: a track that closed this frame or the last
 	local dyingTeam = {} -- unitID -> team, set by UnitDestroyed for the blast that follows
+	-- With the reload log every change of a slot's reload frame arrives through
+	-- drainReloads, so projectileFrame visits only the slots whose visit can do
+	-- something (visitSlots): touched by the log this frame, due (the log moved
+	-- cur while rf was still ahead; due[rf] picks it up when rf is reached), in a
+	-- launch window, or polled (no reading to go by). ready once a full walk has
+	-- built the sets with the log on.
+	local ev = { ready = false, touched = {}, due = {}, win = {}, polled = {} }
 
 	local function setFlag(flags, bit) -- bit is a power of two; Lua 5.1 has no bit ops
 		if (flags % (bit * 2)) >= bit then
@@ -1929,7 +2173,13 @@ local projectiles = (function()
 		end
 		local L = { team = team, slots = {} }
 		for i, info in ipairs(slots) do
-			L.slots[i] = { info = info, rf = spGetUnitWeaponState(unitID, info.slot, "reloadFrame"), untilF = -1 }
+			local rf = spGetUnitWeaponState(unitID, info.slot, "reloadFrame")
+			-- cur: the engine's current value, kept by drainReloads
+			local s = { info = info, rf = rf, cur = rf, untilF = -1, unit = unitID, idx = i, L = L }
+			L.slots[i] = s
+			if rf == nil and ev.ready then
+				ev.polled[s] = true
+			end
 		end
 		launchers[unitID] = L
 	end
@@ -2239,20 +2489,130 @@ local projectiles = (function()
 		end
 	end
 
+	-- drainReloads applies the reload-frame changes the engine logged since
+	-- the last frame to the launcher slots (engine weaponNum is 0-based, the
+	-- Lua weapon index 1-based). Every write of reloadStatus is logged, so a
+	-- slot's cur is what GetUnitWeaponState would return right now.
+	local function drainReloads()
+		if not engineLog.reloads then
+			return
+		end
+		local v, n = Spring.GetLoggedReloads(engineLog.reloadBuf)
+		if v == nil then
+			return
+		end
+		engineLog.reloadBuf = v
+		for i = 0, n - 1 do
+			local o = i * 3
+			local L = launchers[v[o + 1]]
+			if L then
+				local slot = v[o + 2] + 1
+				for _, s in ipairs(L.slots) do
+					if s.info.slot == slot then
+						s.cur = v[o + 3]
+						ev.touched[#ev.touched + 1] = s
+					end
+				end
+			end
+		end
+	end
+
+	local function slotBefore(a, b)
+		if a.unit ~= b.unit then
+			return a.unit < b.unit
+		end
+		return a.idx < b.idx
+	end
+
+	-- visitSlots is projectileFrame's walk over every launcher slot, for the
+	-- slots where it does anything (see ev): a slot left out has cur == rf (or
+	-- rf still ahead with nothing logged since), so the walk would read rf back
+	-- unchanged, and no launch window, so it would look for nothing. Visited in
+	-- (unit, slot) order; the walk's pairs() order is arbitrary anyway, and the
+	-- .brp sorts tracks by birth and id.
+	local function visitSlots(frame)
+		local seen, list = {}, {}
+		local function add(s)
+			if not seen[s] then
+				seen[s] = true
+				list[#list + 1] = s
+			end
+		end
+		for i = 1, #ev.touched do
+			add(ev.touched[i])
+		end
+		ev.touched = {}
+		local d = ev.due[frame]
+		if d then
+			ev.due[frame] = nil
+			for i = 1, #d do
+				add(d[i])
+			end
+		end
+		for s in pairs(ev.win) do
+			add(s)
+		end
+		for s in pairs(ev.polled) do
+			add(s)
+		end
+		table.sort(list, slotBefore)
+		local win, polled, due = ev.win, ev.polled, ev.due
+		for i = 1, #list do
+			local s = list[i]
+			local unitID, L = s.unit, s.L
+			if launchers[unitID] == L then
+				-- the walk's body (projectileFrame), with the log
+				local rf = (s.rf == nil or frame >= s.rf)
+					and (s.cur or spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame")) or s.rf
+				if rf ~= nil and rf ~= s.rf then
+					s.rf = rf
+					if rf > frame then
+						if s.info.cls == CLS_BEAM then
+							openBeam(unitID, s.info.wd, frame)
+						else
+							s.untilF = frame + s.info.window
+						end
+					end
+				end
+				if s.untilF >= frame then
+					findLaunches(unitID, L.team, s.info, frame)
+				end
+				win[s] = (s.untilF > frame) or nil
+				polled[s] = (s.cur == nil) or nil
+				if s.cur ~= nil and s.rf ~= nil and s.cur ~= s.rf and s.rf > frame then
+					local b = due[s.rf]
+					if b == nil then
+						b = {}
+						due[s.rf] = b
+					end
+					b[#b + 1] = s
+				end
+			else
+				win[s], polled[s] = nil, nil
+			end
+		end
+	end
+
 	-- projectileFrame runs in GameFramePost: after the frame's unit and
 	-- projectile updates, so a weapon that fired this frame has its new
 	-- projectiles in the world and its reload frame moved. The frame's
 	-- explosions go first, as the callin delivered them during the sim.
 	local function projectileFrame(frame)
 		drainExplosions()
+		drainReloads()
+		local useLog = engineLog.reloads
 		local t0 = hiResTimer and spGetTimer() or nil
+		if useLog and ev.ready then
+			visitSlots(frame)
+		else
+		ev.touched = {}
 		for unitID, L in pairs(launchers) do
 			for _, s in ipairs(L.slots) do
 				-- A weapon cannot fire before its reload frame: until then
 				-- there is nothing to read (the cost here is per slot per
 				-- frame, so this is most of it).
 				local rf = (s.rf == nil or frame >= s.rf)
-					and spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame") or s.rf
+					and ((useLog and s.cur) or spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame")) or s.rf
 				if rf ~= nil and rf ~= s.rf then
 					s.rf = rf
 					if rf > frame then -- a shot moves it into the future
@@ -2267,6 +2627,26 @@ local projectiles = (function()
 					findLaunches(unitID, L.team, s.info, frame)
 				end
 			end
+		end
+		ev.ready = useLog and true or false
+		if ev.ready then
+			-- the sets visitSlots works from, as this walk left the slots
+			ev.due, ev.win, ev.polled = {}, {}, {}
+			for _, L in pairs(launchers) do
+				for _, s in ipairs(L.slots) do
+					if s.untilF > frame then
+						ev.win[s] = true
+					end
+					if s.cur == nil then
+						ev.polled[s] = true
+					elseif s.rf ~= nil and s.cur ~= s.rf and s.rf > frame then
+						local b = ev.due[s.rf] or {}
+						ev.due[s.rf] = b
+						b[#b + 1] = s
+					end
+				end
+			end
+		end
 		end
 		if frame % strategicPathEvery == 0 then
 			for pid, t in pairs(strategic) do
@@ -2746,9 +3126,12 @@ function widget:Initialize()
 		return
 	end
 	if engineLog.available and (recordDamage or recordProjectiles) then
-		local eok, eerr = pcall(Spring.SetEngineEventLog, recordProjectiles, recordDamage)
+		local wantReloads = recordProjectiles and engineLog.reloadsAvailable
+		local eok, eerr = pcall(Spring.SetEngineEventLog, recordProjectiles, recordDamage, wantReloads)
 		if eok then
 			engineLog.explosions, engineLog.damage = recordProjectiles, recordDamage
+			engineLog.reloads = wantReloads
+			engineLog.columns = recordDamage and engineLog.columnsAvailable
 			Echo(logTag .. " engine event log on (explosions " .. (recordProjectiles and "on" or "off")
 				.. ", damage " .. (recordDamage and "on" or "off") .. ")")
 		else
@@ -3372,8 +3755,9 @@ function widget:Shutdown()
 	end
 	pcall(projectiles.unhook)
 	if engineLog.explosions or engineLog.damage then
-		pcall(Spring.SetEngineEventLog, false, false)
+		pcall(Spring.SetEngineEventLog, false, false, false)
 		engineLog.explosions, engineLog.damage = false, false
+		engineLog.columns = false
 	end
 	closeOut("shutdown")
 end

@@ -1,0 +1,25 @@
+From 28fd2063cd95b9757da41d91e9c0278e5089fcec Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 21:01:00 +0000
+Subject: [PATCH 17/43] SYNCCHECK=OFF: the sync-history dump needs the checker
+
+---
+ rts/System/Sync/DumpHistory.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rts/System/Sync/DumpHistory.cpp b/rts/System/Sync/DumpHistory.cpp
+index 724352a..193484a 100644
+--- a/rts/System/Sync/DumpHistory.cpp
++++ b/rts/System/Sync/DumpHistory.cpp
+@@ -15,7 +15,7 @@
+ 
+ void DumpHistory(nowide::fstream& file, int frameNum, bool serverRequest)
+ {
+-#ifdef SYNC_HISTORY
++#if defined(SYNCCHECK) && defined(SYNC_HISTORY)
+ 	if (!gs->cheatEnabled && !serverRequest)
+ 		return;
+ 
+-- 
+2.53.0
+

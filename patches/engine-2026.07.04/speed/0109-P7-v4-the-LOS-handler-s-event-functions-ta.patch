@@ -1,0 +1,323 @@
+From 4aa6b05fb693f8bf94cfe862ce1d6eb69525aec1 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 18:56:12 +0000
+Subject: [PATCH] [barreplay] P7 v4: the LOS handler's event functions take
+ phase A back for their unit; a height-map change in the window takes it back
+ for all. H104: the unsynced handles keep UnitGiven and UnitTaken
+
+The governed whole game on speed53 had identical unit samples but a capture
+that differed: (1) a unit dying in the window kept its lingering (delayed)
+sight at the square phase A had moved it to, where stock keeps it at the old
+one; 8 visibility records differed. (2) BAR's unsynced Widget Events gadget
+forwards UnitGiven/UnitTaken to LuaUI for transfers between teams not allied
+with the local one, and the capture widget records both calls; muting it lost
+183 duplicate given events at 77176 and 8 at 82033.
+---
+ rts/Game/Game.cpp           | 18 ++++++++-
+ rts/Lua/LuaHandle.cpp       |  2 +-
+ rts/Sim/Misc/BrLosOverlap.h | 11 ++++++
+ rts/Sim/Misc/LosHandler.cpp | 74 ++++++++++++++++++++++++++++++++++---
+ rts/Sim/Misc/LosHandler.h   |  5 +++
+ rts/System/EventHandler.cpp | 13 +++++++
+ rts/System/EventHandler.h   |  2 +
+ 7 files changed, 117 insertions(+), 8 deletions(-)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index c9f06f5..ae9c69c 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1833,11 +1833,25 @@ void CGame::SimFrame() {
+ 		if (!brH104Done && (g_brToggles2 & 0x40000) != 0 && gameSetup != nullptr && gameSetup->hostDemo) {
+ 			brH104Done = true;
+ 			int muted = 0;
++			// except UnitGiven and UnitTaken: BAR's unsynced "Widget Events"
++			// gadget forwards those to LuaUI (Script.LuaUI.UnitGiven) for
++			// units changing hands between teams not allied with the local
++			// one, full-view spectator or not, and the capture widget records
++			// what it is handed, so they are part of the capture
++			static const char* const keep[] = {"UnitGiven", "UnitTaken"};
+ 			for (CSplitLuaHandle* h: {static_cast<CSplitLuaHandle*>(luaRules), static_cast<CSplitLuaHandle*>(luaGaia)}) {
+ 				if (h == nullptr)
+ 					continue;
+-				h->unsyncedLuaHandle.brMuted = true;
+-				eventHandler.RemoveClient(&h->unsyncedLuaHandle);
++				CUnsyncedLuaHandle* u = &h->unsyncedLuaHandle;
++				bool had[2];
++				for (int k = 0; k < 2; ++k)
++					had[k] = eventHandler.BrHasEvent(u, keep[k]);
++				u->brMuted = true;
++				eventHandler.RemoveClient(u);
++				for (int k = 0; k < 2; ++k) {
++					if (had[k])
++						eventHandler.InsertEvent(u, keep[k]);
++				}
+ 				muted += 1;
+ 			}
+ 			LOG("[BR_H104] f=%d muted %d unsynced Lua handles", gs->frameNum, muted);
+diff --git a/rts/Lua/LuaHandle.cpp b/rts/Lua/LuaHandle.cpp
+index f0bf2b2..82b3beb 100644
+--- a/rts/Lua/LuaHandle.cpp
++++ b/rts/Lua/LuaHandle.cpp
+@@ -715,7 +715,7 @@ bool CLuaHandle::HasCallIn(lua_State* L, const string& name) const
+ bool CLuaHandle::UpdateCallIn(lua_State* L, const string& name)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (HasCallIn(L, name) && !brMuted) {
++	if (HasCallIn(L, name) && (!brMuted || name == "UnitGiven" || name == "UnitTaken")) {
+ 		eventHandler.InsertEvent(this, name);
+ 	} else {
+ 		eventHandler.RemoveEvent(this, name);
+diff --git a/rts/Sim/Misc/BrLosOverlap.h b/rts/Sim/Misc/BrLosOverlap.h
+index e9de6a4..06bdc76 100644
+--- a/rts/Sim/Misc/BrLosOverlap.h
++++ b/rts/Sim/Misc/BrLosOverlap.h
+@@ -35,6 +35,8 @@ namespace BrP7 {
+ 	void MarkSlow(const CUnit* unit);
+ 	void MarkAllSlow();
+ 	void JoinSlow();
++	void RevertSlow(const CUnit* unit);
++	void RevertAllSlow();
+ 
+ 	inline void Mark(const CUnit* unit) {
+ 		if (__builtin_expect(open.load(std::memory_order_relaxed) != 0, 0))
+@@ -48,6 +50,15 @@ namespace BrP7 {
+ 		if (__builtin_expect(open.load(std::memory_order_relaxed) != 0, 0))
+ 			JoinSlow();
+ 	}
++	// P7 v4: wait for phase A, then take its change back for this unit / all
++	inline void Revert(const CUnit* unit) {
++		if (__builtin_expect(open.load(std::memory_order_relaxed) != 0, 0))
++			RevertSlow(unit);
++	}
++	inline void RevertAll() {
++		if (__builtin_expect(open.load(std::memory_order_relaxed) != 0, 0))
++			RevertAllSlow();
++	}
+ 
+ 	// before the script tick (Game.cpp): launch phase A when it is on
+ 	void Begin();
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 73a8ba5..2f500e4 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -831,7 +831,7 @@ void CLosHandler::SetGlobalLOS(const int allyTeamId, const bool newState)
+ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
++	BrP7::Revert(unit); // [barreplay] P7 v4: phase A written, then taken back for this unit
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit), true);
+@@ -842,7 +842,7 @@ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int we
+ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
++	BrP7::Revert(unit); // [barreplay] P7 v4: phase A written, then taken back for this unit
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+@@ -853,7 +853,7 @@ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
++	BrP7::Revert(unit); // [barreplay] P7 v4: phase A written, then taken back for this unit
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+@@ -864,7 +864,7 @@ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ void CLosHandler::UnitLoaded(const CUnit* unit, const CUnit* transport)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
++	BrP7::Revert(unit); // [barreplay] P7 v4: phase A written, then taken back for this unit
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	if (!unit->IsStunned())
+ 		return;
+@@ -900,6 +900,11 @@ namespace BrP7 {
+ 		std::atomic<int> nextType{0};   // the next type to claim
+ 		std::atomic<int> doneTypes{0};  // types finished
+ 		bool joined = false;
++		// per type (losTypes' order), per unit of the snapshot: its instance
++		// before phase A, so a handler event can take phase A back for it
++		std::vector<SLosInstance*> prevInst[8];
++		std::vector<uint8_t> reverted;  // per unit: phase A taken back
++		long long revertedUnits = 0, revertedAll = 0;
+ 	}
+ 
+ 	void MarkSlow(const CUnit* unit) {
+@@ -910,6 +915,18 @@ namespace BrP7 {
+ 	void MarkAllSlow() {
+ 		all = true;
+ 	}
++	void RevertSlow(const CUnit* unit) {
++		if (!v4 || !launched)
++			return;
++		JoinSlow();
++		losHandler->BrP7RevertUnit(unit);
++	}
++	void RevertAllSlow() {
++		if (!v4 || !launched)
++			return;
++		JoinSlow();
++		losHandler->BrP7RevertAll();
++	}
+ 	void JoinSlow() {
+ 		// v4 only: phase A writes the types' state, so whatever touches it in
+ 		// the window waits; the types nobody has claimed yet run here, so this
+@@ -927,16 +944,58 @@ namespace BrP7 {
+ 
+ // phase A, one chunk of units: H93's test of every type (UpdateUnit's tests in
+ // its order, reads only), the bit set where UpdateUnit would act
++// P7 v4: the LOS handler's event functions run, in stock, before the LOS
++// update has touched the unit, so the first one in the window takes phase A's
++// change back for it (its instance returns to what it was, and phase B's redo
++// of the marked unit then does what the stock update would)
++void CLosHandler::BrP7RevertUnit(const CUnit* unit)
++{
++	using namespace BrP7;
++	const int i = idxOf[unit->id];
++	if (i < 0 || size_t(i) >= units.size() || units[i] != unit || reverted[i] != 0)
++		return;
++	reverted[i] = 1;
++	revertedUnits += 1;
++	CUnit* u = units[i];
++	for (size_t t = 0; t < losTypes.size(); ++t) {
++		ILosType* lt = losTypes[t];
++		SLosInstance* cur = u->los[lt->type];
++		SLosInstance* old = prevInst[t][i];
++		if (cur == old)
++			continue;
++		// the old one first: it may be the same key the new one released
++		if (old != nullptr)
++			lt->BrRefInstance(old);
++		u->los[lt->type] = old;
++		if (cur != nullptr)
++			lt->BrUnrefInstance(cur);
++	}
++}
++
++// a height-map change in the window: stock changes the instances as they were
++// before the LOS update, so take phase A back for every unit and let phase B
++// run the whole ordinary update
++void CLosHandler::BrP7RevertAll()
++{
++	using namespace BrP7;
++	revertedAll += 1;
++	for (size_t k = 0; k < units.size(); ++k)
++		BrP7RevertUnit(units[k]);
++	all = true;
++}
++
+ void CLosHandler::BrP7RunTypes()
+ {
+ 	using namespace BrP7;
+ 	const int n = int(losTypes.size());
+ 	for (int t; (t = nextType.fetch_add(1, std::memory_order_acq_rel)) < n; ) {
+ 		ILosType* lt = losTypes[t];
++		SLosInstance** prev = prevInst[t].data();
+ 		for (size_t k = 0, m = units.size(); k < m; ++k) {
+ 			CUnit* u = units[k];
+ 			if (t == 0)
+ 				idxOf[u->id] = int(k);
++			prev[k] = u->los[lt->type];
+ 			lt->UpdateUnit(u, false);
+ 		}
+ 		doneTypes.fetch_add(1, std::memory_order_acq_rel);
+@@ -954,10 +1013,12 @@ void CLosHandler::BrP7PhaseA(int chunk)
+ 		const int n = int(losTypes.size());
+ 		for (int t; (t = nextType.fetch_add(1, std::memory_order_acq_rel)) < n; ) {
+ 			ILosType* lt = losTypes[t];
++			SLosInstance** prev = prevInst[t].data();
+ 			for (size_t k = 0, m = units.size(); k < m; ++k) {
+ 				CUnit* u = units[k];
+ 				if (t == 0)
+ 					idxOf[u->id] = int(k);
++				prev[k] = u->los[lt->type];
+ 				lt->UpdateUnit(u, false);
+ 			}
+ 			doneTypes.fetch_add(1, std::memory_order_acq_rel);
+@@ -1003,6 +1064,9 @@ void CLosHandler::BrP7Begin()
+ 	launched = true;
+ 	v4 = (g_brToggles2 & 0x80000) != 0;
+ 	if (v4) {
++		for (size_t t = 0; t < losTypes.size(); ++t)
++			prevInst[t].resize(units.size());
++		reverted.assign(units.size(), 0);
+ 		nextType.store(0, std::memory_order_relaxed);
+ 		doneTypes.store(0, std::memory_order_relaxed);
+ 		joined = false;
+@@ -1180,7 +1244,7 @@ void CLosHandler::Update()
+ void CLosHandler::UpdateHeightMapSynced(SRectangle rect)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
++	BrP7::RevertAll(); // [barreplay] P7 v4: every unit's phase A taken back
+ 	// [barreplay] H94 (toggle 0x40000000): the sensor types on all threads. Each
+ 	// type's update touches only its own instances, cache and queues (and reads
+ 	// the instances' own fields), and does exactly what it did, in its own
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index a8ed423..3832e13 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -135,6 +135,9 @@ public:
+ 	// [barreplay] H93: whether UpdateUnit(unit, false) would do anything at all
+ 	// (each of its other paths returns with nothing written); reads only
+ 	bool BrNeedsUpdate(const CUnit* unit) const;
++	// [barreplay] P7 v4: a unit's phase-A instance change taken back
++	void BrRefInstance(SLosInstance* li) { RefInstance(li); }
++	void BrUnrefInstance(SLosInstance* li) { UnrefInstance(li); }
+ 
+ 
+ private:
+@@ -342,6 +345,8 @@ public:
+ 	bool BrP7Finish();
+ 	void BrP7PhaseA(int idx);
+ 	void BrP7RunTypes();
++	void BrP7RevertUnit(const CUnit* unit);
++	void BrP7RevertAll();
+ };
+ 
+ 
+diff --git a/rts/System/EventHandler.cpp b/rts/System/EventHandler.cpp
+index f815ae7..e973b5d 100644
+--- a/rts/System/EventHandler.cpp
++++ b/rts/System/EventHandler.cpp
+@@ -159,6 +159,19 @@ bool CEventHandler::InsertEvent(CEventClient* ec, const std::string& ciName)
+ }
+ 
+ 
++bool CEventHandler::BrHasEvent(const CEventClient* ec, const std::string& ciName) const
++{
++	const auto comp = [](const EventPair& a, const EventPair& b) { return (a.first < b.first); };
++	const auto iter = std::lower_bound(eventMap.begin(), eventMap.end(), EventPair{ciName, {}}, comp);
++
++	if ((iter == eventMap.end()) || (iter->second.GetList() == nullptr) || (iter->first != ciName))
++		return false;
++
++	const EventClientList& l = *(iter->second.GetList());
++	return (std::find(l.begin(), l.end(), ec) != l.end());
++}
++
++
+ bool CEventHandler::RemoveEvent(CEventClient* ec, const std::string& ciName)
+ {
+ 	const auto comp = [](const EventPair& a, const EventPair& b) { return (a.first < b.first); };
+diff --git a/rts/System/EventHandler.h b/rts/System/EventHandler.h
+index fec7df7..b717e11 100644
+--- a/rts/System/EventHandler.h
++++ b/rts/System/EventHandler.h
+@@ -33,6 +33,8 @@ class CEventHandler
+ 		}
+ 
+ 		bool InsertEvent(CEventClient* ec, const std::string& ciName);
++		// [barreplay] H104: is ec on the list of ciName
++		bool BrHasEvent(const CEventClient* ec, const std::string& ciName) const;
+ 		bool RemoveEvent(CEventClient* ec, const std::string& ciName);
+ 
+ 		void GetEventList(std::vector<std::string>& list) const;
+-- 
+2.53.0
+

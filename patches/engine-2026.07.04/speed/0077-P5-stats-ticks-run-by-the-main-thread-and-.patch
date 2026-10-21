@@ -1,0 +1,85 @@
+From 6a112145cab25488461ab316e999e6cdef17df1f Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 13:38:55 +0000
+Subject: [PATCH 77/78] [barreplay] P5 stats: ticks run by the main thread and
+ by workers, main-thread wait and worker-start cycles
+
+---
+ rts/Sim/Units/Scripts/BrCobPar.cpp | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.cpp b/rts/Sim/Units/Scripts/BrCobPar.cpp
+index d1cc824..6b5eda2 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.cpp
++++ b/rts/Sim/Units/Scripts/BrCobPar.cpp
+@@ -11,6 +11,7 @@
+ #include <memory>
+ #include <unordered_map>
+ #include <immintrin.h>
++#include <x86intrin.h>
+ 
+ #include "CobEngine.h"
+ #include "CobFile.h"
+@@ -250,7 +251,12 @@ namespace BrP5 {
+ 
+ 		int nWorkers = -1;
+ 		bool statsOn = false;
+-		struct Stats { long long phases = 0, ticks = 0, par = 0, segs = 0, segTicks = 0, serialPoints = 0; int lastFrame = 0; } st;
++		struct Stats {
++			long long phases = 0, ticks = 0, par = 0, segs = 0, segTicks = 0, serialPoints = 0;
++			std::atomic<long long> byWorkers{0};
++			long long byMain = 0, waitCycles = 0, startCycles = 0;
++			int lastFrame = 0;
++		} st;
+ 
+ 		// BARREPLAY_P5_MINSEG: shorter runs of worker-safe ticks run on the main
+ 		// thread as before; BARREPLAY_P5_PHASES: 1 = the running list only,
+@@ -353,6 +359,7 @@ namespace BrP5 {
+ 					continue;
+ 				}
+ 				RunItem(k, true);
++				st.byWorkers.fetch_add(1, std::memory_order_relaxed);
+ 				AdvanceFrontier();
+ 			}
+ 		}
+@@ -497,7 +504,9 @@ namespace BrP5 {
+ 				++b;
+ 
+ 			if ((b - a) >= minSeg && nWorkers > 0 && (phases & (sleepers? 2: 1)) != 0) {
++				const unsigned long long ts = __rdtsc();
+ 				StartWorkers();
++				st.startCycles += (__rdtsc() - ts);
+ 				st.segs++;
+ 				st.segTicks += (b - a);
+ 				st.par += (b - a);
+@@ -509,12 +518,15 @@ namespace BrP5 {
+ 				uint64_t seen = 0;
+ 				for (int k; (k = Claim(seen)) >= 0; ) {
+ 					RunItem(k, true);
++					st.byMain++;
+ 					AdvanceFrontier();
+ 				}
++				const unsigned long long tw = __rdtsc();
+ 				while (frontier.load(std::memory_order_seq_cst) < b) {
+ 					AdvanceFrontier();
+ 					_mm_pause();
+ 				}
++				st.waitCycles += (__rdtsc() - tw);
+ 				Flush(a, b);
+ 			} else {
+ 				for (int k = a; k < b; ++k)
+@@ -531,8 +543,9 @@ namespace BrP5 {
+ 
+ 		if (statsOn && (gs->frameNum - st.lastFrame) >= 900) {
+ 			st.lastFrame = gs->frameNum;
+-			LOG("[BR_P5] f=%d phases=%lld ticks=%lld parallel=%lld (%.1f%%) segments=%lld (%.1f ticks each) serialPoints=%lld",
+-				gs->frameNum, st.phases, st.ticks, st.par, 100.0 * st.par / std::max(1LL, st.ticks), st.segs, double(st.segTicks) / std::max(1LL, st.segs), st.serialPoints);
++			LOG("[BR_P5] f=%d phases=%lld ticks=%lld parallel=%lld (%.1f%%) segments=%lld (%.1f ticks each) serialPoints=%lld byMain=%lld byWorkers=%lld waitMcycles=%.1f startMcycles=%.1f",
++				gs->frameNum, st.phases, st.ticks, st.par, 100.0 * st.par / std::max(1LL, st.ticks), st.segs, double(st.segTicks) / std::max(1LL, st.segs), st.serialPoints,
++				st.byMain, st.byWorkers.load(), st.waitCycles / 1e6, st.startCycles / 1e6);
+ 		}
+ 	}
+ 
+-- 
+2.53.0
+

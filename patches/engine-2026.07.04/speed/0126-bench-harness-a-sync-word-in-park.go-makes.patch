@@ -1,0 +1,56 @@
+From 278439c337b067dca0415c5d32fff06940ae6bfe Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 04:37:17 +0000
+Subject: [PATCH] [barreplay] bench harness: a "sync" word in park.go makes the
+ engine signal <park>.window after the huge-page wait and wait for <park>.go2,
+ so a profiler attached in between sees the window only
+
+---
+ rts/Net/NetCommands.cpp | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 51fef57..60025ef 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -73,6 +73,7 @@ namespace {
+ 		void parkHere() {
+ 			if (park == nullptr || park[0] == 0)
+ 				return;
++			bool syncWindow = false;
+ 			char path[1024];
+ 			snprintf(path, sizeof(path), "%s.stdout", park);
+ 			if (FILE* f = freopen(path, "a", stdout)) (void)f;
+@@ -105,6 +106,10 @@ namespace {
+ 					// "p4check": P4's (and P10's) check mode for this trial
+ 					if (strcmp(word, "p4check") == 0)
+ 						BrP4::SetCheck(true);
++					// "sync": after the huge-page wait, say so and wait to be released
++					// again (a profiler attaches then, so it sees the window only)
++					if (strcmp(word, "sync") == 0)
++						syncWindow = true;
+ 				}
+ 				fclose(f);
+ 			}
+@@ -139,6 +144,18 @@ namespace {
+ 				Watchdog::ClearTimers();
+ 				LOG("[BR_BENCH] huge pages %ld of %ld kB after %.1f s", ahp, rss, (brNowNs(CLOCK_MONOTONIC) - w0) / 1e9);
+ 			}
++			// [barreplay] "sync": <park>.window says the window is about to start;
++			// <park>.go2 releases it (the harness starts perf in between)
++			if (syncWindow) {
++				snprintf(path, sizeof(path), "%s.window", park);
++				if (FILE* f = fopen(path, "w")) { fprintf(f, "%d\n", (int)getpid()); fclose(f); }
++				snprintf(path, sizeof(path), "%s.go2", park);
++				while (access(path, F_OK) != 0) {
++					Watchdog::ClearTimers();
++					usleep(5 * 1000);
++				}
++				Watchdog::ClearTimers();
++			}
+ 		}
+ 		void countersOn() {
+ 			// frequency-independent work counters (core cycles) + deterministic
+-- 
+2.53.0
+

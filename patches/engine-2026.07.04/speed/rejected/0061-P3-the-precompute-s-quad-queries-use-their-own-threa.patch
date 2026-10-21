@@ -1,0 +1,25 @@
+From d9895ed21b37ba7270e50d4ba91ad693a41cd347 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 02:45:47 +0000
+Subject: [PATCH 61/62] P3: the precompute's quad queries use their own
+ thread's vector pool
+
+---
+ rts/Game/GameHelper.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index 2882687..f6cc6f9 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -876,6 +876,7 @@ namespace BrScan {
+ 		e.superRadius = std::max(r1, r2);
+ 
+ 		QuadFieldQuery qfQuery;
++		qfQuery.threadOwner = ThreadPool::GetThreadNum(); // runs on any thread
+ 		quadField.GetQuads(qfQuery, e.ownerPos, e.superRadius);
+ 		e.quads.assign(qfQuery.quads->begin(), qfQuery.quads->end());
+ 		e.occ.clear();
+-- 
+2.53.0
+

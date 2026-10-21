@@ -27,6 +27,12 @@
 --              hands over every explosion and hit with all its arguments. Its
 --              records must match the resim fixture's exactly
 --              -> harness_enginelog.brepstream
+--   enginecols the enginelog run with the patched engine's damage columns too
+--              (Spring.DrainLoggedDamageColumns / TakeLoggedDamageColumns:
+--              drainDamage + recordHitAt in the engine, stubbed here with the
+--              widget's own transforms), so the stream must be the enginelog
+--              fixture byte for byte; what this checks is the widget's glue
+--              -> harness_enginecols.brepstream
 --
 -- The streams are committed as internal/capture/testdata fixtures, and the
 -- tests there decode them against golden JSON dumps (TestHarnessGolden),
@@ -38,15 +44,18 @@
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua resim
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua sandboxed
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua enginelog
+--	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua enginecols
 --	cd .. && go test -run TestHarnessGolden -update .
 --
 -- and read the golden diff: it is the change in what the widget records.
 
 local widgetPath = arg[1] or "assets/lua/replay_uploader.lua"
-local enginelog = (arg[2] == "enginelog")
+local enginecols = (arg[2] == "enginecols")
+local enginelog = (arg[2] == "enginelog") or enginecols
 local sandboxed = (arg[2] == "sandboxed") or enginelog
 local resim = (arg[2] == "resim") or sandboxed
-local outName = enginelog and "harness_enginelog.brepstream"
+local outName = enginecols and "harness_enginecols.brepstream"
+	or enginelog and "harness_enginelog.brepstream"
 	or sandboxed and "harness_sandboxed.brepstream"
 	or resim and "harness_resim.brepstream" or "harness.brepstream"
 
@@ -648,7 +657,7 @@ local realHandler = {
 -- explosion and every hit as it happens, the full-view caller drains them:
 -- -1 is "none". Health and position are read off the same stubs the widget's
 -- own callin would have read, at the moment of the hit, as the engine does.
-local engineLog = { explosions = false, damage = false, expl = {}, dmg = {}, everOn = false }
+local engineLog = { explosions = false, damage = false, reloads = false, expl = {}, dmg = {}, rel = {}, everOn = false }
 if enginelog then
 	local function drain(buf, fill)
 		local out = type(fill) == "table" and fill or {}
@@ -661,8 +670,10 @@ if enginelog then
 		end
 		return out
 	end
-	Spring.SetEngineEventLog = function(explosions, damage)
+	Spring.SetEngineEventLog = function(explosions, damage, reloads)
 		engineLog.explosions, engineLog.damage = explosions and true or false, damage and true or false
+		engineLog.reloads = reloads and true or false
+		if not engineLog.reloads then engineLog.rel = {} end
 		engineLog.everOn = engineLog.everOn or engineLog.explosions or engineLog.damage
 		if not engineLog.explosions then engineLog.expl = {} end
 		if not engineLog.damage then engineLog.dmg = {} end
@@ -672,10 +683,237 @@ if enginelog then
 		engineLog.expl = {}
 		return out, n, 0
 	end
+	Spring.GetLoggedReloads = function(fill)
+		local out, n = drain(engineLog.rel, fill), #engineLog.rel / 3
+		engineLog.rel = {}
+		return out, n
+	end
 	Spring.GetLoggedDamage = function(fill)
 		local out, n = drain(engineLog.dmg, fill), #engineLog.dmg / 16
 		engineLog.dmg = {}
 		return out, n, 0
+	end
+end
+-- enginecols: the engine's damage columns, the widget's drainDamage +
+-- recordHitAt transcribed (rts/Lua/LuaEngineEventLog.cpp has the C++ twin)
+if enginecols then
+	local function newCols()
+		return { df = {}, v = {}, vd = {}, vt = {}, x = {}, z = {}, a = {}, ad = {}, at = {},
+			w = {}, po = {}, pt = {}, fl = {}, d = {}, hp = {} }
+	end
+	local cols, ncols = newCols(), 0
+	local function id16(v) if v >= 0 and v < 65535 then return v end return 65535 end
+	local function team8(v) if v >= 0 and v < 255 then return v end return 255 end
+	local function clampv(v, lo, hi) if v < lo then return lo end if v > hi then return hi end return v end
+	local function pos16(v) return clampv(math.floor(v + 0.5), 0, 65535) end
+	local function weaponCode(w)
+		if w >= 0 and w < 65535 - 7 then return w end
+		if w < 0 and w >= -7 then return 65535 + w end
+		return 65535
+	end
+	Spring.DrainLoggedDamageColumns = function(hitStart, cap)
+		local d = engineLog.dmg
+		local total = #d // 16
+		local added, seen, named, weapon, cause, fromProj, full = 0, 0, 0, 0, 0, 0, false
+		local i = 0
+		while i < total and not full do
+			local o = i * 16
+			local aID, aDef, aTeam, projectileID = d[o + 9], d[o + 10], d[o + 11], d[o + 8]
+			local po, pt = 65535, 255
+			if aTeam < 0 and projectileID >= 0 and d[o + 16] >= 0 then
+				pt, po = team8(d[o + 16]), id16(d[o + 15])
+			end
+			local damage = d[o + 5]
+			if damage > 0 then
+				seen = seen + 1
+				if aTeam >= 0 then named = named + 1 end
+				if d[o + 7] >= 0 then weapon = weapon + 1 else cause = cause + 1 end
+				if pt ~= 255 then fromProj = fromProj + 1 end
+				ncols = ncols + 1
+				local n = ncols
+				cols.df[n] = clampv(d[o + 1] - hitStart, 0, 65535)
+				cols.v[n], cols.vd[n], cols.vt[n] = id16(d[o + 2]), id16(d[o + 3]), team8(d[o + 4])
+				cols.x[n], cols.z[n] = pos16(d[o + 13]), pos16(d[o + 14])
+				cols.a[n], cols.ad[n], cols.at[n] = id16(aID), id16(aDef), team8(aTeam)
+				cols.w[n], cols.po[n], cols.pt[n] = weaponCode(d[o + 7]), po, pt
+				cols.fl[n] = (d[o + 6] ~= 0 and 1 or 0) + (projectileID >= 0 and 2 or 0)
+				cols.d[n], cols.hp[n] = damage, d[o + 12]
+				added = added + 1
+				full = ncols >= cap
+			end
+			i = i + 1
+		end
+		local rest = {}
+		for k = i * 16 + 1, #d do
+			rest[#rest + 1] = d[k]
+		end
+		engineLog.dmg = rest
+		return added, full, 0, seen, named, weapon, cause, fromProj
+	end
+	Spring.TakeLoggedDamageColumns = function()
+		local c = cols
+		local out = table.concat({
+			VFS.PackU16(c.df), VFS.PackU16(c.v), VFS.PackU16(c.vd), VFS.PackU8(c.vt),
+			VFS.PackU16(c.x), VFS.PackU16(c.z),
+			VFS.PackU16(c.a), VFS.PackU16(c.ad), VFS.PackU8(c.at), VFS.PackU16(c.w),
+			VFS.PackU16(c.po), VFS.PackU8(c.pt), VFS.PackU8(c.fl),
+			VFS.PackF32(c.d), VFS.PackF32(c.hp),
+		})
+		local n = ncols
+		cols, ncols = newCols(), 0
+		return out, n
+	end
+end
+if enginelog then
+	-- The engine's bulk sample (Spring.GetUnitSampleData): what the per-unit
+	-- reads return under full read, in GetAllUnits' order, flat. Built from the
+	-- same stubs, so TestEngineLogMatchesResim checks the widget's bulk path
+	-- against its per-call path.
+	Spring.GetUnitSampleData = function(allyTeams, fill)
+		local out = type(fill) == "table" and fill or {}
+		local prev, k = #out, 0
+		local ids = Spring.GetAllUnits()
+		local stride = 11 + #allyTeams
+		for i = 1, #ids do
+			local id = ids[i]
+			local x, _, z = Spring.GetUnitPosition(id)
+			local hp, maxHp, _, _, b = Spring.GetUnitHealth(id)
+			local vx, _, vz = Spring.GetUnitVelocity(id)
+			local row = { id, Spring.GetUnitTeam(id), Spring.GetUnitDefID(id), x, z, hp, maxHp, b,
+				vx, vz, Spring.GetUnitIsBuilding(id) or 0 }
+			for j = 1, #allyTeams do
+				row[#row + 1] = Spring.GetUnitLosState(id, allyTeams[j], true) or 0
+			end
+			for j = 1, stride do
+				out[k + j] = row[j]
+			end
+			k = k + stride
+		end
+		for j = k + 1, prev do
+			out[j] = nil
+		end
+		return out, #ids, stride
+	end
+	-- The engine-side sample loop (Spring.GetUnitSampleDelta): the widget's
+	-- bulk loop over GetUnitSampleData with the predictor state kept here, the
+	-- dead list in ascending id order like the engine's. TestEngineLogMatchesResim
+	-- then checks the widget's glue around it (shields, visibility, dead list).
+	local deltaPrev, deltaVis = {}, {}
+	Spring.GetUnitSampleDelta = function(allyTeams, se, keyframe, frame, unknownTeam, shieldDefs, doVis, o)
+		local bd, cnt, stride = Spring.GetUnitSampleData(allyTeams, nil)
+		local isShield = {}
+		for _, d in ipairs(shieldDefs) do
+			isShield[d] = true
+		end
+		if keyframe then
+			deltaPrev = {}
+		end
+		local keys = { "cid", "cdef", "cteam", "cx", "cz", "chp", "cmax", "cdvx", "cdvz", "cb", "ct",
+			"dead", "sid", "sdef", "vid", "vlo", "vhi" }
+		local t = {}
+		for _, k in ipairs(keys) do
+			t[k] = {}
+		end
+		local function push(k, v)
+			local a = t[k]
+			a[#a + 1] = v
+		end
+		local floor = math.floor
+		local nva = doVis and #allyTeams or 0
+		for i = 1, cnt do
+			local base = (i - 1) * stride
+			local unitID = bd[base + 1]
+			local qx = floor(bd[base + 4] + 0.5)
+			if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
+			local qz = floor(bd[base + 5] + 0.5)
+			if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
+			local qhp = floor(bd[base + 6] + 0.5)
+			if qhp < 0 then qhp = 0 end
+			local qmax = floor(bd[base + 7] + 0.5)
+			if qmax < 0 then qmax = 0 end
+			local qdvx = floor(bd[base + 9] * se + 0.5)
+			if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
+			local qdvz = floor(bd[base + 10] * se + 0.5)
+			if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
+			local qb = floor(bd[base + 8] * 255 + 0.5)
+			if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
+			local defID = bd[base + 3]
+			local qdef = defID
+			if qdef > 65535 or qdef < 0 then qdef = 0 end
+			local qteam = bd[base + 2]
+			if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+			local qt = bd[base + 11]
+			if qt > 65535 or qt < 0 then qt = 0 end
+			local p = deltaPrev[unitID]
+			if p ~= nil and not keyframe
+				and p.dvx == qdvx and p.dvz == qdvz
+				and p.x + qdvx == qx and p.z + qdvz == qz
+				and p.hp == qhp and p.maxhp == qmax and p.b == qb
+				and p.def == qdef and p.team == qteam and p.t == qt then
+				p.x, p.z, p.f = qx, qz, frame
+			else
+				push("cid", unitID); push("cdef", qdef); push("cteam", qteam)
+				push("cx", qx); push("cz", qz); push("chp", qhp); push("cmax", qmax)
+				push("cdvx", qdvx); push("cdvz", qdvz); push("cb", qb); push("ct", qt)
+				deltaPrev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
+					hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, t = qt, f = frame }
+			end
+			if unitID <= 65535 and isShield[defID] then
+				push("sid", unitID); push("sdef", defID)
+			end
+			if doVis and unitID <= 65535 then
+				local lo, hi, scale = 0, 0, 1
+				for a = 1, nva do
+					local bits = bd[base + 11 + a]
+					if a <= 8 then
+						lo = lo + (bits % 4) * scale
+					else
+						hi = hi + (bits % 4) * scale
+					end
+					scale = (a == 8) and 1 or scale * 4
+				end
+				local v = deltaVis[unitID]
+				if v == nil or keyframe or v.lo ~= lo or v.hi ~= hi then
+					push("vid", unitID); push("vlo", lo); push("vhi", hi)
+				end
+				deltaVis[unitID] = { lo = lo, hi = hi, f = frame }
+			end
+		end
+		if not keyframe then
+			local gone = {}
+			for id, p in pairs(deltaPrev) do
+				if p.f ~= frame then
+					gone[#gone + 1] = id
+				end
+			end
+			table.sort(gone)
+			for _, id in ipairs(gone) do
+				deltaPrev[id] = nil
+				push("dead", id)
+			end
+		end
+		if doVis then
+			for id, v in pairs(deltaVis) do
+				if v.f ~= frame then
+					deltaVis[id] = nil
+				end
+			end
+		end
+		for _, k in ipairs(keys) do
+			o[k] = t[k]
+		end
+		o.n, o.nv, o.total = #t.cid, #t.vid, cnt
+		return true
+	end
+end
+
+-- setReload changes a launcher's reload frame, logging the change the way the
+-- engine's reload log does (enginelog mode, once switched on).
+function setReload(id, slot, value)
+	weaponState[id][slot] = value
+	if engineLog.reloads then
+		local r = engineLog.rel
+		r[#r + 1], r[#r + 2], r[#r + 3] = id, slot - 1, value
 	end
 end
 
@@ -933,7 +1171,7 @@ end
 
 local function spawn(pid, owner, slot, wd, vx, vy, vz, g, target, reloadFrames)
 	local u = units[owner]
-	weaponState[owner][slot] = curFrame + reloadFrames
+	setReload(owner, slot, curFrame + reloadFrames)
 	projectiles[pid] = { owner = owner, team = u.team, wd = wd, x = u.x, y = 120, z = u.z,
 		vx = vx, vy = vy, vz = vz, g = g, target = target }
 end
@@ -967,7 +1205,7 @@ local function projectileScript(f)
 		projectiles[7002].intercepted = true
 	end
 	if f == 1800 then
-		weaponState[504][1] = f + 297
+		setReload(504, 1, f + 297)
 	end
 	if f == 2400 then
 		widget:StockpileChanged(501, 39, 0, 2, 1, 0)
@@ -1017,7 +1255,7 @@ local function projectileScript(f)
 		explode(7004)
 	end
 	if f == 3000 then
-		weaponState[506][1] = f + 210
+		setReload(506, 1, f + 210)
 	end
 	for k = 0, 2 do
 		if f == 3075 + 3 * k then

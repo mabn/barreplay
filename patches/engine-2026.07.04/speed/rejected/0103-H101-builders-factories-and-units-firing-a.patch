@@ -1,0 +1,347 @@
+From d4fde36129ecac63015447613ba54441de32b144 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 13:52:00 +0000
+Subject: [PATCH 103/108] [barreplay] H101: builders, factories and units
+ firing a synced-received air/water event are serial points
+
+CBuilder and CFactory override Update; BAR's synced gadgets receive the air and
+water events. Serial points are planned on all threads and planned again after
+one that wrote through Lua, changed the height map or created a unit.
+---
+ rts/Lua/LuaUtils.cpp              |   6 ++
+ rts/Sim/Objects/SolidObject.cpp   |   8 +-
+ rts/Sim/Objects/SolidObject.h     |   1 +
+ rts/Sim/Units/Unit.cpp            |  20 ++++
+ rts/Sim/Units/Unit.h              |   4 +
+ rts/Sim/Units/UnitHandler.cpp     | 159 ++++++++++++++++++++++--------
+ rts/Sim/Units/UnitTypes/Builder.h |   1 +
+ rts/Sim/Units/UnitTypes/Factory.h |   1 +
+ 8 files changed, 156 insertions(+), 44 deletions(-)
+
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index a775ad3..0f53876 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -9,8 +9,13 @@
+ #include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/Misc/BrLosOverlap.h"
+ 
++// [barreplay] H101: how many calls of a Lua function that writes simulation
++// state there have been (the functions entered through the two trampolines)
++unsigned g_brLuaWrites = 0;
++
+ int BrLuaDrainingCall(lua_State* L)
+ {
++	++g_brLuaWrites;
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	// [barreplay] P7: a Lua write in the script tick can change any LOS input
+ 	BrP7::MarkAll();
+@@ -23,6 +28,7 @@ int BrLuaDrainingCall(lua_State* L)
+ // what they change for P7 themselves
+ int BrLuaDrainingCallLus(lua_State* L)
+ {
++	++g_brLuaWrites;
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	const lua_CFunction f = reinterpret_cast<lua_CFunction>(lua_touserdata(L, lua_upvalueindex(1)));
+ 	return f(L);
+diff --git a/rts/Sim/Objects/SolidObject.cpp b/rts/Sim/Objects/SolidObject.cpp
+index f8b272c..2486d00 100644
+--- a/rts/Sim/Objects/SolidObject.cpp
++++ b/rts/Sim/Objects/SolidObject.cpp
+@@ -109,6 +109,12 @@ void CSolidObject::UpdatePhysicalState(float eps)
+ void CSolidObject::UpdatePhysicalStateAt(float eps, float groundHeight)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	physicalState = static_cast<PhysicalState>(BrComputePhysicalStateAt(eps, groundHeight));
++}
++
++// [barreplay] H101: what UpdatePhysicalStateAt would set, without setting it
++unsigned int CSolidObject::BrComputePhysicalStateAt(float eps, float groundHeight) const
++{
+ 	const float waterLevel = CGround::GetWaterLevel(pos.x, pos.z);
+ 	// Get height of whichever surface is higher between ground and water
+ 	const float topSurfaceHeight = std::max(groundHeight, waterLevel);
+@@ -137,7 +143,7 @@ void CSolidObject::UpdatePhysicalStateAt(float eps, float groundHeight)
+ 	ps |= (PSTATE_BIT_INAIR       * ((    ps   & MASK_NOAIR) ==    0));
+ 	#undef MASK_NOAIR
+ 
+-	physicalState = static_cast<PhysicalState>(ps);
++	return ps;
+ 
+ 	// verify mutex relations (A != B); if one
+ 	// fails then A and B *must* both be false
+diff --git a/rts/Sim/Objects/SolidObject.h b/rts/Sim/Objects/SolidObject.h
+index 6262e36..38a1f56 100644
+--- a/rts/Sim/Objects/SolidObject.h
++++ b/rts/Sim/Objects/SolidObject.h
+@@ -147,6 +147,7 @@ public:
+ 	virtual void UpdatePhysicalState(float eps);
+ 
+ 	void UpdatePhysicalStateAt(float eps, float groundHeight); // [barreplay] H88
++	unsigned int BrComputePhysicalStateAt(float eps, float groundHeight) const; // [barreplay] H101
+ 
+ 	void Move(const float3& v, bool relative);
+ 
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 389fb9e..c0641ef 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -1897,6 +1897,26 @@ uint8_t CUnit::BrUpdateLocal()
+ 	return ret;
+ }
+ 
++bool CUnit::BrPredictPhysicalStateEvent()
++{
++	float ground;
++	if ((g_brToggles & 0x100000) != 0) {
++		if (pos.x != brPhysX || pos.z != brPhysZ || g_brHeightMapVersion != brPhysHmv || !brPhysValid) {
++			brPhysX = pos.x;
++			brPhysZ = pos.z;
++			brPhysHmv = g_brHeightMapVersion;
++			brPhysGround = CGround::GetHeightReal(pos.x, pos.z);
++			brPhysValid = true;
++		}
++		ground = brPhysGround;
++	} else {
++		ground = CGround::GetHeightReal(pos.x, pos.z);
++	}
++	const unsigned int ps = BrComputePhysicalStateAt(0.1f, ground);
++	const unsigned int mask = PSTATE_BIT_INAIR | PSTATE_BIT_INWATER | PSTATE_BIT_UNDERWATER;
++	return ((ps ^ (unsigned int)physicalState) & mask) != 0;
++}
++
+ void CUnit::BrUpdateFinish(uint8_t bits)
+ {
+ 	const bool inAir      = (bits & 1) != 0;
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index c772a11..4f87b72 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -149,6 +149,10 @@ public:
+ 	// the physical-state events and logs the reloads, in the loop's order.
+ 	uint8_t BrUpdateLocal();
+ 	void BrUpdateFinish(uint8_t bits);
++	// whether UpdatePhysicalState would fire an event now (fills H88's cache)
++	bool BrPredictPhysicalStateEvent();
++	// Update is overridden (CBuilder, CFactory: work beyond the unit itself)
++	virtual bool BrOwnUpdate() const { return false; }
+ 
+ 	float3 GetErrorVector(int allyteam) const;
+ 	float3 GetErrorPos(int allyteam, bool aiming = false) const { return (aiming? aimPos: midPos) + GetErrorVector(allyteam); }
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index af14f0b..5bbceab 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -606,69 +606,142 @@ void CUnitHandler::SlowUpdateUnits()
+ 	}
+ }
+ 
++extern unsigned g_brLuaWrites; // [barreplay] H101 (Lua/LuaUtils.cpp)
++extern unsigned g_brHeightMapVersion; // [barreplay] H88 (Map/ReadMap.h)
++
+ void CUnitHandler::UpdateUnits()
+ {
+ 	SCOPED_TIMER("Sim::Unit::Update");
+ 
+ 	size_t activeUnitCount = activeUnits.size();
+ 
+-	if ((g_brToggles2 & 0x4000) != 0) {
+-		static int brLogFrame = -1000000;
+-		if ((gs->frameNum - brLogFrame) >= 9000) {
+-			brLogFrame = gs->frameNum;
+-			LOG("[BR_H101] f=%d syncedPhysicalStateClients=%d units=%zu", gs->frameNum, int(eventHandler.HasSyncedPhysicalStateClients()), activeUnitCount);
+-		}
+-	}
+-
+ 	// [barreplay] H101 (toggle2 0x4000): CUnit::Update changes only its own
+ 	// unit (physical state from its position and the height and water maps,
+ 	// position error, damage decay, rest time, a stunned unit's reloads),
+ 	// except for the physical-state events and the reload log. The collision
+ 	// map update after it reads only that unit and writes the quad field,
+-	// which Update never reads. So every Update runs first, on all threads,
+-	// and then, in the loop's order, each unit's events, its reload-log
+-	// entries and its collision-map update: the same calls in the same order
+-	// as before for everything outside the units. Only while no SYNCED client
+-	// receives the physical-state events (an unsynced one cannot change the
+-	// simulation, so it may see them after the other units' updates).
+-	if ((g_brToggles2 & 0x4000) != 0 && activeUnitCount >= 512 && ThreadPool::HasThreads() && !eventHandler.HasSyncedPhysicalStateClients()) {
++	// which Update never reads. So runs of such updates go on all threads,
++	// and then, in the loop's order, each unit's reload-log entries (and
++	// events for unsynced receivers) and its collision-map update.
++	//
++	// A unit is a SERIAL POINT, updated the ordinary way at its turn, when its
++	// Update does more than that: a builder or a factory (CBuilder/CFactory
++	// override Update and build, reclaim, capture and terraform), or a unit
++	// whose update fires an air or water event while a synced client receives
++	// those (BAR's gadgets do). Which units are serial points is decided on all
++	// threads up front, from the inputs the update itself would read, and
++	// decided again for the units after a serial point whenever that one may
++	// have changed those inputs: Lua wrote simulation state (g_brLuaWrites,
++	// counted by the trampoline P4 and P7 rely on), the height map changed, or
++	// a unit was created (activeUnits insertion shifts every later index; the
++	// loop goes on by index, as the ordinary one does). A run shorter than 64
++	// units goes the ordinary way. From 512 units.
++	if ((g_brToggles2 & 0x4000) != 0 && activeUnitCount >= 512 && ThreadPool::HasThreads()) {
+ 		static std::vector<uint8_t> brBits;
++		static std::vector<uint8_t> brSerial;
++		// serial points (builders/factories, events), runs on all threads, units in them, re-plans, mispredictions, frames
++		static long long brStat[7] = {0, 0, 0, 0, 0, 0, 0};
++		static int brLogFrame = -1000000;
++
+ 		brBits.resize(activeUnitCount);
+-		for_mt_chunk(0, int(activeUnitCount), [&](const int i) {
+-			brBits[i] = activeUnits[i]->BrUpdateLocal();
+-		}, 1, BrChunkMax());
++		brSerial.resize(activeUnitCount);
+ 
++		const bool synced = eventHandler.HasSyncedPhysicalStateClients();
+ 		const int rate = modInfo.unitQuadPositionUpdateRate;
+-		for (size_t i = 0; i < activeUnitCount; ++i) {
+-			if ((g_brToggles2 & 0x800) != 0) {
+-				if (i + 8 < activeUnitCount) {
+-					const CUnit* u8 = activeUnits[i + 8];
+-					if (((gs->frameNum + u8->id) % rate) == 0)
+-						__builtin_prefetch(&u8->quads);
++
++		const auto plan = [&](size_t from) {
++			for_mt_chunk(int(from), int(activeUnitCount), [&](const int i) {
++				CUnit* u = activeUnits[i];
++				brSerial[i] = uint8_t(u->BrOwnUpdate() ? 2 : 0) | uint8_t((synced && u->BrPredictPhysicalStateEvent()) ? 1 : 0);
++			}, 1, BrChunkMax());
++		};
++		const auto collisionMap = [&](CUnit* unit) {
++			if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + unit->id) % rate) == 0)
++				unit->moveType->UpdateCollisionMap();
++		};
++		const auto prefetchFor = [&](size_t i, size_t end) {
++			if ((g_brToggles2 & 0x800) == 0)
++				return;
++			if (i + 8 < end) {
++				const CUnit* u8 = activeUnits[i + 8];
++				if (((gs->frameNum + u8->id) % rate) == 0)
++					__builtin_prefetch(&u8->quads);
++			}
++			if (i + 4 < end) {
++				const CUnit* u4 = activeUnits[i + 4];
++				if (((gs->frameNum + u4->id) % rate) == 0) {
++					__builtin_prefetch(u4->moveType);
++					if (!u4->quads.empty())
++						__builtin_prefetch(u4->quads.data());
+ 				}
+-				if (i + 4 < activeUnitCount) {
+-					const CUnit* u4 = activeUnits[i + 4];
+-					if (((gs->frameNum + u4->id) % rate) == 0) {
+-						__builtin_prefetch(u4->moveType);
+-						if (!u4->quads.empty())
+-							__builtin_prefetch(u4->quads.data());
+-					}
++			}
++			if (i + 2 < end) {
++				const CUnit* u2 = activeUnits[i + 2];
++				if (((gs->frameNum + u2->id) % rate) == 0) {
++					const size_t nq = std::min<size_t>(u2->quads.size(), 2);
++					for (size_t k = 0; k < nq; ++k)
++						__builtin_prefetch(&quadField.GetQuad(u2->quads[k]));
+ 				}
+-				if (i + 2 < activeUnitCount) {
+-					const CUnit* u2 = activeUnits[i + 2];
+-					if (((gs->frameNum + u2->id) % rate) == 0) {
+-						const size_t nq = std::min<size_t>(u2->quads.size(), 2);
+-						for (size_t k = 0; k < nq; ++k)
+-							__builtin_prefetch(&quadField.GetQuad(u2->quads[k]));
++			}
++		};
++		const auto ordinary = [&](size_t i) {
++			CUnit* unit = activeUnits[i];
++			unit->Update();
++			collisionMap(unit);
++		};
++
++		plan(0);
++
++		size_t cur = 0;
++		while (cur < activeUnitCount) {
++			size_t k = cur;
++			while (k < activeUnitCount && brSerial[k] == 0)
++				++k;
++
++			if ((k - cur) >= 64) {
++				brStat[1] += 1;
++				brStat[2] += (k - cur);
++				for_mt_chunk(int(cur), int(k), [&](const int i) {
++					brBits[i] = activeUnits[i]->BrUpdateLocal();
++				}, 1, BrChunkMax());
++
++				for (size_t i = cur; i < k; ++i) {
++					prefetchFor(i, k);
++					CUnit* unit = activeUnits[i];
++					if ((brBits[i] & 0xC0) != 0) {
++						// with synced receivers an event here was not predicted
++						brStat[4] += (synced && (brBits[i] & 0x40) != 0);
++						unit->BrUpdateFinish(brBits[i]);
+ 					}
++					collisionMap(unit);
++					assert(activeUnits[i] == unit);
+ 				}
++			} else {
++				for (size_t i = cur; i < k; ++i)
++					ordinary(i);
+ 			}
+-			CUnit* unit = activeUnits[i];
+-			if ((brBits[i] & 0xC0) != 0)
+-				unit->BrUpdateFinish(brBits[i]);
+-			if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + unit->id) % rate) == 0)
+-				unit->moveType->UpdateCollisionMap();
+-			assert(activeUnits[i] == unit);
++
++			if (k >= activeUnitCount)
++				break;
++
++			// the serial point
++			const unsigned luaWrites = g_brLuaWrites;
++			const unsigned hmv = g_brHeightMapVersion;
++			const size_t numActive = activeUnits.size();
++			ordinary(k);
++			brStat[0] += 1;
++			cur = k + 1;
++
++			if (cur < activeUnitCount && (g_brLuaWrites != luaWrites || g_brHeightMapVersion != hmv || activeUnits.size() != numActive)) {
++				brStat[3] += 1;
++				plan(cur);
++			}
++		}
++
++		brStat[5] += 1;
++		if ((gs->frameNum - brLogFrame) >= 9000) {
++			brLogFrame = gs->frameNum;
++			LOG("[BR_H101] f=%d units=%zu synced=%d frames=%lld serialPoints=%lld runs=%lld inRuns=%lld replans=%lld mispredictions=%lld", gs->frameNum, activeUnitCount, int(synced), brStat[5], brStat[0], brStat[1], brStat[2], brStat[3], brStat[4]);
+ 		}
+ 		return;
+ 	}
+diff --git a/rts/Sim/Units/UnitTypes/Builder.h b/rts/Sim/Units/UnitTypes/Builder.h
+index 5e8f757..07e8a0e 100644
+--- a/rts/Sim/Units/UnitTypes/Builder.h
++++ b/rts/Sim/Units/UnitTypes/Builder.h
+@@ -32,6 +32,7 @@ public:
+ 	CBuilder();
+ 
+ 	void Update();
++	bool BrOwnUpdate() const override { return true; } // [barreplay] H101
+ 	void SlowUpdate();
+ 	void DependentDied(CObject* o);
+ 
+diff --git a/rts/Sim/Units/UnitTypes/Factory.h b/rts/Sim/Units/UnitTypes/Factory.h
+index 314b189..3734210 100644
+--- a/rts/Sim/Units/UnitTypes/Factory.h
++++ b/rts/Sim/Units/UnitTypes/Factory.h
+@@ -28,6 +28,7 @@ public:
+ 	unsigned int QueueBuild(const UnitDef* buildeeDef, const Command& buildCmd);
+ 
+ 	void Update();
++	bool BrOwnUpdate() const override { return true; } // [barreplay] H101
+ 
+ 	void DependentDied(CObject* o);
+ 	void CreateNanoParticle(bool highPriority = false);
+-- 
+2.53.0
+

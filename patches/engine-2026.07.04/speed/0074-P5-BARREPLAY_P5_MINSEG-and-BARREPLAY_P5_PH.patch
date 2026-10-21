@@ -1,0 +1,52 @@
+From 242feda950d0f22edc970d400cc056d850dc193d Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 12:51:19 +0000
+Subject: [PATCH 74/78] [barreplay] P5: BARREPLAY_P5_MINSEG and
+ BARREPLAY_P5_PHASES for bisecting
+
+---
+ rts/Sim/Units/Scripts/BrCobPar.cpp | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.cpp b/rts/Sim/Units/Scripts/BrCobPar.cpp
+index 8c3ddab..d26ad78 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.cpp
++++ b/rts/Sim/Units/Scripts/BrCobPar.cpp
+@@ -237,7 +237,11 @@ namespace BrP5 {
+ 		bool statsOn = false;
+ 		struct Stats { long long phases = 0, ticks = 0, par = 0, segs = 0, segTicks = 0, serialPoints = 0; int lastFrame = 0; } st;
+ 
+-		constexpr int MIN_SEG = 6;
++		// BARREPLAY_P5_MINSEG: shorter runs of worker-safe ticks run on the main
++		// thread as before; BARREPLAY_P5_PHASES: 1 = the running list only,
++		// 2 = the sleepers only, 3 = both (for bisecting)
++		int minSeg = 6;
++		int phases = 3;
+ 
+ 		inline uint64_t Pack(uint64_t gen, uint64_t end, uint64_t idx) { return (gen << 48) | (end << 24) | idx; }
+ 		inline int IdxOf(uint64_t v) { return int(v & 0xFFFFFF); }
+@@ -411,7 +415,11 @@ namespace BrP5 {
+ 			if (const char* w = getenv("BARREPLAY_P5_WORKERS"))
+ 				nWorkers = std::max(0, atoi(w));
+ 			statsOn = (getenv("BARREPLAY_P5_STATS") != nullptr);
+-			LOG("[barreplay] P5 parallel COB ticks: %d workers", nWorkers);
++			if (const char* m = getenv("BARREPLAY_P5_MINSEG"))
++				minSeg = std::max(1, atoi(m));
++			if (const char* p = getenv("BARREPLAY_P5_PHASES"))
++				phases = atoi(p);
++			LOG("[barreplay] P5 parallel COB ticks: %d workers, segments of %d+, phases %d", nWorkers, minSeg, phases);
+ 		}
+ 
+ 		engine = e;
+@@ -471,7 +479,7 @@ namespace BrP5 {
+ 			while (b < n && items[b].par)
+ 				++b;
+ 
+-			if ((b - a) >= MIN_SEG && nWorkers > 0) {
++			if ((b - a) >= minSeg && nWorkers > 0 && (phases & (sleepers? 2: 1)) != 0) {
+ 				StartWorkers();
+ 				st.segs++;
+ 				st.segTicks += (b - a);
+-- 
+2.53.0
+

@@ -1,0 +1,68 @@
+From b75d6f06ed3f3418edecdd4ca3fbeea4db039ecf Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:53:16 +0000
+Subject: [PATCH 146/149] [barreplay] H120: a synced ray above its blocks'
+ height bounds misses the ground at once (toggle3 0x4000)
+
+CGround::LineGroundCol (1.2% of the main thread in speed62's late window: beam
+traces, lines of fire) walks every square between the clamped ends with two
+triangle tests each. The squares walked lie in the ends' bounding box, and each
+corner height there is at most the H106 bound of its 32 x 32 block (a block
+maximum raised by every synced write). A segment whose lower end is more than an
+elmo above the bound of every block in the box is above every triangle it could
+cross, so the walk would return -1: return it. Synced rays only (the bounds are
+the synced map's), after the start-underground test, which such a ray fails
+anyway.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Map/Ground.cpp | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/rts/Map/Ground.cpp b/rts/Map/Ground.cpp
+index 736e21b..d628948 100644
+--- a/rts/Map/Ground.cpp
++++ b/rts/Map/Ground.cpp
+@@ -212,6 +212,8 @@ inline static bool ClampInMapHeight(float3& from, float3& to)
+ }
+ 
+ 
++extern unsigned g_brToggles3; // [barreplay] H120
++
+ float CGround::LineGroundCol(float3 from, float3 to, bool synced)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+@@ -247,6 +249,30 @@ float CGround::LineGroundCol(float3 from, float3 to, bool synced)
+ 
+ 		if (from.y <= hm[sz * mapDims.mapxp1 + sx])
+ 			return 0.0f + skippedDist;
++
++		// [barreplay] H120 (toggle3 0x4000): the squares walked below lie in the
++		// bounding box of <from> and <to>, and every corner height of those
++		// squares is at most the H106 bound of its 32 x 32 block (Map/ReadMap.h:
++		// a block maximum raised by every synced write). A segment whose lower
++		// end is more than an elmo above the bound of every block in the box is
++		// above every triangle it could cross, so each square's test misses and
++		// the walk returns -1.
++		if ((g_brToggles3 & 0x4000) != 0 && !g_brHeightBlockMax.empty()) {
++			const int nbx = g_brHeightBlocksX;
++			const int nbz = int(g_brHeightBlockMax.size()) / nbx;
++			const int sx0 = int(std::clamp(std::min(from.x, to.x) / SQUARE_SIZE, 0.0f, static_cast<float>(mapDims.mapx)));
++			const int sx1 = int(std::clamp(std::max(from.x, to.x) / SQUARE_SIZE, 0.0f, static_cast<float>(mapDims.mapx)));
++			const int sz0 = int(std::clamp(std::min(from.z, to.z) / SQUARE_SIZE, 0.0f, static_cast<float>(mapDims.mapy)));
++			const int sz1 = int(std::clamp(std::max(from.z, to.z) / SQUARE_SIZE, 0.0f, static_cast<float>(mapDims.mapy)));
++			const int bx0 = std::min(sx0 / BR_HBLOCK, nbx - 1), bx1 = std::min(sx1 / BR_HBLOCK, nbx - 1);
++			const int bz0 = std::min(sz0 / BR_HBLOCK, nbz - 1), bz1 = std::min(sz1 / BR_HBLOCK, nbz - 1);
++			float bound = std::numeric_limits<float>::lowest();
++			for (int bz = bz0; bz <= bz1; ++bz)
++				for (int bx = bx0; bx <= bx1; ++bx)
++					bound = std::max(bound, g_brHeightBlockMax[bz * nbx + bx]);
++			if (std::min(from.y, to.y) > bound + 1.0f)
++				return -1.0f;
++		}
+ 	}
+ 
+ 	const float dx = to.x - from.x;
+-- 
+2.53.0
+

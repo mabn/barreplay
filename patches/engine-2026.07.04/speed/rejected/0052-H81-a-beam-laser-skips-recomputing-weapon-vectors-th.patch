@@ -1,0 +1,219 @@
+From 2855070531151ee9feb7204cf83aa03246f2c517 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 19:53:38 +0000
+Subject: [PATCH 52/54] H81: a beam laser skips recomputing weapon vectors the
+ weapon-vectors pass already computed from the same inputs (toggle 0x8000)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Map/ReadMap.h                        |  3 +++
+ rts/Rendering/Models/LocalModel.cpp      |  1 +
+ rts/Rendering/Models/LocalModel.hpp      |  4 +++
+ rts/Rendering/Models/LocalModelPiece.cpp |  5 ++++
+ rts/Sim/Weapons/BeamLaser.cpp            |  7 ++++-
+ rts/Sim/Weapons/Weapon.cpp               | 34 ++++++++++++++++++++++++
+ rts/Sim/Weapons/Weapon.h                 | 12 +++++++++
+ 7 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Map/ReadMap.h b/rts/Map/ReadMap.h
+index a84fe2c..e2b458d 100644
+--- a/rts/Map/ReadMap.h
++++ b/rts/Map/ReadMap.h
+@@ -197,6 +197,8 @@ public:
+ 
+ 	/// if you modify the heightmap through these, call UpdateHeightMapSynced
+ 	float SetHeight(const int idx, const float h, const int add = 0);
++	// [barreplay] H81: bumped by every write to the synced height map
++	uint32_t brHeightChanges = 0;
+ 	float AddHeight(const int idx, const float a);
+ 
+ 	/// These will not modify the current heightmap, only the original
+@@ -317,6 +319,7 @@ extern MapDimensions mapDims;
+ 
+ inline float CReadMap::AddHeight(const int idx, const float a) { return SetHeight(idx, a, 1); }
+ inline float CReadMap::SetHeight(const int idx, const float h, const int add) {
++	++brHeightChanges;
+ 	return SetHeightValue((*heightMapSyncedPtr)[idx], idx, h, add);
+ }
+ 
+diff --git a/rts/Rendering/Models/LocalModel.cpp b/rts/Rendering/Models/LocalModel.cpp
+index ff8d7f6..f0adbe7 100644
+--- a/rts/Rendering/Models/LocalModel.cpp
++++ b/rts/Rendering/Models/LocalModel.cpp
+@@ -50,6 +50,7 @@ void LocalModel::SetLODCount(uint32_t lodCount)
+ void LocalModel::SetModel(const S3DModel* model, bool initialize)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	++brChanges;
+ 	// make sure we do not get called for trees, etc
+ 	assert(model != nullptr);
+ 	assert(model->numPieces >= 1);
+diff --git a/rts/Rendering/Models/LocalModel.hpp b/rts/Rendering/Models/LocalModel.hpp
+index 8269d33..9de91f7 100644
+--- a/rts/Rendering/Models/LocalModel.hpp
++++ b/rts/Rendering/Models/LocalModel.hpp
+@@ -95,4 +95,8 @@ private:
+ 	LuaObjectMaterialData luaMaterialData;
+ 
+ 	bool needsBoundariesRecalc = true;
++public:
++	// [barreplay] H81: bumped by every change of a piece's position, rotation or
++	// scale (bit-exact) and by SetModel, so equal values mean the same transforms
++	uint32_t brChanges = 0;
+ };
+\ No newline at end of file
+diff --git a/rts/Rendering/Models/LocalModelPiece.cpp b/rts/Rendering/Models/LocalModelPiece.cpp
+index 67f8801..6b68e08 100644
+--- a/rts/Rendering/Models/LocalModelPiece.cpp
++++ b/rts/Rendering/Models/LocalModelPiece.cpp
+@@ -1,4 +1,5 @@
+ #include "LocalModelPiece.hpp"
++#include <cstring>
+ 
+ #include "3DModelPiece.hpp"
+ #include "LocalModel.hpp"
+@@ -97,6 +98,8 @@ void LocalModelPiece::SetFloat3(const float3& src, float3& dst) {
+ 		assert(localModel);
+ 		localModel->SetBoundariesNeedsRecalc();
+ 	}
++	if (localModel != nullptr && std::memcmp(&dst, &src, sizeof(float3)) != 0)
++		++localModel->brChanges;
+ 
+ 	dst = src;
+ }
+@@ -112,6 +115,8 @@ void LocalModelPiece::SetFloat(const float& src, float& dst)
+ 		assert(localModel);
+ 		localModel->SetBoundariesNeedsRecalc();
+ 	}
++	if (localModel != nullptr && std::memcmp(&dst, &src, sizeof(float)) != 0)
++		++localModel->brChanges;
+ 
+ 	dst = src;
+ }
+diff --git a/rts/Sim/Weapons/BeamLaser.cpp b/rts/Sim/Weapons/BeamLaser.cpp
+index e9c0029..d944fa3 100644
+--- a/rts/Sim/Weapons/BeamLaser.cpp
++++ b/rts/Sim/Weapons/BeamLaser.cpp
+@@ -6,6 +6,7 @@
+ #include "Game/GameHelper.h"
+ #include "Game/TraceRay.h"
+ #include "Map/Ground.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Sim/Misc/CollisionHandler.h"
+ #include "Sim/Misc/GlobalSynced.h"
+ #include "Sim/Misc/TeamHandler.h"
+@@ -129,10 +130,14 @@ void CBeamLaser::UpdatePosAndMuzzlePos()
+ 
+ 		aimFromPos = owner->GetObjectSpacePos(relWeaponPos * float3(-1.0f, 1.0f, -1.0f)); // ??
+ 		weaponMuzzlePos = owner->GetObjectSpacePos(relWeaponMuzzlePos);
++		BrDropVectorStamp();
+ 
+ 		sweepFireState.SetSweepTempDir(newWeaponDir);
+ 	} else {
+-		UpdateWeaponVectors();
++		// [barreplay] H81 (toggle 0x8000): the weapon-vectors pass of this frame
++		// computed exactly these; recompute only if an input moved since
++		if ((g_brToggles & 0x8000) == 0 || !BrVectorsCurrent())
++			UpdateWeaponVectors();
+ 
+ 		if (weaponDef->sweepFire) {
+ 			// needed for first call to GetFireDir() when new sweep starts after inactivity
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index d4fb6e6..4c216d2 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -11,6 +11,7 @@ std::vector<int> g_brReloadLog;
+ #include "Game/Players/Player.h"
+ #include "Lua/LuaConfig.h"
+ #include "Map/Ground.h"
++#include "Map/ReadMap.h"
+ #include "Map/MapInfo.h"
+ #include "Sim/Misc/CollisionHandler.h"
+ #include "Sim/Misc/CollisionVolume.h"
+@@ -33,6 +34,8 @@ std::vector<int> g_brReloadLog;
+ #include "System/SpringMath.h"
+ #include "System/creg/DefTypes.h"
+ #include "System/Sound/ISoundChannels.h"
++
++#include <cstring>
+ #include "System/Log/ILog.h"
+ 
+ #include "System/Misc/TracyDefs.h"
+@@ -297,6 +300,36 @@ void CWeapon::UpdateWeaponVectors()
+ 	if (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z)) {
+ 		aimFromPos = owner->pos + UpVector * 10;
+ 	}
++
++	brVecStamp.valid = true;
++	brVecStamp.pieces = owner->localModel.brChanges;
++	brVecStamp.heights = readMap->brHeightChanges;
++	brVecStamp.aimFromPiece = aimFromPiece;
++	brVecStamp.muzzlePiece = muzzlePiece;
++	brVecStamp.pos = owner->pos;
++	brVecStamp.front = owner->frontdir;
++	brVecStamp.up = owner->updir;
++	brVecStamp.right = owner->rightdir;
++}
++
++// [barreplay] H81: UpdateWeaponVectors reads the two pieces' model-space
++// transforms (a function of the model's piece positions, rotations and scales,
++// all of which bump LocalModel::brChanges when they change), the owner's
++// position and direction vectors, and the synced height map at one point (every
++// write bumps CReadMap::brHeightChanges). Equal inputs, bit for bit, give equal
++// outputs; anything else writing the outputs drops the stamp.
++bool CWeapon::BrVectorsCurrent() const
++{
++	const BrVecStamp& s = brVecStamp;
++	return s.valid
++		&& s.pieces == owner->localModel.brChanges
++		&& s.heights == readMap->brHeightChanges
++		&& s.aimFromPiece == aimFromPiece
++		&& s.muzzlePiece == muzzlePiece
++		&& std::memcmp(&s.pos, &owner->pos, sizeof(float3)) == 0
++		&& std::memcmp(&s.front, &owner->frontdir, sizeof(float3)) == 0
++		&& std::memcmp(&s.up, &owner->updir, sizeof(float3)) == 0
++		&& std::memcmp(&s.right, &owner->rightdir, sizeof(float3)) == 0;
+ }
+ 
+ 
+@@ -1014,6 +1047,7 @@ WeaponVectorsState CWeapon::SaveWeaponVectors() const
+ 
+ void CWeapon::LoadWeaponVectors(const WeaponVectorsState& wvs)
+ {
++	BrDropVectorStamp();
+ 	relAimFromPos = wvs.relAimFromPos;
+ 	relWeaponMuzzlePos = wvs.relWeaponMuzzlePos;
+ 	aimFromPos = wvs.aimFromPos;
+diff --git a/rts/Sim/Weapons/Weapon.h b/rts/Sim/Weapons/Weapon.h
+index 0908112..18c293e 100644
+--- a/rts/Sim/Weapons/Weapon.h
++++ b/rts/Sim/Weapons/Weapon.h
+@@ -114,6 +114,10 @@ public:
+ 	bool IsFastAutoRetargetingEnabled() const { return fastAutoRetargeting; }
+ 	void UpdateWeaponErrorVector();
+ 	void UpdateWeaponVectors();
++	// [barreplay] H81: whether UpdateWeaponVectors would compute exactly what it
++	// computed last time (every input it reads is bit-for-bit unchanged)
++	bool BrVectorsCurrent() const;
++	void BrDropVectorStamp() { brVecStamp.valid = false; }
+ protected:
+ 	virtual void FireImpl(const bool scriptCall) {}
+ 	virtual void UpdateWantedDir();
+@@ -230,6 +234,14 @@ public:
+ 
+ protected:
+ 	SWeaponTarget currentTarget;
++
++	// [barreplay] H81: the inputs of the last UpdateWeaponVectors (see BrVectorsCurrent)
++	struct BrVecStamp {
++		bool valid = false;
++		uint32_t pieces = 0, heights = 0;
++		int aimFromPiece = -1, muzzlePiece = -1;
++		float3 pos, front, up, right;
++	} brVecStamp;
+ 	float3 currentTargetPos;
+ 
+ 	// projectiles that are on the way to our interception zone
+-- 
+2.53.0
+

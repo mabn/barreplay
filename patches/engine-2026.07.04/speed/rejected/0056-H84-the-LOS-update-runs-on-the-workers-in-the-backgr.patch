@@ -1,0 +1,2553 @@
+From 5a225acae0d84a50b6b256593d85f209e5ec07dc Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 01:52:09 +0000
+Subject: [PATCH 56/62] H84: the LOS update runs on the workers in the
+ background (toggle 0x8000); every way into the LOS state and every write to
+ what it reads joins first
+
+---
+ rts/Lua/LuaSyncedCtrl.cpp               | 189 ++++++++++++++++++++++++
+ rts/Lua/LuaSyncedMoveCtrl.cpp           |  31 ++++
+ rts/Map/BasicMapDamage.cpp              |   2 +
+ rts/Map/ReadMap.cpp                     |   2 +
+ rts/Net/NetCommands.cpp                 |   2 +
+ rts/Sim/Misc/BrLosJoin.h                |  24 +++
+ rts/Sim/Misc/LosHandler.cpp             |  91 +++++++++++-
+ rts/Sim/Misc/LosHandler.h               |   8 +
+ rts/Sim/Objects/SolidObject.h           |   3 +
+ rts/Sim/Units/Scripts/LuaUnitScript.cpp |  39 +++++
+ rts/Sim/Units/Scripts/UnitScript.cpp    |   2 +
+ rts/Sim/Units/Unit.cpp                  |   9 ++
+ rts/Sim/Units/UnitHandler.cpp           |   2 +
+ 13 files changed, 401 insertions(+), 3 deletions(-)
+ create mode 100644 rts/Sim/Misc/BrLosJoin.h
+
+diff --git a/rts/Lua/LuaSyncedCtrl.cpp b/rts/Lua/LuaSyncedCtrl.cpp
+index 2af3976..aca814d 100644
+--- a/rts/Lua/LuaSyncedCtrl.cpp
++++ b/rts/Lua/LuaSyncedCtrl.cpp
+@@ -4,6 +4,7 @@
+ #include <cctype>
+ 
+ #include "LuaSyncedCtrl.h"
++#include "Sim/Misc/BrLosJoin.h"
+ 
+ #include "LuaInclude.h"
+ #include "LuaConfig.h"
+@@ -894,6 +895,7 @@ static inline bool IsPlayerSynced(const CPlayer* player)
+  */
+ int LuaSyncedCtrl::SetAlly(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int firstAllyTeamID = luaL_checkint(L, 1);
+ 	const int secondAllyTeamID = luaL_checkint(L, 2);
+ 
+@@ -919,6 +921,7 @@ int LuaSyncedCtrl::SetAlly(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const unsigned int allyTeamID = luaL_checkint(L, 1);
+ 	const float xMin = luaL_checkfloat(L, 2);
+ 	const float zMin = luaL_checkfloat(L, 3);
+@@ -948,6 +951,7 @@ int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
+  */
+ int LuaSyncedCtrl::AssignPlayerToTeam(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int playerID = luaL_checkint(L, 1);
+ 	const int teamID = luaL_checkint(L, 2);
+ 
+@@ -979,6 +983,7 @@ int LuaSyncedCtrl::AssignPlayerToTeam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamStartPosition(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const unsigned int teamID = luaL_checkint(L, 1);
+ 	float3 pickPos =
+ 		{ luaL_checkfloat(L, 2)
+@@ -1010,6 +1015,7 @@ int LuaSyncedCtrl::SetTeamStartPosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetPlayerReadyState(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const unsigned int playerID = luaL_checkint(L, 1);
+ 	const bool isReady = luaL_checkboolean(L, 2);
+ 
+@@ -1033,6 +1039,7 @@ int LuaSyncedCtrl::SetPlayerReadyState(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetGlobalLos(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int allyTeam = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidAllyTeam(allyTeam))
+@@ -1051,6 +1058,7 @@ int LuaSyncedCtrl::SetGlobalLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetCheatingEnabled(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	gs->cheatEnabled = luaL_checkboolean(L, 1);
+ 	return 0;
+ }
+@@ -1065,6 +1073,7 @@ int LuaSyncedCtrl::SetCheatingEnabled(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetGodMode(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const bool controlAllies  = luaL_optboolean(L, 1, (gs->godMode & GODMODE_ATC_BIT) != 0);
+ 	const bool controlEnemies = luaL_optboolean(L, 2, (gs->godMode & GODMODE_ETC_BIT) != 0);
+ 
+@@ -1093,6 +1102,7 @@ int LuaSyncedCtrl::SetGodMode(lua_State* L)
+  */
+ int LuaSyncedCtrl::KillTeam(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1125,6 +1135,7 @@ int LuaSyncedCtrl::KillTeam(lua_State* L)
+  */
+ int LuaSyncedCtrl::GameOver(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!lua_istable(L, 1)) {
+ 		luaL_error(L, "Incorrect arguments to GameOver()");
+ 		return 0;
+@@ -1167,6 +1178,7 @@ int LuaSyncedCtrl::GameOver(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTidal(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	envResHandler.LoadTidal(luaL_optnumber(L, 1, envResHandler.GetCurrentTidalStrength()));
+ 	return 0;
+ }
+@@ -1181,6 +1193,7 @@ int LuaSyncedCtrl::SetTidal(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetWind(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	envResHandler.LoadWind(luaL_optnumber(L, 1, envResHandler.GetMinWindStrength()), luaL_optnumber(L, 2, envResHandler.GetMaxWindStrength()));
+ 	return 0;
+ }
+@@ -1196,6 +1209,7 @@ int LuaSyncedCtrl::SetWind(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddTeamResource(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1245,6 +1259,7 @@ int LuaSyncedCtrl::AddTeamResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::UseTeamResource(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1328,6 +1343,7 @@ int LuaSyncedCtrl::UseTeamResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamResource(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1379,6 +1395,7 @@ int LuaSyncedCtrl::SetTeamResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamShareLevel(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1420,6 +1437,7 @@ int LuaSyncedCtrl::SetTeamShareLevel(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddTeamResourceExcessStats(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1467,6 +1485,7 @@ int LuaSyncedCtrl::AddTeamResourceExcessStats(lua_State* L)
+  */
+ int LuaSyncedCtrl::ShareTeamResource(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int teamID1 = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID1))
+@@ -1620,6 +1639,7 @@ void SetRulesParam(lua_State* L, const char* caller, int offset,
+  */
+ int LuaSyncedCtrl::SetGameRulesParam(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	SetRulesParam(L, __func__, 0, CSplitLuaHandle::gameParams);
+ 	return 0;
+ }
+@@ -1635,6 +1655,7 @@ int LuaSyncedCtrl::SetGameRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamRulesParam(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CTeam* team = ParseTeam(L, __func__, 1);
+ 	if (team == nullptr)
+ 		return 0;
+@@ -1653,6 +1674,7 @@ int LuaSyncedCtrl::SetTeamRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetPlayerRulesParam(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int playerID = luaL_checkint(L, 1);
+ 	if (!playerHandler.IsValidPlayer(playerID))
+ 		return 0;
+@@ -1677,6 +1699,7 @@ int LuaSyncedCtrl::SetPlayerRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1697,6 +1720,7 @@ int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureRulesParam(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	if (feature == nullptr)
+ 		return 0;
+@@ -1761,6 +1785,7 @@ static inline void ParseCobArgs(
+  */
+ int LuaSyncedCtrl::CallCOBScript(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int numArgs = lua_gettop(L);
+ 
+ 	if (numArgs < 3)
+@@ -1819,6 +1844,7 @@ int LuaSyncedCtrl::CallCOBScript(lua_State* L)
+  */
+ int LuaSyncedCtrl::GetCOBScriptID(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int args = lua_gettop(L); // number of arguments
+ 
+ 	if ((args < 2) || !lua_isnumber(L, 1) || !lua_isstring(L, 2))
+@@ -1870,6 +1896,7 @@ int LuaSyncedCtrl::GetCOBScriptID(lua_State* L)
+  */
+ int LuaSyncedCtrl::CreateUnit(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (inCreateUnit >= MAX_CMD_RECURSION_DEPTH) {
+ 		luaL_error(L, "[%s()]: recursion is not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
+ 		return 0;
+@@ -1962,6 +1989,7 @@ int LuaSyncedCtrl::CreateUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::DestroyUnit(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2004,6 +2032,7 @@ int LuaSyncedCtrl::DestroyUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::TransferUnit(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2068,6 +2097,7 @@ int LuaSyncedCtrl::TransferUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::TransferTeamMaxUnits(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int fromTeamID = luaL_checkint(L, 1);
+ 	if (!teamHandler.IsValidTeam(fromTeamID))
+ 		return 0;
+@@ -2105,6 +2135,7 @@ int LuaSyncedCtrl::TransferTeamMaxUnits(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitCosts(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2242,6 +2273,7 @@ static bool SetUnitStorageParam(CUnit* unit, const char* name, float value)
+  */
+ int LuaSyncedCtrl::SetUnitResourcing(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2286,6 +2318,7 @@ int LuaSyncedCtrl::SetUnitResourcing(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitStorage(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2319,6 +2352,7 @@ int LuaSyncedCtrl::SetUnitStorage(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2359,6 +2393,7 @@ int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2416,6 +2451,7 @@ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMaxHealth(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2436,6 +2472,7 @@ int LuaSyncedCtrl::SetUnitMaxHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitStockpile(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2579,6 +2616,7 @@ static bool SetSingleUnitWeaponState(lua_State* L, CWeapon* weapon, int index)
+  */
+ int LuaSyncedCtrl::SetUnitUseWeapons(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2607,6 +2645,7 @@ int LuaSyncedCtrl::SetUnitUseWeapons(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitWeaponState(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2742,6 +2781,7 @@ static int SetSingleDynDamagesKey(lua_State* L, DynDamageArray* damages, int ind
+  */
+ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2793,6 +2833,7 @@ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMaxRange(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2813,6 +2854,7 @@ int LuaSyncedCtrl::SetUnitMaxRange(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitExperience(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2832,6 +2874,7 @@ int LuaSyncedCtrl::SetUnitExperience(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitExperience(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2852,6 +2895,7 @@ int LuaSyncedCtrl::AddUnitExperience(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitArmored(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2944,6 +2988,7 @@ static unsigned char ParseLosBits(lua_State* L, int index, unsigned char bits)
+  */
+ int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2991,6 +3036,7 @@ int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLosState(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3031,6 +3077,7 @@ int LuaSyncedCtrl::SetUnitLosState(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitCloak(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3067,6 +3114,7 @@ int LuaSyncedCtrl::SetUnitCloak(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitStealth(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3085,6 +3133,7 @@ int LuaSyncedCtrl::SetUnitStealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitSonarStealth(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3102,6 +3151,7 @@ int LuaSyncedCtrl::SetUnitSonarStealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitSeismicSignature(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* const unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		return 0;
+@@ -3120,6 +3170,7 @@ int LuaSyncedCtrl::SetUnitSeismicSignature(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLeavesGhost(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!gameSetup->ghostedBuildings)
+ 		return 0;
+ 
+@@ -3140,6 +3191,7 @@ int LuaSyncedCtrl::SetUnitLeavesGhost(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitAlwaysVisible(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectAlwaysVisible(L, ParseUnit(L, __func__, 1), __func__));
+ }
+ 
+@@ -3153,6 +3205,7 @@ int LuaSyncedCtrl::SetUnitAlwaysVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitUseAirLos(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectUseAirLos(L, ParseUnit(L, __func__, 1), __func__));
+ }
+ 
+@@ -3166,6 +3219,7 @@ int LuaSyncedCtrl::SetUnitUseAirLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMetalExtraction(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3193,6 +3247,7 @@ int LuaSyncedCtrl::SetUnitMetalExtraction(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitHarvestStorage(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3215,6 +3270,7 @@ int LuaSyncedCtrl::SetUnitHarvestStorage(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBuildParams(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3251,6 +3307,7 @@ int LuaSyncedCtrl::SetUnitBuildParams(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBuildSpeed(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3303,6 +3360,7 @@ int LuaSyncedCtrl::SetUnitBuildSpeed(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitNanoPieces(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3364,6 +3422,7 @@ int LuaSyncedCtrl::SetUnitNanoPieces(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBlocking(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectBlocking(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3413,6 +3472,7 @@ int LuaSyncedCtrl::SetUnitCrashing(lua_State* L) {
+  */
+ int LuaSyncedCtrl::SetUnitShieldState(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3450,6 +3510,7 @@ int LuaSyncedCtrl::SetUnitShieldState(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitShieldRechargeDelay(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const auto unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		return 0;
+@@ -3489,6 +3550,7 @@ int LuaSyncedCtrl::SetUnitShieldRechargeDelay(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3533,6 +3595,7 @@ int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPhysicalStateBit(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3551,6 +3614,7 @@ int LuaSyncedCtrl::SetUnitPhysicalStateBit(lua_State* L)
+  */
+ int LuaSyncedCtrl::GetUnitPhysicalState(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3577,6 +3641,7 @@ int LuaSyncedCtrl::SetUnitFuel(lua_State* L) { return 0; } // FIXME: DELETE ME
+  */
+ int LuaSyncedCtrl::SetUnitNeutral(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3613,6 +3678,7 @@ int LuaSyncedCtrl::SetUnitNeutral(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitTarget(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3683,6 +3749,7 @@ int LuaSyncedCtrl::SetUnitTarget(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMidAndAimPos(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr) {
+@@ -3726,6 +3793,7 @@ int LuaSyncedCtrl::SetUnitMidAndAimPos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitRadiusAndHeight(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr) {
+@@ -3762,6 +3830,7 @@ int LuaSyncedCtrl::SetUnitRadiusAndHeight(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBuildeeRadius(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3783,6 +3852,7 @@ int LuaSyncedCtrl::SetUnitBuildeeRadius(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3827,6 +3897,7 @@ int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 	return Impl::SetObjectPieceMatrix(L, unit);
+ }
+@@ -3868,6 +3939,7 @@ int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitCollisionVolumeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectCollisionVolumeData(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3889,6 +3961,7 @@ int LuaSyncedCtrl::SetUnitCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceCollisionVolumeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectPieceCollisionVolumeData(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3903,6 +3976,7 @@ int LuaSyncedCtrl::SetUnitPieceCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceVisible(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectPieceVisible(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3916,6 +3990,7 @@ int LuaSyncedCtrl::SetUnitPieceVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3976,6 +4051,7 @@ int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPosErrorParams(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4011,6 +4087,7 @@ int LuaSyncedCtrl::SetUnitPosErrorParams(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMoveGoal(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4045,6 +4122,7 @@ int LuaSyncedCtrl::SetUnitMoveGoal(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLandGoal(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4071,6 +4149,7 @@ int LuaSyncedCtrl::SetUnitLandGoal(lua_State* L)
+  */
+ int LuaSyncedCtrl::ClearUnitGoal(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4100,6 +4179,7 @@ int LuaSyncedCtrl::ClearUnitGoal(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPhysics(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectPhysicalState(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4111,6 +4191,7 @@ int LuaSyncedCtrl::SetUnitPhysics(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMass(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectMass(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4141,6 +4222,7 @@ int LuaSyncedCtrl::SetUnitMass(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPosition(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4181,6 +4263,7 @@ int LuaSyncedCtrl::SetUnitPosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitRotation(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectRotation(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4217,6 +4300,7 @@ int LuaSyncedCtrl::SetUnitRotation(lua_State* L)
+   */
+ int LuaSyncedCtrl::SetUnitDirection(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return SetSolidObjectDirection(L, ParseUnit(L, __func__, 1), __func__);
+ }
+ 
+@@ -4255,6 +4339,7 @@ int LuaSyncedCtrl::SetUnitDirection(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitHeadingAndUpDir(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return SetSolidObjectHeadingAndUpDir(L, ParseUnit(L, __func__, 1));
+ }
+ 
+@@ -4269,6 +4354,7 @@ int LuaSyncedCtrl::SetUnitHeadingAndUpDir(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitVelocity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectVelocity(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4287,6 +4373,7 @@ int LuaSyncedCtrl::SetUnitVelocity(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFactoryBuggerOff(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* u = ParseUnit(L, __func__, 1);
+ 	if (u == nullptr)
+ 		return 0;
+@@ -4323,6 +4410,7 @@ int LuaSyncedCtrl::SetFactoryBuggerOff(lua_State* L)
+  */
+ int LuaSyncedCtrl::BuggerOff(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	float3 pos;
+ 	pos.x = luaL_checkfloat(L, 1);
+ 	pos.z = luaL_checkfloat(L, 3);
+@@ -4401,6 +4489,7 @@ static std::optional<std::tuple<float, int, CUnit*, int, float3> > ParseDamagePa
+  */
+ int LuaSyncedCtrl::AddFeatureDamage(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -4436,6 +4525,7 @@ int LuaSyncedCtrl::AddFeatureDamage(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4469,6 +4559,7 @@ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4491,6 +4582,7 @@ int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitSeismicPing(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4512,6 +4604,7 @@ int LuaSyncedCtrl::AddUnitSeismicPing(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitResource(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4548,6 +4641,7 @@ int LuaSyncedCtrl::AddUnitResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::UseUnitResource(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4618,6 +4712,7 @@ int LuaSyncedCtrl::UseUnitResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddObjectDecal(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4635,6 +4730,7 @@ int LuaSyncedCtrl::AddObjectDecal(lua_State* L)
+  */
+ int LuaSyncedCtrl::RemoveObjectDecal(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4659,6 +4755,7 @@ int LuaSyncedCtrl::RemoveObjectDecal(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddGrass(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const float3 pos(luaL_checkfloat(L, 1), 0.0f, luaL_checkfloat(L, 2));
+ 	const uint8_t grassValue = static_cast<uint8_t>(luaL_optint(L, 3, 1));
+ 
+@@ -4674,6 +4771,7 @@ int LuaSyncedCtrl::AddGrass(lua_State* L)
+  */
+ int LuaSyncedCtrl::RemoveGrass(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const float3 pos(luaL_checkfloat(L, 1), 0.0f, luaL_checkfloat(L, 2));
+ 
+ 	grassDrawer->RemoveGrass(pos.cClampInBounds());
+@@ -4700,6 +4798,7 @@ int LuaSyncedCtrl::RemoveGrass(lua_State* L)
+  */
+ int LuaSyncedCtrl::CreateFeature(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const FeatureDef* featureDef = nullptr;
+ 
+ 	if (lua_israwstring(L, 1)) {
+@@ -4792,6 +4891,7 @@ void LuaSyncedCtrl::DestroyFeatureCommon(lua_State* L, CFeature* feature)
+  */
+ int LuaSyncedCtrl::DestroyFeature(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	if (feature == nullptr)
+ 		return 0;
+@@ -4811,6 +4911,7 @@ int LuaSyncedCtrl::DestroyFeature(lua_State* L)
+  */
+ int LuaSyncedCtrl::TransferFeature(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	if (feature == nullptr)
+ 		return 0;
+@@ -4832,6 +4933,7 @@ int LuaSyncedCtrl::TransferFeature(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureAlwaysVisible(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectAlwaysVisible(L, ParseFeature(L, __func__, 1), __func__));
+ }
+ 
+@@ -4844,6 +4946,7 @@ int LuaSyncedCtrl::SetFeatureAlwaysVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureUseAirLos(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectUseAirLos(L, ParseFeature(L, __func__, 1), __func__));
+ }
+ 
+@@ -4857,6 +4960,7 @@ int LuaSyncedCtrl::SetFeatureUseAirLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureHealth(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -4880,6 +4984,7 @@ int LuaSyncedCtrl::SetFeatureHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMaxHealth(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -4899,6 +5004,7 @@ int LuaSyncedCtrl::SetFeatureMaxHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureReclaim(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -4921,6 +5027,7 @@ int LuaSyncedCtrl::SetFeatureReclaim(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureResources(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -4948,6 +5055,7 @@ int LuaSyncedCtrl::SetFeatureResources(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureResurrect(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5020,6 +5128,7 @@ int LuaSyncedCtrl::SetFeatureResurrect(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMoveCtrl(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5067,6 +5176,7 @@ int LuaSyncedCtrl::SetFeatureMoveCtrl(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePhysics(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectPhysicalState(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5079,6 +5189,7 @@ int LuaSyncedCtrl::SetFeaturePhysics(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMass(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectMass(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5094,6 +5205,7 @@ int LuaSyncedCtrl::SetFeatureMass(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePosition(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5120,6 +5232,7 @@ int LuaSyncedCtrl::SetFeaturePosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureRotation(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectRotation(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5156,6 +5269,7 @@ int LuaSyncedCtrl::SetFeatureRotation(lua_State* L)
+   */
+ int LuaSyncedCtrl::SetFeatureDirection(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return SetSolidObjectDirection(L, ParseFeature(L, __func__, 1), __func__);
+ }
+ 
+@@ -5174,6 +5288,7 @@ int LuaSyncedCtrl::SetFeatureDirection(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureHeadingAndUpDir(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return SetSolidObjectHeadingAndUpDir(L, ParseFeature(L, __func__, 1));
+ }
+ 
+@@ -5188,6 +5303,7 @@ int LuaSyncedCtrl::SetFeatureHeadingAndUpDir(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureVelocity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectVelocity(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5206,6 +5322,7 @@ int LuaSyncedCtrl::SetFeatureVelocity(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureBlocking(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectBlocking(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5218,6 +5335,7 @@ int LuaSyncedCtrl::SetFeatureBlocking(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureNoSelect(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5245,6 +5363,7 @@ int LuaSyncedCtrl::SetFeatureNoSelect(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMidAndAimPos(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr) {
+@@ -5288,6 +5407,7 @@ int LuaSyncedCtrl::SetFeatureMidAndAimPos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureRadiusAndHeight(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr) {
+@@ -5333,6 +5453,7 @@ int LuaSyncedCtrl::SetFeatureRadiusAndHeight(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureCollisionVolumeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectCollisionVolumeData(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5355,6 +5476,7 @@ int LuaSyncedCtrl::SetFeatureCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePieceCollisionVolumeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectPieceCollisionVolumeData(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5368,6 +5490,7 @@ int LuaSyncedCtrl::SetFeaturePieceCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetSolidObjectPieceVisible(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5382,6 +5505,7 @@ int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePieceMatrix(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	return Impl::SetObjectPieceMatrix(L, feature);
+ }
+@@ -5399,6 +5523,7 @@ int LuaSyncedCtrl::SetFeaturePieceMatrix(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureFireTime(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5434,6 +5559,7 @@ int LuaSyncedCtrl::SetFeatureFireTime(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureSmokeTime(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5471,6 +5597,7 @@ int LuaSyncedCtrl::SetFeatureSmokeTime(lua_State* L)
+  */
+ int LuaSyncedCtrl::CreateUnitWreck(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -5502,6 +5629,7 @@ int LuaSyncedCtrl::CreateUnitWreck(lua_State* L)
+ 
+ int LuaSyncedCtrl::CreateFeatureWreck(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5533,6 +5661,7 @@ int LuaSyncedCtrl::CreateFeatureWreck(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileAlwaysVisible(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectAlwaysVisible(L, ParseProjectile(L, __func__, 1), __func__));
+ }
+ 
+@@ -5546,6 +5675,7 @@ int LuaSyncedCtrl::SetProjectileAlwaysVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileUseAirLos(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectUseAirLos(L, ParseProjectile(L, __func__, 1), __func__));
+ }
+ 
+@@ -5564,6 +5694,7 @@ int LuaSyncedCtrl::SetProjectileUseAirLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileMoveControl(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5585,6 +5716,7 @@ int LuaSyncedCtrl::SetProjectileMoveControl(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectilePosition(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5613,6 +5745,7 @@ int LuaSyncedCtrl::SetProjectilePosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileVelocity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetWorldObjectVelocity(L, ParseProjectile(L, __func__, 1)));
+ }
+ 
+@@ -5622,6 +5755,7 @@ int LuaSyncedCtrl::SetProjectileVelocity(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileCollision(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5660,6 +5794,7 @@ int LuaSyncedCtrl::SetProjectileCollision(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileTarget(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* pro = ParseProjectile(L, __func__, 1);
+ 	CWeaponProjectile* wpro = nullptr;
+ 
+@@ -5740,6 +5875,7 @@ int LuaSyncedCtrl::SetProjectileTarget(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileTimeToLive(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	const int newTimeToLive = luaL_checkint(L, 2);
+@@ -5760,6 +5896,7 @@ int LuaSyncedCtrl::SetProjectileTimeToLive(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileIsIntercepted(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr || !proj->weapon)
+@@ -5782,6 +5919,7 @@ int LuaSyncedCtrl::SetProjectileIsIntercepted(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileDamages(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr || !proj->weapon)
+@@ -5816,6 +5954,7 @@ int LuaSyncedCtrl::SetProjectileDamages(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileIgnoreTrackingError(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5846,6 +5985,7 @@ int LuaSyncedCtrl::SetProjectileIgnoreTrackingError(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileGravity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5876,6 +6016,7 @@ int LuaSyncedCtrl::SetProjectileSpinVec(lua_State* L) { return 0; } // FIXME: DE
+  */
+ int LuaSyncedCtrl::SetPieceProjectileParams(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr || !proj->piece)
+@@ -5903,6 +6044,7 @@ int LuaSyncedCtrl::SetPieceProjectileParams(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileCEG(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5940,6 +6082,7 @@ int LuaSyncedCtrl::SetProjectileCEG(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitFinishCommand(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		luaL_error(L, "[%s] invalid unitID", __func__);
+@@ -5963,6 +6106,7 @@ int LuaSyncedCtrl::UnitFinishCommand(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderToUnit(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -6000,6 +6144,7 @@ int LuaSyncedCtrl::GiveOrderToUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	// units
+ 	std::vector<CUnit*> units;
+ 
+@@ -6042,6 +6187,7 @@ int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	// units
+ 	std::vector<CUnit*> units;
+ 
+@@ -6083,6 +6229,7 @@ int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderArrayToUnit(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* const unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		luaL_error(L, "[%s] invalid unitID", __func__);
+@@ -6121,6 +6268,7 @@ int LuaSyncedCtrl::GiveOrderArrayToUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	std::vector<CUnit*> units;
+ 	std::vector<Command> commands;
+ 
+@@ -6168,6 +6316,7 @@ int LuaSyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderArrayToUnitArray(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	// units
+ 	std::vector<CUnit*> units;
+ 	std::vector<Command> commands;
+@@ -6302,6 +6451,7 @@ static inline void ParseMapParams(lua_State* L, const char* caller,
+  */
+ int LuaSyncedCtrl::LevelHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6342,6 +6492,7 @@ int LuaSyncedCtrl::LevelHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AdjustHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6382,6 +6533,7 @@ int LuaSyncedCtrl::AdjustHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::RevertHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6428,6 +6580,7 @@ int LuaSyncedCtrl::RevertHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!inHeightMap) {
+ 		luaL_error(L, "AddHeightMap() can only be called in SetHeightMapFunc()");
+ 	}
+@@ -6478,6 +6631,7 @@ int LuaSyncedCtrl::AddHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!inHeightMap) {
+ 		luaL_error(L, "SetHeightMap() can only be called in SetHeightMapFunc()");
+ 	}
+@@ -6543,6 +6697,7 @@ int LuaSyncedCtrl::SetHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetHeightMapFunc(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6606,6 +6761,7 @@ int LuaSyncedCtrl::SetHeightMapFunc(lua_State* L)
+  */
+ int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6642,6 +6798,7 @@ int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AdjustOriginalHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6682,6 +6839,7 @@ int LuaSyncedCtrl::AdjustOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6730,6 +6888,7 @@ int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddOriginalHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!inOriginalHeightMap) {
+ 		luaL_error(L, "AddOriginalHeightMap() can only be called in SetOriginalHeightMapFunc()");
+ 	}
+@@ -6773,6 +6932,7 @@ int LuaSyncedCtrl::AddOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetOriginalHeightMap(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!inOriginalHeightMap) {
+ 		luaL_error(L, "SetOriginalHeightMap() can only be called in SetOriginalHeightMapFunc()");
+ 	}
+@@ -6822,6 +6982,7 @@ int LuaSyncedCtrl::SetOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetOriginalHeightMapFunc(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6873,6 +7034,7 @@ static inline void ParseSmoothMeshParams(lua_State* L, const char* caller,
+  */
+ int LuaSyncedCtrl::RebuildSmoothMesh(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	smoothGround.MakeSmoothMesh();
+ 	return 0;
+ }
+@@ -6895,6 +7057,7 @@ int LuaSyncedCtrl::RebuildSmoothMesh(lua_State* L)
+ 
+ int LuaSyncedCtrl::LevelSmoothMesh(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	float height;
+ 	int x1, x2, z1, z2;
+ 	ParseSmoothMeshParams(L, __func__, height, x1, z1, x2, z2);
+@@ -6926,6 +7089,7 @@ int LuaSyncedCtrl::LevelSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::AdjustSmoothMesh(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	float height;
+ 	int x1, x2, z1, z2;
+ 	ParseSmoothMeshParams(L, __func__, height, x1, z1, x2, z2);
+@@ -6956,6 +7120,7 @@ int LuaSyncedCtrl::AdjustSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::RevertSmoothMesh(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	float origFactor;
+ 	int x1, x2, z1, z2;
+ 	ParseSmoothMeshParams(L, __func__, origFactor, x1, z1, x2, z2);
+@@ -6997,6 +7162,7 @@ int LuaSyncedCtrl::RevertSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddSmoothMesh(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!inSmoothMesh) {
+ 		luaL_error(L, "AddSmoothMesh() can only be called in SetSmoothMeshFunc()");
+ 	}
+@@ -7036,6 +7202,7 @@ int LuaSyncedCtrl::AddSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetSmoothMesh(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!inSmoothMesh) {
+ 		luaL_error(L, "SetSmoothMesh() can only be called in SetSmoothMeshFunc()");
+ 	}
+@@ -7082,6 +7249,7 @@ int LuaSyncedCtrl::SetSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetSmoothMeshFunc(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int args = lua_gettop(L); // number of arguments
+ 	if ((args < 1) || !lua_isfunction(L, 1)) {
+ 		luaL_error(L, "Incorrect arguments to Spring.SetSmoothMeshFunc(func, ...)");
+@@ -7123,6 +7291,7 @@ int LuaSyncedCtrl::SetSmoothMeshFunc(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int hx = int(luaL_checkfloat(L, 1) / SQUARE_SIZE);
+ 	const int hz = int(luaL_checkfloat(L, 2) / SQUARE_SIZE);
+ 
+@@ -7155,6 +7324,7 @@ int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int args = lua_gettop(L);
+ 	const int tti = luaL_checkint(L, 1);
+ 
+@@ -7202,6 +7372,7 @@ int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetSquareBuildingMask(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int x = luaL_checkint(L, 1);
+ 	const int z = luaL_checkint(L, 2);
+ 	const int mask = luaL_checkint(L, 3);
+@@ -7231,6 +7402,7 @@ int LuaSyncedCtrl::SetSquareBuildingMask(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitWeaponFire(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7254,6 +7426,7 @@ int LuaSyncedCtrl::UnitWeaponFire(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitWeaponHoldFire(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7284,6 +7457,7 @@ int LuaSyncedCtrl::UnitWeaponHoldFire(lua_State* L)
+  */
+ int LuaSyncedCtrl::ForceUnitCollisionUpdate(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const auto* const unit = ParseUnit(L, __func__, 1);
+ 	if (!unit)
+ 		return 0;
+@@ -7305,6 +7479,7 @@ int LuaSyncedCtrl::ForceUnitCollisionUpdate(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitAttach(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* transporter = ParseUnit(L, __func__, 1);
+ 
+ 	if (transporter == nullptr)
+@@ -7343,6 +7518,7 @@ int LuaSyncedCtrl::UnitAttach(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitDetach(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* transportee = ParseUnit(L, __func__, 1);
+ 
+ 	if (transportee == nullptr)
+@@ -7365,6 +7541,7 @@ int LuaSyncedCtrl::UnitDetach(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitDetachFromAir(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* transportee = ParseUnit(L, __func__, 1);
+ 
+ 	if (transportee == nullptr)
+@@ -7399,6 +7576,7 @@ int LuaSyncedCtrl::UnitDetachFromAir(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLoadingTransport(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7448,6 +7626,7 @@ int LuaSyncedCtrl::SetUnitLoadingTransport(lua_State* L)
+  */
+ int LuaSyncedCtrl::SpawnProjectile(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	ProjectileParams params;
+ 
+ 	if ((params.weaponDef = weaponDefHandler->GetWeaponDefByID(luaL_checkint(L, 1))) == nullptr)
+@@ -7469,6 +7648,7 @@ int LuaSyncedCtrl::SpawnProjectile(lua_State* L)
+  */
+ int LuaSyncedCtrl::DeleteProjectile(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -7625,6 +7805,7 @@ static int SetExplosionParam(lua_State* L, CExplosionParams& params, DamageArray
+  */
+ int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const float3 pos = {luaL_checkfloat(L, 1      ), luaL_checkfloat(L, 2      ), luaL_checkfloat(L, 3      )};
+ 	const float3 dir = {luaL_optfloat  (L, 4, 0.0f), luaL_optfloat  (L, 5, 0.0f), luaL_optfloat  (L, 6, 0.0f)};
+ 
+@@ -7700,6 +7881,7 @@ int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
+  */
+ int LuaSyncedCtrl::SpawnCEG(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const float3 pos = {luaL_optfloat(L, 2, 0.0f), luaL_optfloat(L, 3, 0.0f), luaL_optfloat(L, 4, 0.0f)};
+ 	const float3 dir = {luaL_optfloat(L, 5, 0.0f), luaL_optfloat(L, 6, 0.0f), luaL_optfloat(L, 7, 0.0f)};
+ 
+@@ -7743,6 +7925,7 @@ int LuaSyncedCtrl::SpawnCEG(lua_State* L)
+  */
+ int LuaSyncedCtrl::SpawnSFX(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7772,6 +7955,7 @@ int LuaSyncedCtrl::SpawnSFX(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetNoPause(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -7794,6 +7978,7 @@ int LuaSyncedCtrl::SetNoPause(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetExperienceGrade(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -7825,6 +8010,7 @@ int LuaSyncedCtrl::SetExperienceGrade(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetRadarErrorParams(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	const int allyTeamID = lua_tonumber(L, 1);
+ 
+ 	if (!teamHandler.IsValidAllyTeam(allyTeamID))
+@@ -7957,6 +8143,7 @@ static bool ParseCommandDescription(lua_State* L, int table,
+  */
+ int LuaSyncedCtrl::EditUnitCmdDesc(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -7998,6 +8185,7 @@ int LuaSyncedCtrl::EditUnitCmdDesc(lua_State* L)
+  */
+ int LuaSyncedCtrl::InsertUnitCmdDesc(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -8037,6 +8225,7 @@ int LuaSyncedCtrl::InsertUnitCmdDesc(lua_State* L)
+  */
+ int LuaSyncedCtrl::RemoveUnitCmdDesc(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+diff --git a/rts/Lua/LuaSyncedMoveCtrl.cpp b/rts/Lua/LuaSyncedMoveCtrl.cpp
+index aa81f21..4437010 100644
+--- a/rts/Lua/LuaSyncedMoveCtrl.cpp
++++ b/rts/Lua/LuaSyncedMoveCtrl.cpp
+@@ -2,6 +2,7 @@
+ 
+ 
+ #include "LuaSyncedMoveCtrl.h"
++#include "Sim/Misc/BrLosJoin.h"
+ 
+ #include "LuaInclude.h"
+ 
+@@ -144,6 +145,7 @@ static inline DerivedMoveType* ParseDerivedMoveType(lua_State* L, const char* ca
+  */
+ int LuaSyncedMoveCtrl::IsEnabled(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -160,6 +162,7 @@ int LuaSyncedMoveCtrl::IsEnabled(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::Enable(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -176,6 +179,7 @@ int LuaSyncedMoveCtrl::Enable(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::Disable(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -195,6 +199,7 @@ int LuaSyncedMoveCtrl::Disable(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTag(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -211,6 +216,7 @@ int LuaSyncedMoveCtrl::SetTag(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::GetTag(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -238,6 +244,7 @@ int LuaSyncedMoveCtrl::GetTag(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetProgressState(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -282,6 +289,7 @@ int LuaSyncedMoveCtrl::SetProgressState(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetExtrapolate(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -309,6 +317,7 @@ int LuaSyncedMoveCtrl::SetExtrapolate(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetPhysics(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -334,6 +343,7 @@ int LuaSyncedMoveCtrl::SetPhysics(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetPosition(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -357,6 +367,7 @@ int LuaSyncedMoveCtrl::SetPosition(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetVelocity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -380,6 +391,7 @@ int LuaSyncedMoveCtrl::SetVelocity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRelativeVelocity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -403,6 +415,7 @@ int LuaSyncedMoveCtrl::SetRelativeVelocity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRotation(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -423,6 +436,7 @@ int LuaSyncedMoveCtrl::SetRotation(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRotationOffset(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	// DEPRECATED
+ 	return 0;
+ }
+@@ -437,6 +451,7 @@ int LuaSyncedMoveCtrl::SetRotationOffset(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRotationVelocity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -457,6 +472,7 @@ int LuaSyncedMoveCtrl::SetRotationVelocity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetHeading(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -478,6 +494,7 @@ int LuaSyncedMoveCtrl::SetHeading(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTrackSlope(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -495,6 +512,7 @@ int LuaSyncedMoveCtrl::SetTrackSlope(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTrackGround(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -512,6 +530,7 @@ int LuaSyncedMoveCtrl::SetTrackGround(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTrackLimits(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -529,6 +548,7 @@ int LuaSyncedMoveCtrl::SetTrackLimits(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetGroundOffset(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -546,6 +566,7 @@ int LuaSyncedMoveCtrl::SetGroundOffset(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetGravity(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -563,6 +584,7 @@ int LuaSyncedMoveCtrl::SetGravity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetDrag(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -580,6 +602,7 @@ int LuaSyncedMoveCtrl::SetDrag(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetWindFactor(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -602,6 +625,7 @@ int LuaSyncedMoveCtrl::SetWindFactor(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetLimits(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -622,6 +646,7 @@ int LuaSyncedMoveCtrl::SetLimits(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetNoBlocking(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -645,6 +670,7 @@ int LuaSyncedMoveCtrl::SetSlopeStop(lua_State* L) { return 0; }
+  */
+ int LuaSyncedMoveCtrl::SetCollideStop(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -662,6 +688,7 @@ int LuaSyncedMoveCtrl::SetCollideStop(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetLimitsStop(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -831,6 +858,7 @@ static int SetMoveTypeData(lua_State* L, AMoveType* moveType, const char* caller
+  */
+ int LuaSyncedMoveCtrl::SetGunshipMoveTypeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetMoveTypeData(L, ParseDerivedMoveType<CHoverAirMoveType>(L, __func__, 1), __func__));
+ }
+ 
+@@ -904,6 +932,7 @@ int LuaSyncedMoveCtrl::SetGunshipMoveTypeData(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetAirMoveTypeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetMoveTypeData(L, ParseDerivedMoveType<CStrafeAirMoveType>(L, __func__, 1), __func__));
+ }
+ 
+@@ -969,6 +998,7 @@ int LuaSyncedMoveCtrl::SetAirMoveTypeData(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetGroundMoveTypeData(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return (SetMoveTypeData(L, ParseDerivedMoveType<CGroundMoveType>(L, __func__, 1), __func__));
+ }
+ 
+@@ -985,6 +1015,7 @@ int LuaSyncedMoveCtrl::SetGroundMoveTypeData(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetMoveDef(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 	MoveDef* moveDef = nullptr;
+ 
+diff --git a/rts/Map/BasicMapDamage.cpp b/rts/Map/BasicMapDamage.cpp
+index be251eb..9e87bd8 100644
+--- a/rts/Map/BasicMapDamage.cpp
++++ b/rts/Map/BasicMapDamage.cpp
+@@ -2,6 +2,7 @@
+ 
+ 
+ #include "BasicMapDamage.h"
++#include "Sim/Misc/BrLosJoin.h"
+ #include "ReadMap.h"
+ #include "MapInfo.h"
+ #include "Rendering/Env/GrassDrawer.h"
+@@ -256,6 +257,7 @@ void CBasicMapDamage::RecalcArea(int x1, int x2, int y1, int y2)
+ void CBasicMapDamage::Update()
+ {
+ 	SCOPED_TIMER("Sim::BasicMapDamage");
++	BrLosJoin(); // [barreplay] H84
+ 
+ 	for (unsigned int i = explUpdateQueueIdx, n = explosionUpdateQueue.size(); i < n; i++) {
+ 		Explo& e = explosionUpdateQueue[i];
+diff --git a/rts/Map/ReadMap.cpp b/rts/Map/ReadMap.cpp
+index 9bf6ad0..e84c8af 100644
+--- a/rts/Map/ReadMap.cpp
++++ b/rts/Map/ReadMap.cpp
+@@ -5,6 +5,7 @@
+ #include <cstring> // memcpy
+ 
+ #include "xsimd/xsimd.hpp"
++#include "Sim/Misc/BrLosJoin.h"
+ #include "ReadMap.h"
+ #include "MapDamage.h"
+ #include "MapInfo.h"
+@@ -525,6 +526,7 @@ void CReadMap::UpdateDraw(bool firstCall)
+ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	const bool initialize = (hgtMapRect == SRectangle{ 0, 0, mapDims.mapx, mapDims.mapy });
+ 
+ 	const int2 mins = {hgtMapRect.x1 - 1, hgtMapRect.z1 - 1};
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index fe19082..aacea6f 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -7,6 +7,7 @@
+ #include <unistd.h>
+ #include <cstring>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
++#include "Sim/Misc/BrLosJoin.h"
+ int BrLuaGcStatsLine(char* buf, int size);
+ #include <cstring>
+ #include <linux/perf_event.h>
+@@ -70,6 +71,7 @@ namespace {
+ 		void parkHere() {
+ 			if (park == nullptr || park[0] == 0)
+ 				return;
++			BrLosJoin(); // [barreplay] H84: no LOS tasks in flight in a checkpoint
+ 			char path[1024];
+ 			snprintf(path, sizeof(path), "%s.stdout", park);
+ 			if (FILE* f = freopen(path, "a", stdout)) (void)f;
+diff --git a/rts/Sim/Misc/BrLosJoin.h b/rts/Sim/Misc/BrLosJoin.h
+new file mode 100644
+index 0000000..4b8293e
+--- /dev/null
++++ b/rts/Sim/Misc/BrLosJoin.h
+@@ -0,0 +1,24 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_LOS_JOIN_H
++#define BR_LOS_JOIN_H
++
++#include <atomic>
++
++// [barreplay] H84 (toggle 0x8000): CLosHandler::Update hands its work (one task
++// per sensor type, the same split the for_mt made) to the worker threads and
++// returns; the main thread goes on with the serial rest of the frame. Every way
++// into the LOS state, and every write to what the tasks read (the units' sensor
++// fields and midPos, the synced height maps, the global-LOS flags), first calls
++// BrLosJoin, which waits for the tasks (and runs any not yet started). The tasks
++// see the frame number and the active-unit list Update was called with. Nothing
++// outside the tasks touches their data before the join, so they compute exactly
++// what the for_mt did.
++extern std::atomic<int> g_brLosPending;
++void BrLosJoinSlow();
++static inline void BrLosJoin() {
++	if (__builtin_expect(g_brLosPending.load(std::memory_order_acquire) != 0, 0))
++		BrLosJoinSlow();
++}
++
++#endif
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 5b92c0d..0e7567a 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -8,6 +8,8 @@
+ #include "Sim/Misc/TeamHandler.h"
+ #include "Sim/Misc/ModInfo.h"
+ #include "Map/ReadMap.h"
++#include "Game/GlobalUnsynced.h"
++#include "Sim/Misc/GlobalSynced.h"
+ #include "System/Log/ILog.h"
+ #include "System/SpringHash.h"
+ #include "System/creg/STL_Deque.h"
+@@ -18,6 +20,10 @@
+ 
+ #include "System/Misc/TracyDefs.h"
+ 
++#include <immintrin.h>
++#include <chrono>
++#include <cstdlib>
++
+ #define USE_STAGGERED_UPDATES 0
+ 
+ 
+@@ -499,14 +505,14 @@ inline int ILosType::GetHashNum(const int allyteam, const int2 baseLos, const fl
+ void ILosType::Update()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	// delayed delete
+-	while (!delayedDeleteQue.empty() && delayedDeleteQue.front().timeoutTime < gs->frameNum) {
++	// delayed delete ([barreplay] H84: the frame Update was called in)
++	while (!delayedDeleteQue.empty() && delayedDeleteQue.front().timeoutTime < g_brLosFrameNum) {
+ 		UnrefInstance(delayedDeleteQue.front().instance);
+ 		delayedDeleteQue.pop_front();
+ 	}
+ 
+ 	// relos after terraform is delayed
+-	while (!delayedTerraQue.empty() && delayedTerraQue.front().timeoutTime < gs->frameNum) {
++	while (!delayedTerraQue.empty() && delayedTerraQue.front().timeoutTime < g_brLosFrameNum) {
+ 		SLosInstance* li = delayedTerraQue.front().instance;
+ 		li->isQueuedForTerraform = false;
+ 		if (!li->isQueuedForUpdate)
+@@ -738,6 +744,7 @@ void CLosHandler::Init()
+ void CLosHandler::Kill()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin();
+ 	los.Kill();
+ 	airLos.Kill();
+ 	radar.Kill();
+@@ -772,6 +779,7 @@ void CLosHandler::Kill()
+ void CLosHandler::SetGlobalLOS(const int allyTeamId, const bool newState)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin();
+ 	globalLOS[allyTeamId] = newState;
+ 
+ 	if (globalLOS[allyTeamId])
+@@ -781,6 +789,7 @@ void CLosHandler::SetGlobalLOS(const int allyTeamId, const bool newState)
+ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin();
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit), true);
+ 	}
+@@ -790,6 +799,7 @@ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int we
+ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin();
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+ 	}
+@@ -799,6 +809,7 @@ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin();
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+ 	}
+@@ -808,6 +819,7 @@ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ void CLosHandler::UnitLoaded(const CUnit* unit, const CUnit* transport)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin();
+ 	if (!unit->IsStunned())
+ 		return;
+ 
+@@ -817,12 +829,84 @@ void CLosHandler::UnitLoaded(const CUnit* unit, const CUnit* transport)
+ }
+ 
+ 
++// [barreplay] H84
++std::atomic<int> g_brLosPending{0};
++int g_brLosFrameNum = 0;
++extern unsigned g_brToggles;
++
++static std::atomic<int> brLosNext{0};
++static std::atomic<int> brLosDone{0};
++static int brLosCount = 0;
++static std::vector<CUnit*> brLosUnits; // the active units Update was called with
++
++// take the next sensor types nobody has started and run them, on any thread
++static void BrLosRunSome() {
++	for (int i; (i = brLosNext.fetch_add(1, std::memory_order_acq_rel)) < brLosCount; ) {
++		losHandler->BrUpdateType(i);
++		brLosDone.fetch_add(1, std::memory_order_release);
++	}
++}
++
++// BARREPLAY_H84_STATS=1: every 1800 frames, how many joins found the tasks
++// unfinished and how long they waited (the overlap the background run lost)
++static const bool brLosStats = (getenv("BARREPLAY_H84_STATS") != nullptr);
++static std::atomic<long long> brLosWaitNs{0};
++static std::atomic<int> brLosWaits{0}, brLosJoins{0};
++
++void BrLosJoinSlow() {
++	const bool unfinished = brLosDone.load(std::memory_order_acquire) < brLosCount;
++	const auto t0 = brLosStats? std::chrono::steady_clock::now(): std::chrono::steady_clock::time_point();
++	BrLosRunSome();
++	while (brLosDone.load(std::memory_order_acquire) < brLosCount)
++		_mm_pause();
++	g_brLosPending.store(0, std::memory_order_release);
++	if (brLosStats) {
++		brLosJoins.fetch_add(1, std::memory_order_relaxed);
++		if (unfinished) {
++			brLosWaits.fetch_add(1, std::memory_order_relaxed);
++			brLosWaitNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
++		}
++	}
++}
++
++void CLosHandler::BrUpdateType(int idx)
++{
++	ILosType* lt = losTypes[idx];
++	for (CUnit* u : brLosUnits) {
++		lt->UpdateUnit(u, false);
++	}
++	lt->Update();
++}
++
+ void CLosHandler::Update()
+ {
+ 	SCOPED_TIMER("Sim::Los");
+ 
++	// the previous frame's (if it is somehow still pending)
++	BrLosJoin();
++	g_brLosFrameNum = gs->frameNum;
++
+ 	const std::vector<CUnit*>& activeUnits = unitHandler.GetActiveUnits();
+ 
++	// [barreplay] H84: needs worker threads, and no unsynced height-map events
++	// from the LOS maps (CLosMap::AddRaycast calls readMap->UpdateLOS for the
++	// local ally team unless spectating with full view)
++	if ((g_brToggles & 0x8000) != 0 && ThreadPool::HasThreads() && gu->spectatingFullView) {
++		static decltype(for_mt_background(0, 1, std::function<void(int)>{})) brLosGroup;
++		if (brLosGroup)
++			wait_for_mt_background(brLosGroup);
++		brLosUnits.assign(activeUnits.begin(), activeUnits.end());
++		brLosCount = int(losTypes.size());
++		brLosDone.store(0, std::memory_order_relaxed);
++		brLosNext.store(0, std::memory_order_relaxed);
++		g_brLosPending.store(1, std::memory_order_release);
++		brLosGroup = for_mt_background(0, brLosCount, std::function<void(int)>{[](int) { BrLosRunSome(); }});
++		if (brLosStats && (gs->frameNum % 1800) == 0) {
++			LOG("[H84] frame %d: %d joins, %d waited, %.1f ms waiting", gs->frameNum, brLosJoins.exchange(0), brLosWaits.exchange(0), brLosWaitNs.exchange(0) * 1e-6);
++		}
++		return;
++	}
++
+ 	#if (USE_STAGGERED_UPDATES == 1)
+ 	const size_t losBatchRate = UNIT_SLOWUPDATE_RATE;
+ 	const size_t losBatchSize = std::max(size_t(1), activeUnits.size() / losBatchRate);
+@@ -857,6 +941,7 @@ void CLosHandler::Update()
+ void CLosHandler::UpdateHeightMapSynced(SRectangle rect)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin();
+ 	for (ILosType* lt: losTypes) {
+ 		ZoneScopedN("LosHandler::UpdateHeightMapSynced");
+ 		lt->UpdateHeightMapSynced(rect);
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index 9f17fa3..d83290c 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -3,6 +3,7 @@
+ #ifndef LOS_HANDLER_H
+ #define LOS_HANDLER_H
+ 
++#include <atomic>
+ #include <vector>
+ #include <deque>
+ 
+@@ -16,6 +17,9 @@
+ #include "System/UnorderedMap.hpp"
+ 
+ 
++#include "Sim/Misc/BrLosJoin.h"
++extern int g_brLosFrameNum;
++
+ /**
+  * LoS Instance
+  *
+@@ -107,6 +111,7 @@ public:
+ 	int2 PosToSquare(const float3 pos) const { return int2(pos.x * invDiv, pos.z * invDiv); }
+ 
+ 	inline bool InSight(const float3 pos, int allyTeam) const {
++		BrLosJoin();
+ 		assert(allyTeam < losMaps.size());
+ 		return (losMaps[allyTeam].At(PosToSquare(pos)) != 0);
+ 	}
+@@ -215,6 +220,9 @@ public:
+ 	void Init();
+ 	void Kill();
+ 
++	// [barreplay] H84: one sensor type's share of Update (any thread)
++	void BrUpdateType(int idx);
++
+ 	// the Interface
+ 	bool InLos(const CUnit* unit, int allyTeam) const;
+ 	bool InLos(const CWorldObject* obj, int allyTeam) const {
+diff --git a/rts/Sim/Objects/SolidObject.h b/rts/Sim/Objects/SolidObject.h
+index 00df653..aa0e8f5 100644
+--- a/rts/Sim/Objects/SolidObject.h
++++ b/rts/Sim/Objects/SolidObject.h
+@@ -6,6 +6,7 @@
+ #include <bit>
+ 
+ #include "WorldObject.h"
++#include "Sim/Misc/BrLosJoin.h"
+ #include "Lua/LuaRulesParams.h"
+ #include "Rendering/Models/LocalModel.hpp"
+ #include "Sim/Misc/CollisionVolume.h"
+@@ -151,10 +152,12 @@ public:
+ 	// vectors are changed (ie. after a rotation) in
+ 	// eg. movetype code
+ 	void UpdateMidAndAimPos() {
++		BrLosJoin(); // [barreplay] H84
+ 		midPos = GetMidPos();
+ 		aimPos = GetAimPos();
+ 	}
+ 	void SetMidAndAimPos(const float3& mp, const float3& ap, bool relative) {
++		BrLosJoin(); // [barreplay] H84
+ 		SetMidPos(mp, relative);
+ 		SetAimPos(ap, relative);
+ 	}
+diff --git a/rts/Sim/Units/Scripts/LuaUnitScript.cpp b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+index 92047c1..a32ce01 100644
+--- a/rts/Sim/Units/Scripts/LuaUnitScript.cpp
++++ b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+@@ -3,6 +3,7 @@
+ #define LUA_SYNCED_ONLY
+ 
+ #include "LuaUnitScript.h"
++#include "Sim/Misc/BrLosJoin.h"
+ 
+ #include "CobDefines.h"
+ #include "CobInstance.h"
+@@ -1161,6 +1162,7 @@ static inline int ParseAxis(lua_State* L, const char* caller, int index)
+ int CLuaUnitScript::CreateScript(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1197,6 +1199,7 @@ int CLuaUnitScript::CreateScript(lua_State* L)
+ int CLuaUnitScript::UpdateCallIn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1229,6 +1232,7 @@ int CLuaUnitScript::UpdateCallIn(lua_State* L)
+ int CLuaUnitScript::CallAsUnit(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1305,6 +1309,7 @@ int CLuaUnitScript::GetUnitValue(lua_State* L, CUnitScript* script, int arg)
+ int CLuaUnitScript::GetUnitCOBValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1323,6 +1328,7 @@ int CLuaUnitScript::GetUnitCOBValue(lua_State* L)
+ int CLuaUnitScript::GetUnitValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1362,6 +1368,7 @@ int CLuaUnitScript::SetUnitValue(lua_State* L, CUnitScript* script, int arg)
+ int CLuaUnitScript::SetUnitCOBValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1381,6 +1388,7 @@ int CLuaUnitScript::SetUnitCOBValue(lua_State* L)
+ int CLuaUnitScript::SetUnitValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1398,6 +1406,7 @@ int CLuaUnitScript::SetUnitValue(lua_State* L)
+ int CLuaUnitScript::SetPieceVisibility(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void SetVisibility(int piece, bool visible);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1422,6 +1431,7 @@ int CLuaUnitScript::SetPieceVisibility(lua_State* L)
+ int CLuaUnitScript::EmitSfx(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void EmitSfx(int type, int piece);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1445,6 +1455,7 @@ int CLuaUnitScript::EmitSfx(lua_State* L)
+ int CLuaUnitScript::AttachUnit(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void AttachUnit(int piece, int unit);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1468,6 +1479,7 @@ int CLuaUnitScript::AttachUnit(lua_State* L)
+ int CLuaUnitScript::DropUnit(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void DropUnit(int unit);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1492,6 +1504,7 @@ int CLuaUnitScript::DropUnit(lua_State* L)
+ int CLuaUnitScript::Explode(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void Explode(int piece, int flags);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1512,6 +1525,7 @@ int CLuaUnitScript::Explode(lua_State* L)
+ int CLuaUnitScript::ShowFlare(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void ShowFlare(int piece);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1534,6 +1548,7 @@ int CLuaUnitScript::ShowFlare(lua_State* L)
+ int CLuaUnitScript::Spin(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void Spin(int piece, int axis, int speed, int accel);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1559,6 +1574,7 @@ int CLuaUnitScript::Spin(lua_State* L)
+ int CLuaUnitScript::StopSpin(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void StopSpin(int piece, int axis, int decel);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1584,6 +1600,7 @@ int CLuaUnitScript::StopSpin(lua_State* L)
+ int CLuaUnitScript::Turn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void Turn(int piece, int axis, int speed, int destination);
+ 	// void TurnNow(int piece, int axis, int destination);
+ 	if (activeScript == nullptr)
+@@ -1616,6 +1633,7 @@ int CLuaUnitScript::Turn(lua_State* L)
+ int CLuaUnitScript::Move(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void Move(int piece, int axis, int speed, int destination);
+ 	// void MoveNow(int piece, int axis, int destination);
+ 	if (activeScript == nullptr)
+@@ -1646,6 +1664,7 @@ int CLuaUnitScript::Move(lua_State* L)
+ int CLuaUnitScript::Scale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// void Scale(int speed, int destination);
+ 	// void ScaleNow(int destination);
+ 	if (activeScript == nullptr)
+@@ -1688,36 +1707,43 @@ int CLuaUnitScript::MultiExec(lua_State *L, int (*const func)(lua_State*), const
+ 
+ int CLuaUnitScript::MultiSetPieceVisibility(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return MultiExec(L, &SetPieceVisibility, 2);
+ }
+ 
+ int CLuaUnitScript::MultiSpin(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return MultiExec(L, &Spin, 4);
+ }
+ 
+ int CLuaUnitScript::MultiStopSpin(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return MultiExec(L, &StopSpin, 3);
+ }
+ 
+ int CLuaUnitScript::MultiTurn(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return MultiExec(L, &Turn, 4);
+ }
+ 
+ int CLuaUnitScript::MultiExplode(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return MultiExec(L, &Explode, 2);
+ }
+ 
+ int CLuaUnitScript::MultiMove(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return MultiExec(L, &Move, 4);
+ }
+ 
+ int CLuaUnitScript::MultiScale(lua_State* L)
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	return MultiExec(L, &Scale, 3);
+ }
+ 
+@@ -1745,6 +1771,7 @@ int CLuaUnitScript::IsInAnimation(lua_State* L, const char* caller, AnimType typ
+ int CLuaUnitScript::IsInTurn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	return IsInAnimation(L, __func__, ATurn);
+ }
+ 
+@@ -1759,6 +1786,7 @@ int CLuaUnitScript::IsInTurn(lua_State* L)
+ int CLuaUnitScript::IsInMove(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	return IsInAnimation(L, __func__, AMove);
+ }
+ 
+@@ -1773,6 +1801,7 @@ int CLuaUnitScript::IsInMove(lua_State* L)
+ int CLuaUnitScript::IsInSpin(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	return IsInAnimation(L, __func__, ASpin);
+ }
+ 
+@@ -1785,6 +1814,7 @@ int CLuaUnitScript::IsInSpin(lua_State* L)
+ int CLuaUnitScript::IsInScale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1824,6 +1854,7 @@ int CLuaUnitScript::WaitForAnimation(lua_State* L, const char* caller, AnimType
+ int CLuaUnitScript::WaitForTurn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	return WaitForAnimation(L, __func__, ATurn);
+ }
+ 
+@@ -1838,6 +1869,7 @@ int CLuaUnitScript::WaitForTurn(lua_State* L)
+ int CLuaUnitScript::WaitForMove(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	return WaitForAnimation(L, __func__, AMove);
+ }
+ 
+@@ -1850,6 +1882,7 @@ int CLuaUnitScript::WaitForMove(lua_State* L)
+ int CLuaUnitScript::WaitForScale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1875,6 +1908,7 @@ int CLuaUnitScript::WaitForScale(lua_State* L)
+ int CLuaUnitScript::SetDeathScriptFinished(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeUnit == nullptr || activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1900,6 +1934,7 @@ int CLuaUnitScript::SetDeathScriptFinished(lua_State* L)
+ int CLuaUnitScript::GetPieceTranslation(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1919,6 +1954,7 @@ int CLuaUnitScript::GetPieceTranslation(lua_State* L)
+ int CLuaUnitScript::GetPieceRotation(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1935,6 +1971,7 @@ int CLuaUnitScript::GetPieceRotation(lua_State* L)
+ int CLuaUnitScript::GetPieceScale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1958,6 +1995,7 @@ int CLuaUnitScript::GetPieceScale(lua_State* L)
+ int CLuaUnitScript::GetPiecePosDir(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1985,6 +2023,7 @@ int CLuaUnitScript::GetPiecePosDir(lua_State* L)
+ int CLuaUnitScript::GetActiveUnitID(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 	if (activeUnit == nullptr)
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index 28a1575..ff83ac1 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -2,6 +2,7 @@
+ 
+ /* heavily based on CobInstance.cpp */
+ #include "UnitScript.h"
++#include "Sim/Misc/BrLosJoin.h"
+ 
+ #include "CobDefines.h"
+ #include "CobFile.h"
+@@ -1625,6 +1626,7 @@ int CUnitScript::GetUnitVal(int val, int p1, int p2, int p3, int p4)
+ void CUnitScript::SetUnitVal(int val, int param)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	// may happen in case one uses Spring.SetUnitCOBValue (Lua) on a unit with CNullUnitScript
+ 	if (unit == nullptr) {
+ 		ShowUnitScriptError("[US::SetUnitVal] invoked for null-scripted unit");
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 99dd767..f033f14 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "UnitDef.h"
+ #include "Unit.h"
++#include "Sim/Misc/BrLosJoin.h"
+ #include "UnitHandler.h"
+ #include "UnitDefHandler.h"
+ #include "UnitLoader.h"
+@@ -410,6 +411,7 @@ void CUnit::PostLoad()
+ void CUnit::FinishedBuilding(bool postInit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (!beingBuilt && !postInit)
+ 		return;
+ 
+@@ -474,6 +476,7 @@ void CUnit::KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int wea
+ void CUnit::ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int weaponDefID)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (isDead)
+ 		return;
+ 
+@@ -947,6 +950,7 @@ void CUnit::UpdateLosStatus(int at)
+ 
+ void CUnit::SetStunned(bool stun) {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	stunned = stun;
+ 
+ 	if (moveType->progressState == AMoveType::Active) {
+@@ -1511,6 +1515,7 @@ void CUnit::DoSeismicPing(float pingSize)
+ void CUnit::ChangeLos(int losRad, int airRad)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	losRadius = losRad;
+ 	airLosRadius = airRad;
+ }
+@@ -1519,6 +1524,7 @@ void CUnit::ChangeLos(int losRad, int airRad)
+ bool CUnit::ChangeTeam(int newteam, ChangeType type)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (isDead)
+ 		return false;
+ 
+@@ -1971,6 +1977,7 @@ void CUnit::UpdateRenderParams()
+ 
+ void CUnit::TurnIntoNanoframe()
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	if (beingBuilt)
+ 		return;
+ 
+@@ -2386,6 +2393,7 @@ bool CUnit::IssueResourceOrder(SResourceOrder* order)
+ void CUnit::Activate()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (activated)
+ 		return;
+ 
+@@ -2403,6 +2411,7 @@ void CUnit::Activate()
+ void CUnit::Deactivate()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrLosJoin(); // [barreplay] H84
+ 	if (!activated)
+ 		return;
+ 
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index fcf67f9..c959db7 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -3,6 +3,7 @@
+ #include <cassert>
+ 
+ #include "UnitHandler.h"
++#include "Sim/Misc/BrLosJoin.h"
+ #include "BrRunAhead.h"
+ #include "Sim/MoveTypes/MoveType.h"
+ #include "Sim/Units/Scripts/UnitScript.h"
+@@ -684,6 +685,7 @@ void CUnitHandler::UpdatePreFrame()
+ 
+ void CUnitHandler::Update()
+ {
++	BrLosJoin(); // [barreplay] H84
+ 	inUpdateCall = true;
+ 
+ 	DeleteUnits();
+-- 
+2.53.0
+

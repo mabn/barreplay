@@ -1,0 +1,166 @@
+From abda66c773de9db0af5e95262ef3e66677fab692 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 13:12:09 +0000
+Subject: [PATCH 098/108] [barreplay] H99: the per-frame Lua GC step on its own
+ thread during the LOS update (toggle2 0x1000); bench harness waits until the
+ huge-page share stops growing
+
+All Lua GC work happens in CLuaHandle::CollectGarbage (stopped between calls)
+on a wall-clock budget, so no Lua code can rely on when or how much is
+collected. The LOS update runs no Lua; the GC step runs beside it.
+---
+ rts/Game/Game.cpp       | 75 +++++++++++++++++++++++++++++++++++++++--
+ rts/Net/NetCommands.cpp | 12 ++++---
+ 2 files changed, 81 insertions(+), 6 deletions(-)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index cc7f2a5..f8080ad 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1688,6 +1688,9 @@ static const char* const tracingSimFrameName = "SimFrame";
+ #include <cstdio>
+ #include <cinttypes>
+ #include <thread>
++#include <mutex>
++#include <condition_variable>
++#include <pthread.h>
+ #ifndef MADV_COLLAPSE
+ #define MADV_COLLAPSE 25
+ #endif
+@@ -1730,6 +1733,60 @@ static void BrCollapseHugePages()
+ 	fclose(f);
+ }
+ 
++// [barreplay] H99 (toggle2 0x1000): the per-frame Lua GC step on its own
++// thread, during the LOS update. All Lua GC work happens in
++// CLuaHandle::CollectGarbage (the collector is stopped between calls), and how
++// much of it a call does depends on a wall-clock budget, so no Lua code can
++// rely on when or how much is collected. The LOS update runs no Lua on any
++// thread, so a GC step can run beside it: each state's allocator touches only
++// its own pool and an atomic total. Started right before the LOS update and
++// joined right after it, in place of the call at the start of the frame. The
++// thread exists from frame 0 whatever the toggles, so a checkpoint holds it
++// and a trial pins it with the workers rather than on the main thread's core.
++namespace BrH99 {
++	std::mutex mtx;
++	std::condition_variable cv;
++	bool request = false;
++	bool done = true;
++	bool started = false;
++
++	static void Loop()
++	{
++		pthread_setname_np(pthread_self(), "recoil-luagc");
++		std::unique_lock<std::mutex> lk(mtx);
++		for (;;) {
++			cv.wait(lk, []() { return request; });
++			request = false;
++			lk.unlock();
++			eventHandler.CollectGarbage(false);
++			lk.lock();
++			done = true;
++			cv.notify_all();
++		}
++	}
++	static void Create()
++	{
++		if (started)
++			return;
++		started = true;
++		std::thread(Loop).detach();
++	}
++	static void Start()
++	{
++		{
++			std::lock_guard<std::mutex> lk(mtx);
++			request = true;
++			done = false;
++		}
++		cv.notify_all();
++	}
++	static void Join()
++	{
++		std::unique_lock<std::mutex> lk(mtx);
++		cv.wait(lk, []() { return done; });
++	}
++}
++
+ static void BrStartHugePageCollapser()
+ {
+ 	if (getenv("BARREPLAY_NO_THP_COLLAPSE") != nullptr)
+@@ -1757,8 +1814,11 @@ void CGame::SimFrame() {
+ 	// note: starts at -1, first actual frame is 0
+ 	gs->frameNum += 1;
+ #if defined(__linux__)
+-	if (gs->frameNum == 0)
++	if (gs->frameNum == 0) {
+ 		BrStartHugePageCollapser();
++		BrH99::Create();
++	}
++	const bool brH99 = (g_brToggles2 & 0x1000) != 0;
+ #endif
+ #if defined(SYNCCHECK) && defined(SYNC_HISTORY)
+ 	CSyncChecker::NewGameFrame();
+@@ -1841,8 +1901,12 @@ void CGame::SimFrame() {
+ 
+ 			// keep garbage-collection rate tied to sim-speed
+ 			// (fixed 30Hz gc is not enough while catching up)
+-			if (luaGCControl == 0)
++			if (luaGCControl == 0) {
++#if defined(__linux__)
++				if (!brH99)
++#endif
+ 				eventHandler.CollectGarbage(false);
++			}
+ 
+ 			eventHandler.GameFrame(gs->frameNum);
+ 		}
+@@ -1871,6 +1935,13 @@ void CGame::SimFrame() {
+ 			unitHandler.UpdatePostAnimation();
+ 		}
+ 		envResHandler.Update();
++#if defined(__linux__)
++		if (brH99 && luaGCControl == 0) {
++			BrH99::Start();
++			losHandler->Update();
++			BrH99::Join();
++		} else
++#endif
+ 		losHandler->Update();
+ 		// dead ghosts have to be updated in sim, after los,
+ 		// to make sure they represent the current knowledge correctly.
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index dbcdd0a..e4c0a45 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -109,11 +109,13 @@ namespace {
+ 			// (every 2 s, nice 19) has run over it again; a window started at once
+ 			// ran ~19% slower than the same frames of a fresh run (late window:
+ 			// 36.4e9 cycles against 30.7e9). Wait until the huge pages cover what a
+-			// real run has (90% of the resident memory; a fresh run has 99%), at
+-			// most 90 s, so trials measure the memory a real run uses.
++			// real run has (98% of the resident memory; a fresh run has 99%) or
++			// until the share stops growing for 6 s (three collapser passes), at
++			// most 120 s, so trials measure the memory a real run uses.
+ 			{
+ 				const long long w0 = brNowNs(CLOCK_MONOTONIC);
+-				long rss = 0, ahp = 0;
++				long rss = 0, ahp = 0, best = -1;
++				long long bestAt = w0;
+ 				for (;;) {
+ 					rss = 0; ahp = 0;
+ 					if (FILE* sm = fopen("/proc/self/smaps_rollup", "r")) {
+@@ -124,7 +126,9 @@ namespace {
+ 						}
+ 						fclose(sm);
+ 					}
+-					if (rss <= 0 || ahp * 10 >= rss * 9 || (brNowNs(CLOCK_MONOTONIC) - w0) > 90000000000LL)
++					const long long now = brNowNs(CLOCK_MONOTONIC);
++					if (ahp > best) { best = ahp; bestAt = now; }
++					if (rss <= 0 || ahp * 50 >= rss * 49 || (now - bestAt) > 6000000000LL || (now - w0) > 120000000000LL)
+ 						break;
+ 					Watchdog::ClearTimers();
+ 					usleep(200 * 1000);
+-- 
+2.53.0
+

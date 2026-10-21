@@ -1,0 +1,82 @@
+From b711b546fd2882d04e0a1ec2df6f2b5d48fdd6da Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 13:02:50 +0000
+Subject: [PATCH 33/43] Clamp unsynced heightmap update rects to the map (heap
+ overflow in UpdateFaceNormalsUnsynced); W6 uses math::floor like Lua
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Lua/LuaEngineEventLog.cpp | 14 +++++++-------
+ rts/Map/ReadMap.cpp           |  8 +++++++-
+ 2 files changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/rts/Lua/LuaEngineEventLog.cpp b/rts/Lua/LuaEngineEventLog.cpp
+index 220888a..74257f0 100644
+--- a/rts/Lua/LuaEngineEventLog.cpp
++++ b/rts/Lua/LuaEngineEventLog.cpp
+@@ -23,7 +23,6 @@
+ #include "System/EventHandler.h"
+ 
+ #include <vector>
+-#include <cmath>
+ 
+ namespace {
+ 
+@@ -430,8 +429,9 @@ namespace {
+ 	std::vector<BrSamplePrev> brPrev;
+ 	std::vector<BrVisPrev> brVisPrev;
+ 
+-	// the widget's mathFloor(v + 0.5) with v and 0.5 as lua_Number (float)
+-	inline float BrQ(float v) { return std::floor(v + 0.5f); }
++	// the widget's mathFloor(v + 0.5) with v and 0.5 as lua_Number (float);
++	// math::floor is what Lua's math.floor calls (lmathlib.cpp)
++	inline float BrQ(float v) { return math::floor(v + 0.5f); }
+ 
+ 	// fill out[name] with arr[0..n) as numbers, reusing (and trimming) a table already there
+ 	void BrPutArray(lua_State* L, int outIdx, const char* name, const std::vector<float>& arr) {
+@@ -522,11 +522,11 @@ int LuaEngineEventLog::GetUnitSampleDelta(lua_State* L)
+ 		if (qhp < 0.0f) qhp = 0.0f;
+ 		float qmax = BrQ(u->maxHealth);
+ 		if (qmax < 0.0f) qmax = 0.0f;
+-		float qdvx = std::floor(float(u->speed.x) * se + 0.5f);
++		float qdvx = math::floor(float(u->speed.x) * se + 0.5f);
+ 		if (qdvx > 32767.0f) qdvx = 32767.0f; else if (qdvx < -32768.0f) qdvx = -32768.0f;
+-		float qdvz = std::floor(float(u->speed.z) * se + 0.5f);
++		float qdvz = math::floor(float(u->speed.z) * se + 0.5f);
+ 		if (qdvz > 32767.0f) qdvz = 32767.0f; else if (qdvz < -32768.0f) qdvz = -32768.0f;
+-		float qb = std::floor(float(u->buildProgress) * 255.0f + 0.5f);
++		float qb = math::floor(float(u->buildProgress) * 255.0f + 0.5f);
+ 		if (qb > 255.0f) qb = 255.0f; else if (qb < 0.0f) qb = 0.0f;
+ 		const float defID = u->unitDef->id;
+ 		float qdef = defID;
+@@ -562,7 +562,7 @@ int LuaEngineEventLog::GetUnitSampleDelta(lua_State* L)
+ 			for (int a = 1; a <= nva; ++a) {
+ 				const int at = allyTeams[a - 1];
+ 				const float bits = teamHandler.IsValidAllyTeam(at) ? float(u->losStatus[at]) : 0.0f;
+-				const float m = bits - std::floor(bits / 4.0f) * 4.0f; // Lua 5.1 float %
++				const float m = bits - math::floor(bits / 4.0f) * 4.0f; // Lua 5.1 float %
+ 				if (a <= 8)
+ 					lo = lo + m * scale;
+ 				else
+diff --git a/rts/Map/ReadMap.cpp b/rts/Map/ReadMap.cpp
+index e839128..9bf6ad0 100644
+--- a/rts/Map/ReadMap.cpp
++++ b/rts/Map/ReadMap.cpp
+@@ -502,7 +502,13 @@ void CReadMap::UpdateDraw(bool firstCall)
+ 	const int N = static_cast<int>(std::min(MAX_UHM_RECTS_PER_FRAME, unsyncedHeightMapUpdates.size()));
+ 
+ 	for (int i = 0; i < N; i++) {
+-		UpdateHeightMapUnsynced(*(unsyncedHeightMapUpdates.begin() + i));
++		// [barreplay] the rectangle optimizer (Process) can merge updates into a
++		// rectangle reaching past the map (seen: z2 = 2553 on a 1536-row map), and
++		// UpdateFaceNormalsUnsynced then copies past the end of its arrays: a heap
++		// overflow, which wrote zeroes over an RmlUi context. Clamp to corner space.
++		SRectangle& rect = *(unsyncedHeightMapUpdates.begin() + i);
++		rect.ClampIn(SRectangle{0, 0, mapDims.mapx, mapDims.mapy});
++		UpdateHeightMapUnsynced(rect);
+ 	};
+ 	UpdateHeightMapUnsyncedPost();
+ 
+-- 
+2.53.0
+

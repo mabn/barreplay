@@ -1,0 +1,69 @@
+From d659c3ebd6f6a1c0c5c990d70a5d90ad47c15bbc Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 03:15:14 +0000
+Subject: [PATCH 159/160] [barreplay] H129: the weapon loop prefetches the
+ lines CWeapon::Update reads (toggle3 0x4000000)
+
+speed62: CWeapon::Update's own time is 3.8% of the main thread, 58% of it
+line 418 (owner->curTarget.type, for every weapon without a target of its
+own: the owner's line 20 of 69) and 22% line 404 (the target's isDead, its
+line 66). H75 prefetched each weapon's first two lines, but the members the
+loop reads have moved past them (pahole: owner at 184, reloadStatus and
+weaponDef at 200-236, salvoLeft and angleGood at 256-290,
+fastAutoRetargeting and currentTarget at 640-695). Now: the owner's
+curTarget 8 units ahead, those four lines of each weapon 4 ahead, and each
+target's isDead 2 ahead, beside what H66/H75/H115 already fetch. Loads
+only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/UnitHandler.cpp | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 5dc5c95..cd3731f 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -1155,6 +1155,11 @@ void CUnitHandler::UpdateUnitWeapons()
+ 					__builtin_prefetch(&u8->id);
+ 					__builtin_prefetch(reinterpret_cast<const char*>(u8) + sizeof(CUnit) - 1);
+ 				}
++				// [barreplay] H129 (toggle3 0x4000000): and its curTarget, which
++				// every weapon's Update tests when it has no target of its own
++				// (Weapon.cpp:418, 58% of that function's own time in speed62)
++				if ((g_brToggles3 & 0x4000000) != 0)
++					__builtin_prefetch(&activeUnits[ahead + 8]->curTarget);
+ 			}
+ 			// [barreplay] H115: the weapons vector's buffer 6 ahead (its line 8
+ 			// ahead, above), so the first weapon's pointer is there 4 ahead
+@@ -1169,6 +1174,16 @@ void CUnitHandler::UpdateUnitWeapons()
+ 					for (const CWeapon* w: ws) {
+ 						__builtin_prefetch(w);
+ 						__builtin_prefetch(reinterpret_cast<const char*>(w) + 64);
++						// [barreplay] H129: the lines Update and CanFire read, which
++						// members added since H75 moved past its two (owner;
++						// reloadStatus and weaponDef; salvoLeft and angleGood;
++						// fastAutoRetargeting and currentTarget)
++						if ((g_brToggles3 & 0x4000000) != 0) {
++							__builtin_prefetch(&w->owner);
++							__builtin_prefetch(&w->reloadStatus);
++							__builtin_prefetch(&w->salvoLeft);
++							__builtin_prefetch(&w->GetCurrentTarget());
++						}
+ 					}
+ 				} else if (!ws.empty()) {
+ 					__builtin_prefetch(ws[0]);
+@@ -1181,6 +1196,10 @@ void CUnitHandler::UpdateUnitWeapons()
+ 						__builtin_prefetch(t.unit);
+ 						__builtin_prefetch(&t.unit->pos);
+ 						__builtin_prefetch(&t.unit->speed);
++						// [barreplay] H129: and isDead, its own line far down the
++						// unit (Weapon.cpp:404's fast-retarget test)
++						if ((g_brToggles3 & 0x4000000) != 0)
++							__builtin_prefetch(&t.unit->isDead);
+ 					}
+ 				}
+ 			}
+-- 
+2.53.0
+

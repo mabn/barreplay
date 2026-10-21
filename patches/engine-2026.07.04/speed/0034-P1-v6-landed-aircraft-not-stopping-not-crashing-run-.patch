@@ -1,0 +1,36 @@
+From be10e8ed3e551aca7385936c221ce0ce20884831 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 13:54:50 +0000
+Subject: [PATCH 34/43] P1 v6: landed aircraft (not stopping, not crashing) run
+ as parallel items (toggle 0x80)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 0d00e8b..022c18e 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -259,6 +259,17 @@ namespace BrParAir {
+ 		if ((u->IsStunned() && !u->IsCrashing()) || u->beingBuilt)
+ 			return (w = WHY_STUN, (g_brToggles & 0x20) != 0);
+ 
++		// v6: a landed aircraft that is not stopping or crashing only settles on
++		// the terrain under it (UpdateLanded: gravity and drag on its own speed,
++		// its own position, direction vectors and aim point; a hover one also
++		// turns to its own wanted heading); with collide off its collision step
++		// only keeps it on the map, and the script call when it starts or stops
++		// moving waits for every earlier item (SerialPoint)
++		if ((g_brToggles & 0x80) != 0 && amt->aircraftState == AAirMoveType::AIRCRAFT_LANDED && !u->IsCrashing()) {
++			if (!hover || !static_cast<const CHoverAirMoveType*>(mt)->wantToStop)
++				return (w = WHY_STATE, true);
++		}
++
+ 		if (u->speed == ZeroVector)
+ 			return (w = WHY_SPEED, false);
+ 
+-- 
+2.53.0
+

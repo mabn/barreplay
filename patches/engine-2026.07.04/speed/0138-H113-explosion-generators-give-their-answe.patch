@@ -1,0 +1,62 @@
+From d0764af38cde90e52b77f07d429ccf8f80a3d10d Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 19:58:26 +0000
+Subject: [PATCH 138/149] [barreplay] H113: explosion generators give their
+ answer without spawning (toggle3 0x40)
+
+Every class a CEG can spawn (CExpGenSpawnable's list) is an unsynced effect,
+its random numbers the unsynced generator's, and neither generator's return
+value depends on what it spawned (the standard one always answers true, a
+custom one true or the standard's answer). Lua's SpawnCEG, weapon explosions
+and crash trails get the same answers. Particle limits are a client setting,
+so nothing synced can depend on what spawns either.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Projectiles/ExplosionGenerator.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/rts/Sim/Projectiles/ExplosionGenerator.cpp b/rts/Sim/Projectiles/ExplosionGenerator.cpp
+index ec48c8e..b358fca 100644
+--- a/rts/Sim/Projectiles/ExplosionGenerator.cpp
++++ b/rts/Sim/Projectiles/ExplosionGenerator.cpp
+@@ -436,6 +436,8 @@ bool CExplosionGeneratorHandler::PredictExplosionVisible(const WeaponDef* weapon
+ }
+ 
+ 
++extern unsigned g_brToggles3; // [barreplay] H113
++
+ bool CStdExplosionGenerator::Explosion(
+ 	const float3& pos,
+ 	const float3& dir,
+@@ -447,6 +449,11 @@ bool CStdExplosionGenerator::Explosion(
+ 	bool withMutex
+ ) {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] H113 (toggle3 0x40): what this spawns is only drawn (every
++	// class here is an unsynced effect, its random numbers the unsynced
++	// generator's) and the answer is always true
++	if ((g_brToggles3 & 0x40) != 0)
++		return true;
+ 	const float groundHeight = CGround::GetHeightReal(pos.x, pos.z);
+ 	const float altitude = pos.y - groundHeight;
+ 
+@@ -1079,6 +1086,15 @@ bool CCustomExplosionGenerator::Explosion(
+ 	flags |= CEG_SPWF_SHIELD * shieldCollision;
+ 	flags |= CEG_SPWF_INTERCEPTED * (hitWeapon && !shieldCollision);
+ 
++	// [barreplay] H113 (toggle3 0x40): every spawnable class is an unsynced
++	// effect (CExpGenSpawnable's list) and the answer does not depend on what
++	// spawned, so give the answer alone
++	if ((g_brToggles3 & 0x40) != 0) {
++		if (expGenParams.useDefaultExplosions)
++			return (explGenHandler.GenExplosion(CExplosionGeneratorHandler::EXPGEN_ID_STANDARD, pos, dir, damage, radius, gfxMod, owner, hitObject));
++		return true;
++	}
++
+ 	const std::vector<ProjectileSpawnInfo>& spawnInfo = expGenParams.projectiles;
+ 	const GroundFlashInfo& groundFlash = expGenParams.groundFlash;
+ 
+-- 
+2.53.0
+

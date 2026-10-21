@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="270" viewBox="0 0 860 270" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="860" height="270" fill="#ffffff"/>
+  <text x="20" y="28" font-size="16" font-weight="bold">Synced Lua called from inside the unit loops (today) vs. queued events (proposed)</text>
+  <text x="20" y="62">today, one thread:</text>
+  <g>
+    <rect x="150" y="45" width="690" height="28" fill="#eef3fb" stroke="#3a6ea5"/>
+    <g fill="#f4b183" stroke="#c55a11">
+      <rect x="190" y="45" width="10" height="28"/><rect x="240" y="45" width="10" height="28"/><rect x="262" y="45" width="10" height="28"/><rect x="330" y="45" width="10" height="28"/>
+      <rect x="395" y="45" width="10" height="28"/><rect x="430" y="45" width="10" height="28"/><rect x="505" y="45" width="10" height="28"/><rect x="560" y="45" width="10" height="28"/>
+      <rect x="600" y="45" width="10" height="28"/><rect x="660" y="45" width="10" height="28"/><rect x="720" y="45" width="10" height="28"/><rect x="790" y="45" width="10" height="28"/>
+    </g>
+    <text x="150" y="92" font-size="12">unit loop (C++)</text><text x="440" y="92" font-size="12" fill="#c55a11">AllowWeaponTarget ~3100/frame, UnitPreDamaged, UnitIdle, AllowCommand, LUS calls…</text>
+    <text x="150" y="110" font-size="12">each orange slice may read or write ANY synced state, so nothing around it can be reordered or run beside it</text>
+  </g>
+  <text x="20" y="160">proposed:</text>
+  <g>
+    <rect x="150" y="140" width="125" height="28" fill="#e6f4ea" stroke="#2e7d32"/><rect x="150" y="172" width="125" height="28" fill="#e6f4ea" stroke="#2e7d32"/>
+    <rect x="150" y="204" width="125" height="28" fill="#e6f4ea" stroke="#2e7d32"/><rect x="150" y="236" width="125" height="28" fill="#e6f4ea" stroke="#2e7d32"/>
+    <g text-anchor="middle" font-size="12"><text x="212" y="159">units, thread 0</text><text x="212" y="191">units, thread 1</text><text x="212" y="223">units, thread 2</text><text x="212" y="255">units, thread 3</text></g>
+    <path d="M285 200 H330" stroke="#555" stroke-width="2" marker-end="url(#k)"/>
+    <rect x="340" y="185" width="190" height="30" fill="#fff4e5" stroke="#c55a11"/><text x="435" y="205" text-anchor="middle" font-size="12">event queues, merged by key</text>
+    <path d="M535 200 H580" stroke="#555" stroke-width="2" marker-end="url(#k)"/>
+    <rect x="590" y="185" width="250" height="30" fill="#f4b183" stroke="#c55a11"/><text x="715" y="205" text-anchor="middle" font-size="12">one batched Lua call per event type</text>
+  </g>
+  <defs><marker id="k" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#555"/></marker></defs>
+</svg>
