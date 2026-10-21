@@ -1,16 +1,14 @@
 # Builds FogOfWar.exe (cmd/fogofwar) on demand. Nothing here runs on an
 # ordinary push: a release is either a pushed tag or the Run workflow button.
 #
-#   Run workflow, version empty    -> unsigned test build, kept as a workflow
+#   Run workflow, version empty    -> test build, kept as a workflow
 #                                     artifact for 14 days, no release
-#   Run workflow, version 0.3.0    -> signed by SignPath, published as the
-#                                     GitHub release fogofwar/v0.3.0 (the tag is
-#                                     created at the commit the run built)
+#   Run workflow, version 0.3.0    -> published as the GitHub release
+#                                     fogofwar/v0.3.0 (the tag is created at
+#                                     the commit the run built)
 #   git push origin fogofwar/v0.3.0 -> the same release, from the pushed tag
 #
-# Signing needs the SignPath settings described in docs/fogofwar-release.md.
-# Until they exist a release is published UNSIGNED and says so, which is also
-# how the first release SignPath Foundation asks to see gets made.
+# The exe is not code-signed (docs/fogofwar-release.md).
 name: FogOfWar
 
 on:
@@ -33,11 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
-      signed: ${{ steps.sign.outcome == 'success' }}
     defaults:
       run:
         working-directory: cmd/fogofwar
@@ -50,8 +46,8 @@ jobs:
           cache-dependency-path: cmd/fogofwar/go.sum
 
       # The version goes into three places that must agree: the exe's version
-      # resource (winres, which SignPath checks), main.version (the app logs it
-      # and reports it on every job) and the release tag.
+      # resource (winres), main.version (the app logs it and reports it on
+      # every job) and the release tag.
       - name: Resolve version
         id: version
         env:
@@ -102,39 +98,12 @@ jobs:
             -o dist/FogOfWar.exe .
           sha256sum dist/FogOfWar.exe
 
-      - name: Upload unsigned exe
-        id: upload
+      - name: Upload exe
         uses: actions/upload-artifact@v7
         with:
-          name: FogOfWar-unsigned
+          name: FogOfWar
           path: cmd/fogofwar/dist/FogOfWar.exe
           retention-days: 14
-
-      # Waits for the request to be approved on signpath.io (SignPath
-      # Foundation approves every release by hand), hence the long timeout.
-      - name: Sign with SignPath
-        id: sign
-        if: steps.version.outputs.release == 'true' && vars.SIGNPATH_ORGANIZATION_ID != ''
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'FogOfWar' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
-          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 18000
-          output-artifact-directory: cmd/fogofwar/signed
-          parameters: |
-            version: ${{ toJSON(steps.version.outputs.version) }}
-
-      - name: Upload signed exe
-        if: steps.sign.outcome == 'success'
-        uses: actions/upload-artifact@v7
-        with:
-          name: FogOfWar-signed
-          path: cmd/fogofwar/signed/FogOfWar.exe
-          if-no-files-found: error
 
   release:
     needs: build
@@ -145,22 +114,17 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: ${{ needs.build.outputs.signed == 'true' && 'FogOfWar-signed' || 'FogOfWar-unsigned' }}
+          name: FogOfWar
           path: out
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
-          SIGNED: ${{ needs.build.outputs.signed }}
         run: |
           cd out
           sha256sum FogOfWar.exe > FogOfWar.exe.sha256
-          if [ "$SIGNED" = true ]; then
-            notes="Signed by SignPath Foundation. Built by this run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          else
-            notes="UNSIGNED build: Windows shows a SmartScreen warning (More info, then Run anyway). Built by this run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          fi
+          notes="Unsigned build: Windows shows a SmartScreen warning (More info, then Run anyway). Built by this run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           gh release create "fogofwar/v$VERSION" FogOfWar.exe FogOfWar.exe.sha256 \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "FogOfWar $VERSION" --notes "$notes"
