@@ -10,12 +10,35 @@
 /** What kind of work a job is, which decides WHICH daemon serves it:
  * "upload" hands an archived .brepstream to a plain `bringest` (no engine
  * needed), "resim" hands a bare gameId to `bringest -resim`, which downloads
- * the demo and re-simulates it headlessly. The states below describe both
- * equally well — what differs is the work, not the progress — so this is a
- * kind, not a fifth state. */
-export type JobKind = "upload" | "resim";
+ * the demo and re-simulates it headlessly. "app" is a re-simulation somebody
+ * is running in FogOfWar.exe on their own PC: nobody hands it out — the app
+ * creates the row itself when it starts simulating (POST /api/app/jobs) and
+ * reports on it like a daemon would, so it is never in DAEMON_KINDS. The
+ * states below describe all three equally well — what differs is the work,
+ * not the progress — so this is a kind, not a fifth state. */
+export type JobKind = "upload" | "resim" | "app";
 
-export const JOB_KINDS: readonly JobKind[] = ["upload", "resim"];
+export const JOB_KINDS: readonly JobKind[] = ["upload", "resim", "app"];
+
+/** The kinds a bringest daemon may ask for and claim. An "app" job is already
+ * being worked on by the app that created it, so offering it to a daemon would
+ * run the same hour of engine time twice. */
+export const DAEMON_KINDS: readonly JobKind[] = ["upload", "resim"];
+
+/** How long an "app" job may go without a healthcheck before the cron marks it
+ * failed. The app beats every 10 s; a PC that went to sleep, a crash or a
+ * killed window simply stop, and without this the row (and the catalog's
+ * "processing" pill for its game) would stay processing forever. A beat that
+ * arrives after the expiry puts the row back into "processing". */
+export const APP_JOB_STALE_SEC = 5 * 60;
+
+/** An install id as the app sends it: a UUID (v7 from FogOfWar.exe), checked
+ * for shape only. */
+export function parseInstallId(v: unknown): string | null {
+  return typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v.toLowerCase())
+    ? v.toLowerCase()
+    : null;
+}
 
 export const JOB_STATES = ["pending", "processing", "done", "error"] as const;
 
@@ -47,6 +70,13 @@ export function parseJobErrorKind(v: unknown): JobErrorKind | null {
  * re-simulation requested by pasting a replay link. */
 export interface IngestJob {
   id: string;
+  /** The FogOfWar.exe install that made the job (an "app" job, or the upload
+   * of the .brp it produced), so every job from one PC can be found. Null for
+   * everything bringest does. */
+  installId: string | null;
+  /** The "app" job an upload job publishes the .brp of; null otherwise. The
+   * queue shows such an upload inside its parent's row (QueueJob.publish). */
+  parentId: string | null;
   /** R2 key of the archived raw stream (streams/<gameId>/<ts>-<who>.brepstream).
    * Empty for a "resim" job, which has no uploaded stream — the demo it works
    * from is fetched from the BAR API by the daemon. */
@@ -173,8 +203,20 @@ export interface QueueGame {
   settings: Record<string, boolean | string> | null;
 }
 
-/** One row of the queue page: the job, plus what is known about its game. */
-export type QueueJob = IngestJob & { game: QueueGame | null };
+/** The publish of an app run's .brp: the upload job created for it, as the
+ * queue shows it inside the app's row. */
+export interface JobPublish {
+  id: string;
+  state: IngestJob["state"];
+  error: string | null;
+  /** What bringest measured publishing it (pack/upload time, its host). */
+  stats: JobStats | null;
+  updatedUnix: number;
+}
+
+/** One row of the queue page: the job, plus what is known about its game,
+ * plus — for an "app" job — the publish of the .brp it made. */
+export type QueueJob = IngestJob & { game: QueueGame | null; publish: JobPublish | null };
 
 /** JobSample is one healthcheck kept as HISTORY — the same reading JobProgress
  * carries, plus the moment the worker recorded it, stored as its own row in
@@ -269,7 +311,10 @@ export interface JobStats {
   /** The .brp container version published. */
   brpVersion?: number;
   /** The machine the daemon ran on: hostname, total RAM, CPU model and
-   * physical cores / logical threads (cores absent where /proc says none). */
+   * physical cores / logical threads (cores absent where /proc says none).
+   * The app adds the Windows version, what was free when the run started and
+   * the free disk under its data folder; it sends no hostname (a volunteer's
+   * PC name is theirs — the install id identifies the machine). */
   host?: {
     hostname?: string;
     memBytes?: number;
@@ -277,7 +322,36 @@ export interface JobStats {
     threads?: number;
     cpuModel?: string;
     os?: string;
+    osBuild?: string;
+    memFreeBytes?: number;
+    diskFreeBytes?: number;
   };
+  /** Whether the run used the patched engine, and which published build. */
+  enginePatched?: boolean;
+  patchedBuild?: string;
+  /** FogOfWar.exe only: which app made the job and how it was asked to. */
+  app?: {
+    name?: string;
+    version?: string;
+    installId?: string;
+    goVersion?: string;
+    /** Picked by auto-replay rather than pasted by the user. */
+    auto?: boolean;
+    /** The user's settings for the run. */
+    minFreeMB?: number;
+    patchedEngine?: boolean;
+    /** How many re-sims this install has run before this one. */
+    runs?: number;
+  };
+  /** Wall seconds spent in each phase ("fetching demo", "provisioning
+   * content", "loading", "simulating", "saving", "uploading"...), in order:
+   * where a slow run's time went, downloads included. */
+  phases?: { phase: string; sec: number }[];
+  /** The engine process's highest resident memory and swap over the run. */
+  peakRssBytes?: number;
+  peakSwapBytes?: number;
+  /** The upload job that publishes the app's .brp (its own queue row). */
+  uploadJob?: string;
 }
 
 /** Cap on the stored stats JSON. The real thing is 2-4 KB, nearly all of it

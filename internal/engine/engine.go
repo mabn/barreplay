@@ -105,6 +105,11 @@ type Config struct {
 	// changes local task scheduling, so it cannot desync the replay. Nil leaves
 	// the user's/engine's own setting in effect.
 	WorkerThreads *int
+	// OnlyLocal passes --only-local: the engine opens no listening socket.
+	// Replay playback talks to its own server in memory, so nothing needs the
+	// UDP port it otherwise binds — and on Windows binding one can raise a
+	// firewall prompt, and it keeps two runs from sharing a machine.
+	OnlyLocal bool
 }
 
 // StreamDir is the folder, relative to the data dir, the widget writes its
@@ -399,6 +404,7 @@ func (e *Engine) mapInstalled(springname string) bool {
 func (e *Engine) runPRD(ctx context.Context, args ...string) error {
 	full := append([]string{"--filesystem-writepath", e.cfg.DataDir}, args...)
 	cmd := exec.CommandContext(ctx, e.prdPath, full...)
+	hideChild(cmd, false)
 	cmd.Env = e.prdEnv()
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	return cmd.Run()
@@ -619,8 +625,12 @@ func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() 
 	if e.engineCfgPath != "" {
 		args = append(args, "--config", e.engineCfgPath)
 	}
+	if e.cfg.OnlyLocal {
+		args = append(args, "--only-local")
+	}
 	args = append(args, scriptPath)
 	cmd := exec.CommandContext(ctx, e.headlessPath, args...)
+	hideChild(cmd, true)
 	// Pin the working directory to the write-dir: the widget writes its stream via a
 	// relative path (Spring's LuaIO sandbox forbids absolute paths), resolved against
 	// the CWD, so this makes SnapshotStreamPath land where the tool expects to read it.

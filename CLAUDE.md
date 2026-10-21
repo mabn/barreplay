@@ -19,6 +19,7 @@ go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
 go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
+(cd cmd/fogofwar && GOOS=windows go build -tags desktop,production -ldflags "-H windowsgui" -o FogOfWar.exe .)   # the Windows desktop re-simulator (its own module: Wails; see cmd/fogofwar below). NOT stripped (-s -w): a stripped unsigned Go exe is a classic antivirus false positive. Icon/version/manifest come from the committed rsrc_windows_amd64.syso (go run ./winres to regenerate)
 go run ./cmd/publish-engine -data <BARdata>   # gate, strip and upload the patched engine build under <data>/engine/*/ to R2, then print the patchedBuilds pin to commit and the tag to push (hosts download it once the pin is merged; -dry = everything but the upload; -gate <gameIds> for a version with no default gate replay)
 go run ./cmd/publish-engine -data <BARdata> -windows <spring-headless.exe>   # the WINDOWS build of the same series (patches/engine-<ver>/windows/build.sh, MinGW cross-compile) for FogOfWar.exe: gated under Wine against the stock LINUX engine, uploaded to engines/<ver>/windows-amd64/, pinned in patchedBuildsWindows (needs wine64)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
@@ -189,7 +190,9 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           anyone has onto the host doing the work, which is somebody's machine
                           behind NAT. The healthcheck is cancelled AND JOINED before the terminal
                           report, since a beat still in flight would flip a finished row back to
-                          processing forever.
+                          processing forever. It also beats once as the job STARTS and once
+                          more, inside stop, as it ENDS (FogOfWar's app jobs the same), so a run
+                          shorter than one interval still charts two points.
                           Every job re-simulates the demo headlessly via internal/resim (the
                           cmd/barreplay pipeline packaged as one call: demo download -> provision
                           -> widget inject -> engine run -> .brp) and publishes the full-view
@@ -359,6 +362,61 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           each line's START — which is also the more useful reading (when the run
                           reported, not when the next one did). Nothing is held back waiting for
                           a newline, so a process dying mid-print still leaves its half line.
+cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates ONE pasted game
+                          (link or id) on the user's own PC and writes <gameId>.brp — internal/
+                          resim.Run, the same call bringest -resim makes. Each finished .brp is
+                          UPLOADED (upload.go: the open POST /api/upload, then GET /api/jobs/<id>
+                          until plain bringest has published it; the history row says queued/
+                          published/failed, and a failed upload never fails the run). An
+                          AUTO-REPLAY switch (autoreplay.go) re-simulates, while idle, the first
+                          of the site's 10 newest games (GET /api/games?limit=10) that is not
+                          MODDED (no "mods" settings flag; unknown settings count as modded —
+                          Marcin's call), not published, has no pending/processing job and is not in the local
+                          history (failed ones included), looking again a minute later when none
+                          qualifies; Stop on an auto-picked run turns it off, three failures in a
+                          row pause it 10 min. History rows open /replays/<gameId> in the browser
+                          (FOGOFWAR_SITE overrides the site). Wherever a game is shown (preview,
+                          run banner, result, history) it carries its LOBBY NAME (the site's GET
+                          /api/games?id=, absent when the mirror never matched a lobby) and its
+                          settings TAGS (preview.go gameTags: viz.SettingsFlags over the BAR
+                          API's gameSettings, badged like app.js settingsBadges). It takes no jobs from the queue,
+                          but every run IS one (report.go): an "app" job created over the open POST /api/app/jobs
+                          when the run starts, healthchecked every 10 s with bringest's JobProgress (so the queue
+                          page charts it), and ended with done/error and a jobStats that mirrors bringest's
+                          (RunStats, size report, widget/.brp version, patched build) plus app {version, installId,
+                          auto, settings, runs}, phases (wall time per phase, downloads included), peak engine
+                          RSS/swap, uploadJob, and host {RAM, cores, CPU model, Windows name + build, free RAM and
+                          disk at start} — NO hostname (a volunteer's PC name is theirs). Best-effort: a site it
+                          cannot reach never costs a run. INSTALL ID: a UUIDv7 made on first launch (config.json
+                          installId), on every app job and on the .brp upload (/api/upload?install=&app=). Its OWN Go module (go.mod with a replace onto the
+                          repo root) because it needs third-party code the root keeps out: Wails
+                          v2 (the window is a WebView2 page; frontend/dist is plain HTML/CSS/JS,
+                          embedded, no Node, no build step — opened in a browser it runs a MOCK
+                          backend, ?mock=setup|ready|running|done|fail, which is how it is
+                          developed and screenshotted) and bodgit/sevenzip (Windows has no 7z for
+                          the engine release; wired in through engine.Extract7z). app.go's
+                          exported methods are the page's whole API, kept narrow (no paths or
+                          commands from the page; OpenReplay only opens the site's /replays/<gameId> for a valid game id).
+                          No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
+                          (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
+                          memory floor, history), data\ (engine, game, maps; the engine's write
+                          dir), replays\ (output), work\, webview\, fogofwar.log (every line the
+                          pipeline prints: logtee.go swaps os.Stderr for a pipe, which also feeds
+                          pr-downloader's "[Progress] N%" into the download bars). FIRST LAUNCH
+                          (setup.go) downloads the engine, the published patched build and the
+                          game that the newest game on api.bar-rts.com needs, then waits. The
+                          engine runs with --only-local (engine.Config.OnlyLocal: no listening
+                          socket, so no firewall prompt), CREATE_NO_WINDOW and below-normal
+                          priority (engine/platform_windows.go hideChild), and the app puts
+                          itself in a kill-on-close job object so a killed window takes its
+                          engine with it. Windows ports in internal/engine: platform_windows.go
+                          (GlobalMemoryStatusEx for the memory guard and MemTotal,
+                          GetProcessTimes/K32GetProcessMemoryInfo for the engine's RSS/CPU),
+                          DownloadProgress (byte counts for any engine download), and the
+                          Windows patched build: PatchedBuildKey's engines/<v>/windows-amd64/
+                          spring-headless-patched-<semver>.exe.gz, pinned in
+                          patchedBuildsWindows (2026.07.04 rev 3 pinned; a version with no pin
+                          runs stock on Windows).
 cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim host to
                           download (see the -patched-engine note above), the WHOLE job in one
                           command: name it (engine version from its --version, revision from
@@ -2026,7 +2084,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           silent for 90 s. The dispatcher's rules are node-tested
                           (tests/summaryhub.test.ts), the DO's socket handling in workerd
                           (tests/do/summaryhub.test.ts).
-                          JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
+                          APP JOBS (kind "app", FogOfWar.exe): created ALREADY processing by the OPEN POST
+                          /api/app/jobs {gameId, installId, stats} and reported on over the OPEN POST
+                          /api/app/jobs/<id> (Marcin: no authentication for now), which refuses anything but
+                          an "app" job (403) — the guarded /api/jobs/<id> stays the daemons' door. Never offered
+                          to a daemon (DAEMON_KINDS = upload|resim for GET /api/jobs and claims); the cron fails
+                          one silent for APP_JOB_STALE_SEC = 5 min (appJobsExpire, a jobs_kind seek); a Retry of
+                          one is an ordinary resim. jobs.install_id (schema 8, partial index jobs_install) ties
+                          an install's app jobs and .brp uploads together: GET /api/admin/queue?install=<id>
+                          (jobsByInstall), reached from a row's Install line on the queue page.
+                          The app uploads its .brp with ?appJob=<its app job>, which makes the upload
+                          job a CHILD (jobs.parent_id, schema 9, partial index jobs_parent; accepted
+                          only for an app job of the same game): bringest still publishes it as any
+                          upload, but the queue lists only the app row and shows the publish inside it
+                          (QueueJob.publish, app.js publishText) — two rows for one run read as two runs.
+                          JOB KINDS: jobs.kind is "upload" | "resim" | "app", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,
                           JOB_KINDS, IngestJob) lives in its own src/worker/jobs.ts because
@@ -4236,7 +4308,7 @@ pacing changes only when pre-recorded packets are released, never their content
 ## Conventions / gotchas
 
 - LICENSING: the repo is MIT (LICENSE), `patches/` is GPL-2.0-or-later (patches/LICENSE, it derives from Recoil), `internal/viz/bardata/` keeps BAR's licences — LICENCE_NOTICE says which is which, and the Credits dialog repeats it.
-- Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only).
+- Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only). The one exception is `cmd/fogofwar`, a separate module (Wails, 7z) so the root stays stdlib-only; `go test ./...` from the root does not reach it — run it in `cmd/fogofwar`.
 - Unit-def internal names (`armcom`, `corllt`, …) and side names (`armada`, `cortex`)
   have no spaces — the preamble `T` parser relies on that.
 - `fileName` from the API contains spaces; always `url.PathEscape` it (see `barapi.DownloadURL`).

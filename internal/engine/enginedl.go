@@ -106,9 +106,21 @@ func EnsureWindowsEngine(ctx context.Context, dataDir, version string) (string, 
 // installRelease downloads one Recoil release asset and extracts it into dir,
 // which must end up holding headless.
 func installRelease(ctx context.Context, version, asset, dir, headless, prd string) error {
-	extractor, err := sevenZip()
-	if err != nil {
-		return fmt.Errorf("engine %s is not installed at %s and cannot be extracted: %w", version, dir, err)
+	extract := Extract7z
+	if extract == nil {
+		extractor, err := sevenZip()
+		if err != nil {
+			return fmt.Errorf("engine %s is not installed at %s and cannot be extracted: %w", version, dir, err)
+		}
+		extract = func(ctx context.Context, archive, dst string) error {
+			cmd := exec.CommandContext(ctx, extractor, "x", "-y", "-o"+dst, archive)
+			cmd.Stdout, cmd.Stderr = io.Discard, os.Stderr
+			hideChild(cmd, false)
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("%s: %w", extractor, err)
+			}
+			return nil
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "engine: %s not installed; downloading %s\n", version, asset)
@@ -138,10 +150,8 @@ func installRelease(ctx context.Context, version, asset, dir, headless, prd stri
 		return err
 	}
 	defer os.RemoveAll(staging)
-	cmd := exec.CommandContext(ctx, extractor, "x", "-y", "-o"+staging, tmp.Name())
-	cmd.Stdout, cmd.Stderr = io.Discard, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("engine: extract %s with %s: %w", asset, extractor, err)
+	if err := extract(ctx, tmp.Name(), staging); err != nil {
+		return fmt.Errorf("engine: extract %s: %w", asset, err)
 	}
 	if !fileExists(filepath.Join(staging, headless)) {
 		return fmt.Errorf("engine: %s contains no %s", asset, headless)
@@ -168,6 +178,11 @@ func installRelease(ctx context.Context, version, asset, dir, headless, prd stri
 	return nil
 }
 
+// Extract7z, when set, unpacks a 7z archive into dir in place of the 7z
+// command. A program that cannot count on one being installed (FogOfWar on
+// Windows, which ships none) sets it to an in-process extractor.
+var Extract7z func(ctx context.Context, archive, dir string) error
+
 // sevenZip finds the extractor. p7zip ships the command under two names and
 // distros disagree on which, so both are tried.
 func sevenZip() (string, error) {
@@ -192,14 +207,45 @@ func download(ctx context.Context, url string, dst io.Writer) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s", url, resp.Status)
 	}
-	_, err = io.Copy(dst, resp.Body)
+	_, err = io.Copy(dst, progressReader(url, resp))
 	return err
+}
+
+// DownloadProgress, when set, is told how far each engine download has got
+// (total is -1 when the server sends no length). A GUI sets it to draw a
+// progress bar; nothing else needs it.
+var DownloadProgress func(url string, done, total int64)
+
+// progressReader reports resp's body to DownloadProgress as it is read.
+func progressReader(url string, resp *http.Response) io.Reader {
+	if DownloadProgress == nil {
+		return resp.Body
+	}
+	return &countingReader{r: resp.Body, url: url, total: resp.ContentLength}
+}
+
+type countingReader struct {
+	r     io.Reader
+	url   string
+	done  int64
+	total int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.done += int64(n)
+	if f := DownloadProgress; f != nil {
+		f(c.url, c.done, c.total)
+	}
+	return n, err
 }
 
 // engineBannerVersion returns the binary's `--version` banner. The engine
 // prints it and exits immediately, so this costs milliseconds.
 func engineBannerVersion(bin string) (string, error) {
-	out, err := exec.Command(bin, "--version").Output()
+	cmd := exec.Command(bin, "--version")
+	hideChild(cmd, false)
+	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}

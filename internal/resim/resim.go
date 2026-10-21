@@ -94,6 +94,10 @@ type Options struct {
 	// goes — it is how the ingest daemon reports a job that will not return
 	// for the better part of an hour.
 	Progress *Progress
+
+	// OnlyLocal runs the engine with no listening socket (engine.Config.
+	// OnlyLocal).
+	OnlyLocal bool
 }
 
 // RunStats is one re-simulation's processing record.
@@ -231,10 +235,12 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		SnapshotStreamPath: relStream,
 		DisableWidgets:     true,
 		ThrottleDraw:       true,
+		OnlyLocal:          o.OnlyLocal,
 	}, h.EngineVersion)
 	if err != nil {
 		return "", nil, err
 	}
+	o.Progress.setEngine(eng.Patched())
 	if err := eng.EnsureContent(ctx, demo.Startscript.GameType, demo.Startscript.MapName); err != nil {
 		return "", nil, err
 	}

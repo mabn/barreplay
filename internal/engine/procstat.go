@@ -62,6 +62,11 @@ func SampleProcess(pid int) (ProcSample, bool) {
 	if pid <= 0 {
 		return ProcSample{}, false
 	}
+	return sampleProcess(pid)
+}
+
+// sampleProcessProc reads /proc/<pid> (Linux).
+func sampleProcessProc(pid int) (ProcSample, bool) {
 	dir := "/proc/" + strconv.Itoa(pid)
 	b, err := os.ReadFile(dir + "/stat")
 	if err != nil {

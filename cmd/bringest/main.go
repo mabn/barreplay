@@ -732,10 +732,24 @@ func (d *workerAPI) beat(ctx context.Context, jobID string, p *jobProgress) erro
 // reading continuously and this must send whatever is current, not whatever was
 // true when the loop began. Nil (or a nil reading) simply beats.
 //
-// stop WAITS for the goroutine to finish: a beat still in flight when the
-// terminal done/error lands would overwrite it and leave the row processing
-// forever.
+// It also beats at once when started and once more when stopped: the queue
+// page charts the beats, and a run shorter than one interval would otherwise
+// leave a single point, or none.
+//
+// stop WAITS for the goroutine to finish, and sends the closing beat itself,
+// before returning: a beat still in flight when the terminal done/error lands
+// would overwrite it and leave the row processing forever.
 func (d *workerAPI) healthcheck(ctx context.Context, jobID string, progress func() *jobProgress) (stop func()) {
+	beat := func(bctx context.Context) {
+		var p *jobProgress
+		if progress != nil {
+			p = progress()
+		}
+		if err := d.beat(bctx, jobID, p); err != nil && bctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "bringest: job %s: healthcheck: %v\n", jobID, err)
+		}
+	}
+	beat(ctx) // here, not on the goroutine: a run done in a blink would cancel it
 	hctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -747,19 +761,16 @@ func (d *workerAPI) healthcheck(ctx context.Context, jobID string, progress func
 			case <-hctx.Done():
 				return
 			case <-t.C:
-				var p *jobProgress
-				if progress != nil {
-					p = progress()
-				}
-				if err := d.beat(hctx, jobID, p); err != nil && hctx.Err() == nil {
-					fmt.Fprintf(os.Stderr, "bringest: job %s: healthcheck: %v\n", jobID, err)
-				}
+				beat(hctx)
 			}
 		}
 	}()
 	return func() {
 		cancel()
 		<-done
+		if ctx.Err() == nil {
+			beat(ctx)
+		}
 	}
 }
 

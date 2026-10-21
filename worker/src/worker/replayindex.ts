@@ -20,11 +20,12 @@
 import { DurableObject } from "cloudflare:workers";
 
 import type { GameEntry, GameListRow, GamesCursor } from "./games";
-import { parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
+import { APP_JOB_STALE_SEC, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type {
   IngestJob,
   JobErrorKind,
   JobKind,
+  JobPublish,
   JobProgress,
   JobSample,
   JobStats,
@@ -209,7 +210,7 @@ export const JOB_SAMPLE_RETENTION_SEC = 30 * 24 * 60 * 60;
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
 const JOB_COLS =
   "id, stream_key, game_id, kind, state, error, error_kind, stats, progress, disabled, note, " +
-  "created_unix, updated_unix";
+  "install_id, parent_id, created_unix, updated_unix";
 
 /** The same columns qualified to `j`, for the one query that joins the jobs
  * table against the two that know anything about a game. Derived from JOB_COLS
@@ -219,6 +220,28 @@ const JOB_COLS =
 const JOB_COLS_J = JOB_COLS.split(", ")
   .map((c) => `j.${c}`)
   .join(", ");
+
+/** One job plus what the catalog or the games mirror knows about its game
+ * (queuePage, jobsByInstall; queueJobRow reads it). */
+const QUEUE_SELECT = `
+      SELECT ${JOB_COLS_J},
+             COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
+             COALESCE(r.game_size, g.game_size)       AS game_size,
+             COALESCE(r.start_unix, g.start_unix)     AS game_start_unix,
+             COALESCE(r.map, g.map)                   AS game_map,
+             g.map_file                               AS game_map_file,
+             COALESCE(r.settings, g.settings)         AS game_settings,
+             -- The publish of an app run's .brp (the upload job naming this
+             -- one as its parent), shown INSIDE the app's row rather than as
+             -- a row of its own. A seek on jobs_parent; the newest if the app
+             -- ever sent two.
+             (SELECT json_object('id', c.id, 'state', c.state, 'error', c.error,
+                                 'stats', json(c.stats), 'updatedUnix', c.updated_unix)
+              FROM jobs c WHERE c.parent_id = j.id
+              ORDER BY c.created_unix DESC LIMIT 1)   AS publish
+      FROM jobs j
+      LEFT JOIN replays r ON r.id = j.game_id
+      LEFT JOIN games   g ON g.id = j.game_id`;
 
 /** What came of asking for a job: a fresh row, the one that already covers the
  * game, or a refusal. "disabled" and "in-catalog" are both "nothing will
@@ -279,7 +302,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 9;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -502,6 +525,14 @@ const INDEX_DDL = `
       -- repeats this clause textually, like jobs_settled's.
       CREATE INDEX IF NOT EXISTS jobs_failed ON jobs (created_unix DESC)
         WHERE state = 'error';
+      -- Every job one FogOfWar.exe install made (GET /api/admin/queue?install=),
+      -- newest first. PARTIAL: only the app's jobs carry an install id.
+      CREATE INDEX IF NOT EXISTS jobs_install ON jobs (install_id, created_unix DESC)
+        WHERE install_id IS NOT NULL;
+      -- The upload job publishing an app run's .brp, found from the run's
+      -- row (QUEUE_SELECT's publish). PARTIAL: only those uploads have one.
+      CREATE INDEX IF NOT EXISTS jobs_parent ON jobs (parent_id, created_unix DESC)
+        WHERE parent_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS lobbies_open    ON lobbies (lobby_id, started_unix)
         WHERE ended_unix IS NULL;
       CREATE INDEX IF NOT EXISTS lobbies_matched ON lobbies (started_unix)
@@ -537,6 +568,12 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // pasted re-sim of a game already simulated, recorded disabled. Nullable:
   // almost no job has one.
   ["jobs", "note TEXT"],
+  // The FogOfWar.exe install behind an "app" job and the upload of its .brp.
+  // Nullable: nothing bringest does has one.
+  ["jobs", "install_id TEXT"],
+  // The "app" job whose .brp an upload job publishes. Such an upload is part
+  // of that run: the queue shows it inside the app's row, not as its own.
+  ["jobs", "parent_id TEXT"],
   // Added after the other sample columns: a run's remaining-time estimate was
   // reported from the start but only ever overwritten in place, so the rows
   // written before this have none and chart as a gap.
@@ -1864,21 +1901,41 @@ export class ReplayIndex extends DurableObject<Env> {
   /** jobInsert records fresh work as a pending ingest job. A "resim" carries
    * no streamKey (pass ""); it is queued through resimEnqueue below, which is
    * where the refusals live. */
-  jobInsert(id: string, streamKey: string, gameId: string, kind: JobKind = "upload"): void {
+  jobInsert(
+    id: string,
+    streamKey: string,
+    gameId: string,
+    kind: JobKind = "upload",
+    installId: string | null = null,
+    note: string | null = null,
+    parentId: string | null = null,
+  ): void {
     const now = Math.floor(Date.now() / 1000);
+    // A parent is taken only when it is an "app" job of the same game: the
+    // id comes from an open route, and a wrong one would hide this job
+    // inside somebody else's row.
+    if (parentId !== null) {
+      const parent = this.jobGet(parentId);
+      if (parent === null || parent.kind !== "app" || parent.gameId !== gameId) parentId = null;
+    }
     this.ctx.storage.sql.exec(
-      `INSERT INTO jobs (id, stream_key, game_id, kind, state, error, created_unix, updated_unix)
-       VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)`,
+      `INSERT INTO jobs (id, stream_key, game_id, kind, state, error, install_id, parent_id, note, created_unix, updated_unix)
+       VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?, ?, ?, ?)`,
       id,
       streamKey,
       gameId,
       kind,
+      installId,
+      parentId,
+      note,
       now,
       now,
     );
-    // The maintained table count queuePage's `total` reads (JOBS_COUNT_KEY):
-    // one meta row touched per insert, against the COUNT(*) per page view it
-    // replaces, whose cost was the table.
+    // The maintained count of the rows queuePage lists (JOBS_COUNT_KEY): one
+    // meta row touched per insert, against the COUNT(*) per page view it
+    // replaces, whose cost was the table. A job with a parent is not listed
+    // (it shows inside its parent's row), so it is not counted either.
+    if (parentId !== null) return;
     this.ctx.storage.sql.exec(
       `INSERT INTO schema_meta (key, value) VALUES (?, 1)
        ON CONFLICT(key) DO UPDATE SET value = value + 1`,
@@ -1984,7 +2041,9 @@ export class ReplayIndex extends DurableObject<Env> {
   jobRetry(newId: string, id: string): JobEnqueue | null {
     const job = this.jobGet(id);
     if (job === null) return null;
-    if (job.kind === "resim") return this.jobAnnounce(newId, job.gameId, "resim");
+    // An app run is retried as an ordinary re-sim: the app that ran it is not
+    // something the worker can ask, a daemon is.
+    if (job.kind === "resim" || job.kind === "app") return this.jobAnnounce(newId, job.gameId, "resim");
     const active = this.ctx.storage.sql
       .exec(
         `SELECT ${JOB_COLS} FROM jobs
@@ -1997,7 +2056,7 @@ export class ReplayIndex extends DurableObject<Env> {
       const cur = jobRow(active[0]);
       return { status: cur.disabled ? "disabled" : "duplicate", job: cur };
     }
-    this.jobInsert(newId, job.streamKey, job.gameId, "upload");
+    this.jobInsert(newId, job.streamKey, job.gameId, "upload", job.installId, job.note);
     return { status: "queued", job: this.jobGet(newId) };
   }
 
@@ -2445,21 +2504,11 @@ export class ReplayIndex extends DurableObject<Env> {
     // all three tables and `updated_unix` is in two of them, so an
     // unqualified one is an ambiguous-column error rather than a wrong
     // answer.
-    const select = `
-      SELECT ${JOB_COLS_J},
-             COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
-             COALESCE(r.game_size, g.game_size)       AS game_size,
-             COALESCE(r.start_unix, g.start_unix)     AS game_start_unix,
-             COALESCE(r.map, g.map)                   AS game_map,
-             g.map_file                               AS game_map_file,
-             COALESCE(r.settings, g.settings)         AS game_settings
-      FROM jobs j
-      LEFT JOIN replays r ON r.id = j.game_id
-      LEFT JOIN games   g ON g.id = j.game_id`;
+    const select = QUEUE_SELECT;
     const active = this.ctx.storage.sql
       .exec(
         `${select}
-         WHERE j.state IN ('pending', 'processing') AND j.disabled = 0
+         WHERE j.state IN ('pending', 'processing') AND j.disabled = 0 AND j.parent_id IS NULL
          ORDER BY j.updated_unix DESC, j.id`,
       )
       .toArray()
@@ -2475,7 +2524,7 @@ export class ReplayIndex extends DurableObject<Env> {
       settled = this.ctx.storage.sql
         .exec(
           `${select}
-           WHERE j.state NOT IN ('pending', 'processing') OR j.disabled != 0
+           WHERE (j.state NOT IN ('pending', 'processing') OR j.disabled != 0) AND j.parent_id IS NULL
            ORDER BY j.updated_unix DESC, j.id
            LIMIT ? OFFSET ?`,
           limit - fromActive.length,
@@ -2770,6 +2819,83 @@ export class ReplayIndex extends DurableObject<Env> {
     }
     return true;
   }
+
+  /** appJobStart records a re-simulation FogOfWar.exe has just started on
+   * somebody's PC: an "app" job, created already "processing" (nothing hands
+   * it out — the app is doing the work), with the run's opening stats (the
+   * app, its install, the host). Like any job entering "processing" it puts
+   * the game into the catalog as work in progress. */
+  appJobStart(id: string, gameId: string, installId: string, stats: JobStats | null): IngestJob | null {
+    this.jobInsert(id, "", gameId, "app", installId);
+    this.jobUpdate(id, "processing", null, stats, null);
+    return this.jobGet(id);
+  }
+
+  /** appJobUpdate is jobUpdate for the app's open route, which may touch only
+   * "app" jobs: every other job is a daemon's, reported over the guarded
+   * route. "unknown" when the id names no job, "not-app" for a daemon's. */
+  appJobUpdate(
+    id: string,
+    state: "processing" | "done" | "error",
+    error: string | null,
+    stats: JobStats | null,
+    progress: JobProgress | null,
+    errorKind: JobErrorKind | null,
+  ): "ok" | "unknown" | "not-app" {
+    const job = this.jobGet(id);
+    if (job === null) return "unknown";
+    if (job.kind !== "app") return "not-app";
+    this.jobUpdate(id, state, error, stats, progress, errorKind);
+    return "ok";
+  }
+
+  /** appJobsExpire fails the "app" jobs that stopped reporting (see
+   * APP_JOB_STALE_SEC) and takes their games' placeholders out of the
+   * catalog. Called from the cron. A seek on jobs_kind (kind, state,
+   * updated_unix) bounded by the app jobs in flight. Returns how many. */
+  appJobsExpire(now = Math.floor(Date.now() / 1000)): number {
+    const stale = this.ctx.storage.sql
+      .exec(
+        `SELECT id, game_id FROM jobs
+         WHERE kind = 'app' AND state = 'processing' AND updated_unix < ?`,
+        now - APP_JOB_STALE_SEC,
+      )
+      .toArray();
+    for (const r of stale) {
+      this.ctx.storage.sql.exec(
+        `UPDATE jobs SET state = 'error', error = ?, progress = NULL, updated_unix = ? WHERE id = ?`,
+        "The app stopped reporting (closed, crashed, or the PC went to sleep).",
+        now,
+        r.id as string,
+      );
+      this.sampleCounts.delete(r.id as string);
+      this.dropCatalogPlaceholder(r.game_id as string);
+    }
+    return stale.length;
+  }
+
+  /** jobsByInstall is one FogOfWar.exe install's jobs, newest first: the
+   * queue page filtered to an install id. A seek on jobs_install. */
+  jobsByInstall(installId: string, limit: number, offset: number): { jobs: QueueJob[]; total: number } {
+    const jobs = this.ctx.storage.sql
+      .exec(
+        `${QUEUE_SELECT}
+         WHERE j.install_id = ? AND j.parent_id IS NULL
+         ORDER BY j.created_unix DESC
+         LIMIT ? OFFSET ?`,
+        installId,
+        limit,
+        offset,
+      )
+      .toArray()
+      .map(queueJobRow);
+    const total = Number(
+      this.ctx.storage.sql
+        .exec(`SELECT COUNT(*) AS n FROM jobs WHERE install_id = ? AND parent_id IS NULL`, installId)
+        .toArray()[0].n,
+    );
+    return { jobs, total };
+  }
 }
 
 /** queueJobRow is jobRow plus what the join found out about the game. The
@@ -2786,7 +2912,25 @@ function queueJobRow(r: Record<string, unknown>): QueueJob {
   };
   // Null when neither table knows the game (an upload from a private lobby).
   const known = Object.values(game).some((v) => v !== null);
-  return { ...jobRow(r), game: known ? game : null };
+  return { ...jobRow(r), game: known ? game : null, publish: parsePublish(r.publish as string | null) };
+}
+
+/** parsePublish reads QUEUE_SELECT's publish column: the upload job that
+ * publishes an app run's .brp, or null for every other job. */
+function parsePublish(raw: string | null): JobPublish | null {
+  if (raw == null) return null;
+  try {
+    const v = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      id: v.id as string,
+      state: v.state as IngestJob["state"],
+      error: (v.error as string | null) ?? null,
+      stats: v.stats == null ? null : parseJobStats(v.stats),
+      updatedUnix: v.updatedUnix as number,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** The Games listing's SELECT — one mirrored game plus the per-row joins
@@ -2849,6 +2993,8 @@ function jobRow(r: Record<string, unknown>): IngestJob {
     progress: parseStored(r.progress as string | null, parseJobProgress),
     disabled: (r.disabled as number | null) === 1,
     note: (r.note as string | null) ?? null,
+    installId: (r.install_id as string | null) ?? null,
+    parentId: (r.parent_id as string | null) ?? null,
     createdUnix: r.created_unix as number,
     updatedUnix: r.updated_unix as number,
   };

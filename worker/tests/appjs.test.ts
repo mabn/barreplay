@@ -1480,6 +1480,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     const fmtDate = () => 'date', fmtAgo = () => 'ago';
     const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
     let queueTimeCol = 'start';
+    let queueInstall = null;
     const fmtDateShort = (u) => 'short ' + u;
     const mapFileGuess = (m) => m.toLowerCase().replace(/ /g, '_');
     const settingsBadges = (st) => st ? Object.keys(st).filter((k) => st[k]).map((k) => ({ key: k, label: k })) : [];
@@ -1630,6 +1631,7 @@ test('a disabled job reads as disabled and offers the way back', () => {
     const fmtDate = () => 'date', fmtAgo = () => 'ago';
     const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
     let queueTimeCol = 'start';
+    let queueInstall = null;
     const fmtDateShort = (u) => 'short ' + u;
     const mapFileGuess = (m) => m.toLowerCase().replace(/ /g, '_');
     const settingsBadges = (st) => st ? Object.keys(st).filter((k) => st[k]).map((k) => ({ key: k, label: k })) : [];

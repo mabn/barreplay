@@ -493,3 +493,31 @@ test("the lava retry lookup costs the window's failures, not the queue", async (
   expect(costs.retryScanEmpty, report).toBeLessThan(3000);
   expect(costs.retryScanRested, report).toBeLessThan(20);
 });
+
+/** The cron fails FogOfWar.exe runs that stopped reporting, every minute. Its
+ * cost must be the app jobs in flight, not the jobs table. */
+test("expiring silent app jobs costs the app jobs in flight, not the queue", async () => {
+  const costs = await measured((index, tally) => {
+    const sql = (index as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+    const now = Math.floor(Date.now() / 1000);
+    sql.exec(`INSERT INTO jobs (id, stream_key, game_id, kind, state, created_unix, updated_unix, install_id)
+      WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 20000)
+      SELECT printf('j%06d', n), '', printf('g%06d', n), CASE WHEN n % 10 = 0 THEN 'app' ELSE 'resim' END,
+             'done', ${now} - n*60, ${now} - n*60,
+             CASE WHEN n % 10 = 0 THEN '01920000-0000-7000-8000-000000000003' END
+      FROM seq`);
+    for (let i = 0; i < 3; i++) index.appJobStart(`live${i}`, `gl${i}`, "01920000-0000-7000-8000-000000000003", null);
+    tally();
+    const out: Record<string, number> = {};
+    index.appJobsExpire();
+    out.expireNone = tally();
+    index.jobsByInstall("01920000-0000-7000-8000-000000000003", 25, 0);
+    out.installPage = tally();
+    return out;
+  });
+  const report = JSON.stringify(costs, null, 2);
+  expect(costs.expireNone, report).toBeLessThan(10);
+  // A page of 25 plus the install's COUNT (2003 index entries): bounded by
+  // the install's own jobs, not the 20k-row table.
+  expect(costs.installPage, report).toBeLessThan(2200);
+});

@@ -68,9 +68,19 @@ class FakeIndex {
     e.uploaderAlly = view === "ally" ? ally : null;
     return true;
   }
-  jobInsert(id: string, streamKey: string, gameId: string, kind: JobKind = "upload"): void {
+  jobInsert(
+    id: string,
+    streamKey: string,
+    gameId: string,
+    kind: JobKind = "upload",
+    installId: string | null = null,
+    note: string | null = null,
+    parentId: string | null = null,
+  ): void {
     this.jobs.set(id, {
       id,
+      installId,
+      parentId,
       streamKey,
       gameId,
       kind,
@@ -80,7 +90,7 @@ class FakeIndex {
       stats: null,
       progress: null,
       disabled: false,
-      note: null,
+      note,
       createdUnix: 0,
       updatedUnix: 0,
     });
@@ -256,6 +266,29 @@ class FakeIndex {
       this.samples.set(id, s);
     }
     return true;
+  }
+  appJobStart(id: string, gameId: string, installId: string, stats: JobStats | null): IngestJob | null {
+    this.jobInsert(id, "", gameId, "app", installId);
+    this.jobUpdate(id, "processing", null, stats, null);
+    return this.jobGet(id);
+  }
+  appJobUpdate(
+    id: string,
+    state: "processing" | "done" | "error",
+    error: string | null,
+    stats: JobStats | null,
+    progress: JobProgress | null,
+    errorKind: JobErrorKind | null,
+  ): "ok" | "unknown" | "not-app" {
+    const j = this.jobs.get(id);
+    if (!j) return "unknown";
+    if (j.kind !== "app") return "not-app";
+    this.jobUpdate(id, state, error, stats, progress, errorKind);
+    return "ok";
+  }
+  jobsByInstall(installId: string, limit: number, offset: number) {
+    const all = [...this.jobs.values()].filter((j) => j.installId === installId);
+    return { jobs: all.slice(offset, offset + limit).map((j) => ({ ...j, game: null })), total: all.length };
   }
   samples = new Map<string, JobSample[]>();
   jobSamples(id: string): JobSample[] {
@@ -515,6 +548,7 @@ test("GET /api/admin/queue lists jobs for the viewer without the archive key", a
         progress: null,
         disabled: false,
         note: null,
+        installId: null,
         // Neither the catalog nor the mirror knows this id in the fake, which
         // is what a private-lobby upload looks like.
         game: null,
@@ -525,6 +559,7 @@ test("GET /api/admin/queue lists jobs for the viewer without the archive key", a
     total: 1,
     active: 1,
     offset: 0,
+    install: null,
   });
   assert.ok(!JSON.stringify(page).includes(streamKey), "archive key stays out of the reply");
 
@@ -2018,4 +2053,92 @@ test("GET /api/insights/connect is bearer-guarded and hands the upgrade to the h
   const ok = await app.request(url, { headers: { upgrade: "websocket", authorization: "Bearer secret" } }, env);
   assert.equal(await ok.text(), "upgraded");
   assert.match(forwarded!.url, /version=7&slots=2$/);
+});
+
+// ---- FogOfWar.exe's own jobs ----------------------------------------------
+
+const INSTALL = "01920000-0000-7000-8000-000000000001";
+
+test("an app re-sim is a job from its start, reported on over the open routes", async () => {
+  const { env, index } = makeEnv();
+  const start = await app.request(
+    "/api/app/jobs",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        gameId: "0123456789abcdef0123456789abcdef",
+        installId: INSTALL,
+        stats: { app: { name: "FogOfWar", version: "0.2.5", installId: INSTALL, auto: true } },
+      }),
+    },
+    env,
+  );
+  assert.equal(start.status, 200);
+  const { job } = await asJson(start);
+  const row = index.jobGet(job)!;
+  assert.equal(row.kind, "app");
+  assert.equal(row.state, "processing");
+  assert.equal(row.installId, INSTALL);
+  assert.equal((row.stats as { app: { version: string } }).app.version, "0.2.5");
+
+  const post = (body: unknown) =>
+    app.request(`/api/app/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+  assert.equal((await post({ state: "processing", progress: { state: "simulating", percent: 40 } })).status, 200);
+  assert.equal(index.jobGet(job)!.progress!.percent, 40);
+  assert.equal(index.jobSamples(job).length, 1);
+  assert.equal((await post({ state: "done", stats: { tookSec: 600, uploadJob: "u1" } })).status, 200);
+  assert.equal(index.jobGet(job)!.state, "done");
+  assert.equal(index.jobGet(job)!.progress, null);
+
+  // Never offered to a daemon, and not even a kind a daemon may ask for.
+  assert.equal((await app.request("/api/jobs?kind=app", {}, env)).status, 400);
+});
+
+test("the app's open routes refuse a daemon's job and bad input", async () => {
+  const { env, index } = makeEnv();
+  index.jobInsert("daemon-job", "", "0123456789abcdef0123456789abcdef", "resim");
+  const res = await app.request(
+    "/api/app/jobs/daemon-job",
+    { method: "POST", body: JSON.stringify({ state: "done" }) },
+    env,
+  );
+  assert.equal(res.status, 403);
+  assert.equal(index.jobGet("daemon-job")!.state, "pending");
+  assert.equal(
+    (await app.request("/api/app/jobs/nope", { method: "POST", body: JSON.stringify({ state: "done" }) }, env)).status,
+    404,
+  );
+  const noInstall = await app.request(
+    "/api/app/jobs",
+    { method: "POST", body: JSON.stringify({ gameId: "0123456789abcdef0123456789abcdef", installId: "me" }) },
+    env,
+  );
+  assert.equal(noInstall.status, 400);
+});
+
+test("an upload names the app run it publishes (?appJob=), and a malformed id is ignored", async () => {
+  const { env, index } = makeEnv();
+  const run = "0192aaaa-0000-7000-8000-000000000001";
+  const up = await app.request(`/api/upload?install=${INSTALL}&app=0.2.6&appJob=${run}`, { method: "POST", body: fixture() }, env);
+  assert.equal(up.status, 200);
+  assert.equal(index.jobGet((await asJson(up)).job)!.parentId, run);
+  const bad = await app.request(`/api/upload?appJob=x'--`, { method: "POST", body: fixture() }, env);
+  assert.equal(index.jobGet((await asJson(bad)).job)!.parentId, null);
+});
+
+test("an upload names the app install it came from, and the queue filters by it", async () => {
+  const { env, index } = makeEnv();
+  const up = await app.request(`/api/upload?install=${INSTALL}&app=0.2.5`, { method: "POST", body: fixture() }, env);
+  assert.equal(up.status, 200);
+  const { job } = await asJson(up);
+  assert.equal(index.jobGet(job)!.installId, INSTALL);
+  assert.equal(index.jobGet(job)!.note, "Uploaded by FogOfWar 0.2.5");
+  assert.equal(index.jobGet(job)!.parentId, null);
+  await app.request("/api/upload", { method: "POST", body: fixture() }, env); // not the app's
+
+  const page = await asJson(await app.request(`/api/admin/queue?install=${INSTALL}`, {}, env));
+  assert.equal(page.install, INSTALL);
+  assert.deepEqual(page.jobs.map((j: { id: string }) => j.id), [job]);
+  assert.equal(page.jobs[0].installId, INSTALL);
+  assert.equal((await app.request("/api/admin/queue?install=nope", {}, env)).status, 400);
 });
