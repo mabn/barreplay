@@ -10,10 +10,10 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112, 0116-0127 and 0129-0149 here,
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112, 0116-0127 and 0129-0156 here,
 0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105, 0110, 0113-0115 and 0128 in
 `rejected/`, 0046-0051 in `tools/`. Change
-identifiers continue the work log's H-series (H1-H73), with H74-H122 for the
+identifiers continue the work log's H-series (H1-H73), with H74-H127 for the
 ones below.
 P1 (with its versions v2-v9), P2, P3, P4, P5, P7, N1, N2 and the widget-side
 W1-W7 are families of their own.
@@ -212,17 +212,23 @@ the harness's `TOGGLES3=`):
 | `0x10` | H111 | 0136 | Lua's number/pointer hash remainder by Lemire's reciprocal (27 divisors; tested on 41.6e9 numerators) | ±0.4% (noise) | on |
 | `0x20` | H112 | 0137 | the unit loop prefetches the ten lines `CUnit::Update` touches in the unit 8 ahead | +0.3% / +1.0% | on in `7f`; to retest |
 | `0x40` | H113 | 0138 | explosion generators give their answer without spawning (every spawnable class is an unsynced effect) | with H110: -0.3% / -0.5% | on |
-| `0x80` | P11 v2 | 0139 | P11's workers take chunks from the back, so the in-order pass stops waiting inside the chunk it needs | (`speed64`) | |
-| `0x100` | H114 | 0140 | the unit loop's collision-map bookkeeping: id/moveType lines prefetched 16 ahead, the rate of 3 divides as a constant, a due update called forced | (`speed64`) | |
-| `0x200` | H115 | 0141 | prefetches for P8's setup (ids 16 ahead) and the weapon loop (id and last line 8 ahead, the weapons buffer 6 ahead) | (`speed64`) | |
-| `0x400` | H116 | 0142 | `CBuilder::Update` reads the live front command instead of a copy (a temporary in the ternary forced one per builder per frame) | (`speed64`) | |
-| `0x800` | H117 | 0143 | the COB thread map rebuilt once its tombstones pile up (every new id scanned the whole probe length) | (`speed64`) | |
-| `0x1000` | H118 | 0144 | `QueueDeleteUnits` prefetches `deathScriptFinished` 16 ahead (H86 again, rejected then as noise) | (`speed64`, with H115/H121) | |
-| `0x2000` | H119 | 0145 | `FindAnim` on a perturbed list binary-searches its still-sorted prefix and scans the tail | (`speed64`) | |
-| `0x4000` | H120 | 0146 | a synced ray above every H106 block bound in its bounding box misses the ground at once | (`speed64`) | |
-| `0x8000` | H121 | 0147 | prefetches in `GetUnitsExact` and the builders' repair search (candidates 4 ahead) | (`speed64`) | |
-| `0x10000` | P12 v2 | 0148 | inside the pass, a Lua write to one unit marks that unit (before and after the call) instead of everything | (`speed64`) | |
-| `0x20000` | H122 | 0149 | the ground move type hands the ground height it just read to H88's cache | (`speed64`) | |
+| `0x80` | P11 v2 | 0139 | P11's workers take chunks from the back, so the in-order pass stops waiting inside the chunk it needs | -1.9% / -0.7% (`speed64`, medians) | on |
+| `0x100` | H114 | 0140 | the unit loop's collision-map bookkeeping: id/moveType lines prefetched 16 ahead, the rate of 3 divides as a constant, a due update called forced | with H119+H120: -3.3% / -2.9% (`speed64`) | on |
+| `0x200` | H115 | 0141 | prefetches for P8's setup (ids 16 ahead) and the weapon loop (id and last line 8 ahead, the weapons buffer 6 ahead) | with H118+H121: -0.9% / -1.3% (`speed64`) | on |
+| `0x400` | H116 | 0142 | `CBuilder::Update` reads the live front command instead of a copy (a temporary in the ternary forced one per builder per frame) | -2.0% / -1.5% (`speed64`) | on |
+| `0x800` | H117 | 0143 | the COB thread map rebuilt once its tombstones pile up (every new id scanned the whole probe length) | -1.4% / -1.1% (`speed64`) | on |
+| `0x1000` | H118 | 0144 | `QueueDeleteUnits` prefetches `deathScriptFinished` 16 ahead (H86 again, rejected then as noise) | with H115 | on |
+| `0x2000` | H119 | 0145 | `FindAnim` on a perturbed list binary-searches its still-sorted prefix and scans the tail | with H114 | on |
+| `0x4000` | H120 | 0146 | a synced ray above every H106 block bound in its bounding box misses the ground at once | with H114 | on |
+| `0x8000` | H121 | 0147 | prefetches in `GetUnitsExact` and the builders' repair search (candidates 4 ahead) | with H115 | on |
+| `0x10000` | P12 v2 | 0148 | inside the pass, a Lua write to one unit marks that unit (before and after the call) instead of everything | -1.9% / -0.4%; check 0 wrong of 97,515 + 42,619 (`speed64`) | on |
+| `0x20000` | H122 | 0149 | the ground move type hands the ground height it just read to H88's cache | -0.9% / -0.7% (`speed64`) | on |
+| `0x40000` | H123 | 0150 | `GetUnitSampleDelta`'s per-unit half on all threads (from 1024 units), the output filled in order by the main thread | (`speed65`) | |
+| `0x80000` | H124 | 0151 | the draining-list calls that change no weapon-vector input (`SpawnCEG`, two weapon reads, a non-queueing stockpile order) skip P8's make-every-unit-ready; a frame's later make-all-readies visit nothing | (`speed65`) | |
+| `0x100000` | P12 v3 | 0151 | the same calls mark nothing in P12's pass | (`speed65`) | |
+| `0x200000` | H125 | 0153 | no smoke trails behind missiles, starbursts and debris; the trail's `useAirLos` computed without it | (`speed65`) | |
+| `0x400000` | H126 | 0154-0155 | the LOS update's map work as one set of tasks: per type the units and filtering, every type's raycasts at once, each (type, ally team, band of rows)'s removes and adds, per type the cache; full view only | (`speed65`) | |
+| `0x800000` | H127 | 0156 | H108's crater pass rejects instances outside every crater's reach (from the boxes `CheckOverlap` really tests) at once | (`speed65`) | |
 
 Not toggled (always on in these builds):
 
@@ -245,6 +251,7 @@ Not toggled (always on in these builds):
 | 0121 | bench harness: a `p4check` word in `park.go` (`P4CHECK=1`) turns P4's and P10's check mode on after a restore; 0123 makes P4's first-slice init keep it |
 | 0126 | bench harness: a `sync` word in `park.go` makes the engine report `<park>.window` after its huge-page wait and wait for `<park>.go2`, so `PERF`/`PERFSTAT` profile the timed window only (they had included the wait since 0096) |
 | 0132 | measurement: the projectile collision pass's checks, candidates, hits and cycles per kind, and P12's counters, on the bench line |
+| 0152 (W8) | the capture widget's damage drain in the engine: `Spring.DrainLoggedDamageColumns` / `TakeLoggedDamageColumns` (`recordHitAt`'s float steps, the H record's columns kept and packed natively); widget 1.13.1 uses them when offered |
 
 ## rejected/
 

@@ -1,0 +1,385 @@
+From 7315a4d6d2305adf197712658839e45df92dbba0 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 00:52:13 +0000
+Subject: [PATCH 154/156] [barreplay] H126: the LOS update's map work as one
+ set of tasks across types and ally teams (toggle3 0x400000)
+
+speed62's late window: P7's finish ran one task per sensor type, so the main
+thread spent 2.4% running types itself and 1.0% waiting for the heaviest one
+(ILosType::Update is mostly the map's add and remove loops, LosMap.cpp:464).
+ILosType::Update is now BrUpdateBegin (its queues and filtering) + the map
+work + BrUpdateEnd (the cache), and with H126 every type's map work runs as
+one set of tasks: per type, the unit loop and BrUpdateBegin, then every
+type's raycasts at once, then each (type, ally team)'s removes and adds, then
+per type the cache. A recalculated instance's old squares are moved aside
+before its raycast, so the raycast can run first and its removal still
+subtracts what was added. A type's own state is touched only in its first and
+last step; a map step writes one ally team's map with integer adds, which
+commute. Only in full view, where a visible add's report of squares entering
+LOS (CReadMap::UpdateLOS) returns at once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Misc/LosHandler.cpp | 195 ++++++++++++++++++++++++++++++------
+ rts/Sim/Misc/LosHandler.h   |  24 +++++
+ rts/Sim/Misc/LosMap.h       |  14 +++
+ 3 files changed, 203 insertions(+), 30 deletions(-)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index b75eef3..9cbf9a2 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -11,6 +11,7 @@
+ #include "Sim/Misc/TeamHandler.h"
+ #include "Sim/Misc/ModInfo.h"
+ #include "Map/ReadMap.h"
++#include "Game/GlobalUnsynced.h"
+ #include "System/Log/ILog.h"
+ #include "System/SpringHash.h"
+ #include "System/creg/STL_Deque.h"
+@@ -538,6 +539,37 @@ inline int ILosType::GetHashNum(const int allyteam, const int2 baseLos, const fl
+ void ILosType::Update()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	if (!BrUpdateBegin())
++		return;
++
++	// remove sight
++	//FIXME multithread?
++	for (SLosInstance* li: losRemove) {
++		LosRemove(li);
++	}
++
++	// raycast terrain
++	if (algoType == LOS_ALGO_RAYCAST)  {
++		for_mt(0, losRecalc.size(), [&](const int idx) {
++			auto li = losRecalc[idx];
++			assert(li->refCount > 0);
++			li->squares.clear();
++			losMaps[li->allyteam].PrepareRaycast(li);
++		});
++	}
++
++	// add sight
++	for (SLosInstance* li: losAdd) {
++		assert(li->refCount > 0);
++		LosAdd(li);
++	}
++
++	BrUpdateEnd();
++}
++
++// [barreplay] H126: Update's queues and filtering ([barreplay] P7 v4 included)
++bool ILosType::BrUpdateBegin()
++{
+ 	// delayed delete
+ 	while (!delayedDeleteQue.empty() && delayedDeleteQue.front().timeoutTime < gs->frameNum) {
+ 		UnrefInstance(delayedDeleteQue.front().instance);
+@@ -556,7 +588,7 @@ void ILosType::Update()
+ 
+ 	// no updates? -> early exit
+ 	if (losUpdate.empty())
+-		return;
++		return false;
+ 
+ 
+ 	losRemove.clear();
+@@ -618,28 +650,12 @@ void ILosType::Update()
+ 		}
+ 	}
+ 
+-	// remove sight
+-	//FIXME multithread?
+-	for (SLosInstance* li: losRemove) {
+-		LosRemove(li);
+-	}
+-
+-	// raycast terrain
+-	if (algoType == LOS_ALGO_RAYCAST)  {
+-		for_mt(0, losRecalc.size(), [&](const int idx) {
+-			auto li = losRecalc[idx];
+-			assert(li->refCount > 0);
+-			li->squares.clear();
+-			losMaps[li->allyteam].PrepareRaycast(li);
+-		});
+-	}
+-
+-	// add sight
+-	for (SLosInstance* li: losAdd) {
+-		assert(li->refCount > 0);
+-		LosAdd(li);
+-	}
++	return true;
++}
+ 
++// [barreplay] H126: Update's cache step
++void ILosType::BrUpdateEnd()
++{
+ 	// delete / move to cache unused instances
+ 	if (algoType == LOS_ALGO_RAYCAST) {
+ 		while (!losCache.empty() && ((losCache.size() + losDeleted.size()) > CACHE_SIZE)) {
+@@ -663,6 +679,61 @@ void ILosType::Update()
+ 	losUpdate.clear();
+ }
+ 
++// [barreplay] H126: Update's map work sorted by ally team, in its order. A
++// remove whose instance is also recalculated keeps the old squares (moved
++// aside, leaving the instance empty as Update's raycast leaves it before
++// filling it), so the raycast may run on any thread before the removes.
++void ILosType::BrStageMapWork()
++{
++	const size_t na = losMaps.size();
++	brRem.resize(na);
++	brAdd.resize(na);
++	for (auto& v: brRem) v.clear();
++	for (auto& v: brAdd) v.clear();
++	brRecalcRem.assign(losRemove.size(), 0);
++	if (brOld.size() < losRemove.size())
++		brOld.resize(losRemove.size());
++
++	if (algoType == LOS_ALGO_RAYCAST && !losRecalc.empty()) {
++		if (brTag.size() < instances.size())
++			brTag.resize(instances.size(), 0);
++		if (++brGen == 0) {
++			std::fill(brTag.begin(), brTag.end(), 0);
++			brGen = 1;
++		}
++		for (const SLosInstance* li: losRecalc)
++			brTag[li->id] = brGen;
++		for (size_t k = 0; k < losRemove.size(); ++k) {
++			SLosInstance* li = losRemove[k];
++			if (brTag[li->id] != brGen)
++				continue;
++			brRecalcRem[k] = 1;
++			brOld[k].clear();
++			std::swap(li->squares, brOld[k]);
++		}
++	}
++	for (size_t k = 0; k < losRemove.size(); ++k)
++		brRem[losRemove[k]->allyteam].push_back(int(k));
++	for (SLosInstance* li: losAdd)
++		brAdd[li->allyteam].push_back(li);
++}
++
++// [barreplay] H126: ally team a's removes, then its adds (the raycasts have run)
++void ILosType::BrMapWork(int a)
++{
++	for (const int k: brRem[a]) {
++		if (brRecalcRem[k]) {
++			losMaps[a].BrAddSquares(brOld[k], -1);
++		} else {
++			LosRemove(losRemove[k]);
++		}
++	}
++	for (SLosInstance* li: brAdd[a]) {
++		assert(li->refCount > 0);
++		LosAdd(li);
++	}
++}
++
+ 
+ void ILosType::UpdateHeightMapSynced(SRectangle rect)
+ {
+@@ -1156,6 +1227,74 @@ void CLosHandler::BrP7Begin()
+ void CLosHandler::BrP7JoinA() {}
+ 
+ // at the LOS point: false when the window did not open (the ordinary update runs)
++// [barreplay] H126 (toggle3 0x400000): each type's unit loop (perType), then
++// its Update; with H126, every type's map work as one set of tasks instead of
++// one task per type, whose heaviest (the sight type's removes and adds) the
++// others waited for. Four steps: per type, the units and Update's queues and
++// filtering (BrUpdateBegin, BrStageMapWork); every type's raycasts at once;
++// each (type, ally team)'s removes and adds; per type, the cache
++// (BrUpdateEnd). A type's state is touched only in its own first and last
++// step; a map step touches one ally team's map (integer adds, which commute)
++// and reads the squares the raycasts wrote. Only in full view: a visible add
++// otherwise reports squares entering LOS to the unsynced height map.
++template <typename F>
++static void BrH126Types(std::array<ILosType*, 7>& losTypes, F&& perType)
++{
++	if ((g_brToggles3 & 0x400000) == 0 || !gu->spectatingFullView) {
++		for_mt(0, losTypes.size(), [&](const int idx) {
++			perType(idx);
++			losTypes[idx]->Update();
++		});
++		return;
++	}
++
++	static std::array<uint8_t, 7> busy;
++	busy.fill(0);
++	for_mt(0, losTypes.size(), [&](const int idx) {
++		perType(idx);
++		ILosType* lt = losTypes[idx];
++		if (lt->BrUpdateBegin()) {
++			lt->BrStageMapWork();
++			busy[idx] = 1;
++		}
++	});
++
++	static std::vector<std::pair<ILosType*, SLosInstance*>> rays;
++	rays.clear();
++	for (size_t t = 0; t < losTypes.size(); ++t) {
++		if (busy[t] == 0 || losTypes[t]->algoType != ILosType::LOS_ALGO_RAYCAST)
++			continue;
++		for (SLosInstance* li: losTypes[t]->BrRecalc())
++			rays.emplace_back(losTypes[t], li);
++	}
++	for_mt(0, rays.size(), [&](const int i) {
++		ILosType* lt = rays[i].first;
++		SLosInstance* li = rays[i].second;
++		assert(li->refCount > 0);
++		li->squares.clear();
++		lt->losMaps[li->allyteam].PrepareRaycast(li);
++	});
++
++	static std::vector<std::pair<int, int>> jobs;
++	jobs.clear();
++	for (size_t t = 0; t < losTypes.size(); ++t) {
++		if (busy[t] == 0)
++			continue;
++		for (size_t a = 0; a < losTypes[t]->losMaps.size(); ++a) {
++			if (losTypes[t]->BrHasMapWork(int(a)))
++				jobs.emplace_back(int(t), int(a));
++		}
++	}
++	for_mt(0, jobs.size(), [&](const int j) {
++		losTypes[jobs[j].first]->BrMapWork(jobs[j].second);
++	});
++
++	for_mt(0, losTypes.size(), [&](const int idx) {
++		if (busy[idx] != 0)
++			losTypes[idx]->BrUpdateEnd();
++	});
++}
++
+ bool CLosHandler::BrP7Finish()
+ {
+ 	using namespace BrP7;
+@@ -1173,12 +1312,11 @@ bool CLosHandler::BrP7Finish()
+ 
+ 		if (all) {
+ 			st.allFrames++;
+-			for_mt(0, losTypes.size(), [&](const int idx) {
++			BrH126Types(losTypes, [&](const int idx) {
+ 				ILosType* lt = losTypes[idx];
+ 				for (CUnit* u: unitHandler.GetActiveUnits()) {
+ 					lt->UpdateUnit(u, false);
+ 				}
+-				lt->Update();
+ 			});
+ 		} else {
+ 			static std::vector<CUnit*> redo;
+@@ -1189,12 +1327,11 @@ bool CLosHandler::BrP7Finish()
+ 					redo.push_back(units[i]);
+ 			}
+ 			st.marks += marked.size();
+-			for_mt(0, losTypes.size(), [&](const int idx) {
++			BrH126Types(losTypes, [&](const int idx) {
+ 				ILosType* lt = losTypes[idx];
+ 				for (CUnit* u: redo) {
+ 					lt->UpdateUnit(u, false);
+ 				}
+-				lt->Update();
+ 			});
+ 		}
+ 		marked.clear();
+@@ -1210,12 +1347,11 @@ bool CLosHandler::BrP7Finish()
+ 	if (all) {
+ 		// a Lua write: the ordinary update, every unit tested again
+ 		st.allFrames++;
+-		for_mt(0, losTypes.size(), [&](const int idx) {
++		BrH126Types(losTypes, [&](const int idx) {
+ 			ILosType* lt = losTypes[idx];
+ 			for (CUnit* u: unitHandler.GetActiveUnits()) {
+ 				lt->UpdateUnit(u, false);
+ 			}
+-			lt->Update();
+ 		});
+ 	} else {
+ 		// a unit whose inputs changed in the window: tested again, every type
+@@ -1229,14 +1365,13 @@ bool CLosHandler::BrP7Finish()
+ 			}
+ 			st.marks += marked.size();
+ 		}
+-		for_mt(0, losTypes.size(), [&](const int idx) {
++		BrH126Types(losTypes, [&](const int idx) {
+ 			ILosType* lt = losTypes[idx];
+ 			const uint8_t bit = uint8_t(1u << idx);
+ 			for (size_t n = 0, m = units.size(); n < m; ++n) {
+ 				if ((needs[n] & bit) != 0)
+ 					lt->UpdateUnit(units[n], false);
+ 			}
+-			lt->Update();
+ 		});
+ 	}
+ 
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index 09145a1..ffcc00e 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -139,6 +139,20 @@ public:
+ 	void BrRefInstance(SLosInstance* li) { RefInstance(li); }
+ 	void BrUnrefInstance(SLosInstance* li) { UnrefInstance(li); }
+ 
++	// [barreplay] H126 (toggle3 0x400000): Update() in its three parts, so the
++	// map work of every type can run as one set of tasks (CLosHandler's
++	// BrUpdateTypes). BrUpdateBegin is Update's queues and filtering (false:
++	// its early exit); BrStageMapWork then sorts the map work by ally team, in
++	// Update's order, moving a recalculated instance's old squares aside so its
++	// raycast (on any thread) cannot clobber what its removal needs;
++	// BrMapWork(a) is ally team a's removes and adds; BrUpdateEnd is the cache.
++	bool BrUpdateBegin();
++	void BrStageMapWork();
++	bool BrHasMapWork(int a) const { return size_t(a) < brRem.size() && (!brRem[a].empty() || !brAdd[a].empty()); }
++	void BrMapWork(int a);
++	void BrUpdateEnd();
++	const std::vector<SLosInstance*>& BrRecalc() const { return losRecalc; }
++
+ 
+ private:
+ 	//void PostLoad();
+@@ -202,6 +216,16 @@ private:
+ 	std::vector<SLosInstance*> losDeleted;
+ 	std::vector<SLosInstance*> losRecalc;
+ 
++	// [barreplay] H126: BrStageMapWork's sorting (indices into losRemove, and
++	// losAdd's entries, per ally team) and the old squares of the removes whose
++	// instance is also recalculated
++	std::vector<std::vector<int>> brRem;
++	std::vector<std::vector<SLosInstance*>> brAdd;
++	std::vector<std::vector<SLosInstance::RLE>> brOld;
++	std::vector<uint8_t> brRecalcRem;
++	std::vector<unsigned> brTag;
++	unsigned brGen = 0;
++
+ 	static constexpr int CACHE_SIZE = 4096;
+ };
+ 
+diff --git a/rts/Sim/Misc/LosMap.h b/rts/Sim/Misc/LosMap.h
+index e0adebe..6f7f5ae 100644
+--- a/rts/Sim/Misc/LosMap.h
++++ b/rts/Sim/Misc/LosMap.h
+@@ -53,6 +53,20 @@ public:
+ 	// FIXME temp fix for CBaseGroundDrawer and AI interface, which need raw data
+ 	const unsigned short& front() const { return losmap.front(); }
+ 	const auto& GetLosMap() const { return losmap; }
++	// [barreplay] H126: AddRaycast's plain path (any amount but a visible
++	// add's) over the given squares instead of the instance's own (a template
++	// only because SLosInstance is incomplete here; 0 is EMPTY_RLE's length)
++	template <typename RLEs>
++	void BrAddSquares(const RLEs& losSquares, int amount) {
++		if (losSquares.empty() || losSquares[0].length == 0)
++			return;
++
++		for (const auto rle: losSquares) {
++			for (int idx = rle.start, len = rle.length; len > 0; --len, ++idx) {
++				losmap[idx] += amount;
++			}
++		}
++	}
+ private:
+ 	void LosAdd(SLosInstance* instance) const;
+ 	void UnsafeLosAdd(SLosInstance* instance) const;
+-- 
+2.53.0
+

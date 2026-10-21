@@ -1,0 +1,196 @@
+From 9466697f6491396c17fcdccb392674d7759e7a96 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 00:22:30 +0000
+Subject: [PATCH 151/156] [barreplay] H124 + P12 v3: calls that change no
+ vector or collision input skip P8's drain and P12's mark (toggle3 0x80000 /
+ 0x100000)
+
+speed62's profile: P8's make-every-unit-ready (EnsureAllSlow) is 0.75% of the
+main thread, and luaprof63 puts the largest share under BAR's stockpile gadget,
+whose StockpileChanged callin (in the weapon loop) gives stockpile orders.
+speed58's whole-game tally of the loop's draining calls: SpawnCEG 33,798,
+GiveOrderToUnit 13,719, GetUnitWeaponState 6,996, GetUnitWeaponVectors 1,303.
+
+BrNoSimInput: GetUnitWeaponState and GetUnitWeaponVectors are reads (in the
+draining list for P4; the second ensures its own unit), SpawnCEG spawns only
+unsynced effects, and a stockpile order on a unit whose stockpile command is
+non-queueing reaches ExecuteStateCommand through every command AI without a
+queueing command's side effects, changing the stockpile queue and the icon.
+Lua callins on the way come through the trampoline themselves.
+
+Also: after a frame's first EnsureAll every unit is ready (a state only goes
+0 -> 1 -> 2 until the next Begin), so the next ones visit nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Lua/LuaUtils.cpp            | 42 ++++++++++++++++++++++++++++++---
+ rts/Sim/Units/BrWeaponVectors.h |  9 +++----
+ rts/Sim/Units/UnitHandler.cpp   | 20 ++++++++++++----
+ 3 files changed, 60 insertions(+), 11 deletions(-)
+
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index feb524d..26dece2 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -12,6 +12,9 @@
+ #include "Sim/Projectiles/BrPreCollide.h"
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Sim/Units/UnitHandler.h"
++#include "Sim/Units/Unit.h"
++#include "Sim/Units/CommandAI/Command.h"
++#include "Sim/Units/CommandAI/CommandAI.h"
+ 
+ // [barreplay] H101: how many calls of a Lua function that writes simulation
+ // state there have been (the functions entered through the two trampolines)
+@@ -43,15 +46,48 @@ namespace {
+ 	};
+ }
+ 
++// [barreplay] H124 (toggle3 0x80000, P8) and P12 v3 (toggle3 0x100000):
++// the functions in the draining list that change nothing a weapon vector or a
++// collision check reads. GetUnitWeaponState and GetUnitWeaponVectors are reads
++// (there for P4; the second makes its own unit ready); SpawnCEG spawns only
++// unsynced effects (H113's audit) and may load a generator; a stockpile order
++// (GiveOrderToUnit, CMD_STOCKPILE, read as ParseCommand reads it) on a unit
++// for which it is a non-queueing command goes through every command AI's
++// GiveCommandReal without a queueing command's side effects (stopping a build,
++// dropping a temporary order) to ExecuteStateCommand, which changes the
++// stockpile queue and the command's icon. The callins on the way
++// (AllowCommand, UnitCommand) are Lua, whose writes come through here
++// themselves.
++static bool BrNoSimInput(lua_State* L, const char* name)
++{
++	if (name == nullptr)
++		return false;
++	switch (name[0]) {
++		case 'S': return std::strcmp(name, "SpawnCEG") == 0;
++		case 'G': {
++			if (std::strcmp(name, "GetUnitWeaponState") == 0 || std::strcmp(name, "GetUnitWeaponVectors") == 0)
++				return true;
++			if (std::strcmp(name, "GiveOrderToUnit") != 0 || !lua_isnumber(L, 1) || !lua_isnumber(L, 2) || lua_toint(L, 2) != CMD_STOCKPILE)
++				return false;
++			const CUnit* u = unitHandler.GetUnit(lua_toint(L, 1));
++			return u != nullptr && u->commandAI != nullptr && u->commandAI->nonQueingCommands.find(CMD_STOCKPILE) != u->commandAI->nonQueingCommands.end();
++		}
++		default: return false;
++	}
++}
++
+ int BrLuaDrainingCall(lua_State* L)
+ {
+ 	++g_brLuaWrites;
+ 	const char* brName = static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2)));
++	const bool brData = lua_toboolean(L, lua_upvalueindex(3));
++	const bool brQuiet = !brData && (g_brToggles3 & 0x180000) != 0
++		&& (BrP8::active.load(std::memory_order_relaxed) || g_brP12Active) && BrNoSimInput(L, brName);
+ 	// [barreplay] P8: Lua can change anything a weapon vector reads
+-	BrP8::LuaWrite(brName, lua_toboolean(L, lua_upvalueindex(3)));
++	BrP8::LuaWrite(brName, brData, brQuiet && (g_brToggles3 & 0x80000) != 0);
+ 	// [barreplay] P12: any write but rules params and team resources
+ 	BrP12After brAfter{nullptr};
+-	if (!lua_toboolean(L, lua_upvalueindex(3)) && g_brP12Active) {
++	if (!brData && g_brP12Active && !(brQuiet && (g_brToggles3 & 0x100000) != 0)) {
+ 		brAfter.u = BrP12WriteTarget(L, brName);
+ 		if (brAfter.u != nullptr)
+ 			BrP12MarkUnit(brAfter.u);
+@@ -87,7 +123,7 @@ int BrLuaDrainingCallLus(lua_State* L)
+ {
+ 	++g_brLuaWrites;
+ 	// [barreplay] P8: Lua can change anything a weapon vector reads
+-	BrP8::LuaWrite(static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2))), false);
++	BrP8::LuaWrite(static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2))), false, false);
+ 	BrP12Global(); // [barreplay] P12: unit-script pieces
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	const lua_CFunction f = reinterpret_cast<lua_CFunction>(lua_touserdata(L, lua_upvalueindex(1)));
+diff --git a/rts/Sim/Units/BrWeaponVectors.h b/rts/Sim/Units/BrWeaponVectors.h
+index 38bbb5f..7c9dbc7 100644
+--- a/rts/Sim/Units/BrWeaponVectors.h
++++ b/rts/Sim/Units/BrWeaponVectors.h
+@@ -42,7 +42,7 @@ namespace BrP8 {
+ 	void EnsureSlow(const CUnit* unit);
+ 	void EnsureObjSlow(const CSolidObject* obj);
+ 	void EnsureAllSlow();
+-	void LuaWriteSlow(const char* name, bool dataOnly);
++	void LuaWriteSlow(const char* name, bool dataOnly, bool quiet);
+ 
+ 	inline void Ensure(const CUnit* unit) {
+ 		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
+@@ -61,10 +61,11 @@ namespace BrP8 {
+ 	// a Lua write function is entered: every unit made ready, except, with
+ 	// toggle2 0x800000, for the writes that touch only Lua data or team
+ 	// resources (rules params, resources: nothing a weapon vector reads);
+-	// counted by name for BARREPLAY_P8_STATS
+-	inline void LuaWrite(const char* name, bool dataOnly) {
++	// counted by name for BARREPLAY_P8_STATS; quiet: a call that changes no
++	// vector input at all (H124, LuaUtils.cpp BrNoSimInput)
++	inline void LuaWrite(const char* name, bool dataOnly, bool quiet) {
+ 		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
+-			LuaWriteSlow(name, dataOnly);
++			LuaWriteSlow(name, dataOnly, quiet);
+ 	}
+ }
+ 
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index f93e04d..5dc5c95 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -1010,9 +1010,9 @@ namespace BrP8 {
+ 		EnsureIdx(size_t(k));
+ 	}
+ 
+-	namespace { std::unordered_map<const char*, long long> luaTally; long long luaAll = 0, luaSkipped = 0; }
++	namespace { std::unordered_map<const char*, long long> luaTally; long long luaAll = 0, luaSkipped = 0, luaQuiet = 0; }
+ 
+-	void LuaWriteSlow(const char* name, bool dataOnly)
++	void LuaWriteSlow(const char* name, bool dataOnly, bool quiet)
+ 	{
+ 		static const bool stats = (getenv("BARREPLAY_P8_STATS") != nullptr);
+ 		if (stats && name != nullptr)
+@@ -1021,15 +1021,26 @@ namespace BrP8 {
+ 			luaSkipped += 1;
+ 			return;
+ 		}
++		if (quiet) {
++			luaQuiet += 1;
++			return;
++		}
+ 		luaAll += 1;
+ 		EnsureAllSlow();
+ 	}
+ 
++	// [barreplay] H124 (toggle3 0x80000): a unit once ready stays ready until
++	// the next Begin (its state only goes 0 -> 1 -> 2), so after the first
++	// EnsureAll of a frame the next ones have nothing to visit
++	namespace { size_t allFrom = 0; }
++
+ 	void EnsureAllSlow()
+ 	{
+ 		st.all.fetch_add(1, std::memory_order_relaxed);
+-		for (size_t k = 0; k < units.size(); ++k)
++		const size_t k0 = ((g_brToggles3 & 0x80000) != 0) ? allFrom : 0;
++		for (size_t k = k0; k < units.size(); ++k)
+ 			EnsureIdx(k);
++		allFrom = units.size();
+ 	}
+ 
+ 	void Begin(const std::vector<CUnit*>& activeUnits)
+@@ -1055,6 +1066,7 @@ namespace BrP8 {
+ 		}
+ 		numChunks = int((n + CHUNK - 1) / CHUNK);
+ 		nextChunk.store(0, std::memory_order_relaxed);
++		allFrom = 0; // [barreplay] H124
+ 
+ 		const int nw = ThreadPool::GetNumThreads() - 1;
+ 		static TaskPool<ForTaskGroup, decltype(workerFn)> pool;
+@@ -1093,7 +1105,7 @@ namespace BrP8 {
+ 				top.emplace_back(e.second, e.first);
+ 			std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+ 			char buf[512];
+-			int k = snprintf(buf, sizeof(buf), "[BR_P8] f=%d Lua writes in the loop: ensureAll=%lld skipped(data)=%lld top:", gs->frameNum, luaAll, luaSkipped);
++			int k = snprintf(buf, sizeof(buf), "[BR_P8] f=%d Lua writes in the loop: ensureAll=%lld skipped(data)=%lld quiet(H124)=%lld top:", gs->frameNum, luaAll, luaSkipped, luaQuiet);
+ 			for (size_t j = 0; j < top.size() && j < 8 && k < int(sizeof(buf)); ++j)
+ 				k += snprintf(buf + k, sizeof(buf) - k, " %s=%lld", top[j].second, top[j].first);
+ 			LOG("%s", buf);
+-- 
+2.53.0
+
