@@ -6772,3 +6772,42 @@ P1's loop 2.2%, `luaD_precall` 2.1%, `GetUnitsExact` 2.0%.
 - **Lua is the largest block left (18.2%)** and is the game's own code; what
   the engine can still do there is make its calls and handler loops cheaper
   (N2/N3), not do less.
+
+### 2026-10-21 06:35 — speed66: H128 -0.8/-1.0%, H129 -0.5/-0.8%; N3 not enabled (two handlers per callin on verylarge1)
+
+`speed66` = `779e4af` (+ N3, H128, H129 over `speed65`) with `pgo65`'s
+profile. Medium gate identical with all three bits on (`t3=7ffffff`). Late
+windows, base `t3=fffffb` (`speed65`'s setting without H109, which the dumps
+latch), 4 rounds, means:
+
+| `t3` adds | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|
+| base | 6.90 s | 25.48e9 | 6.03 s | 22.09e9 |
+| N3 (bit on, not native: see below) | +0.9% | +0.7% | +1.0% | +1.2% |
+| H128 (`TraceRay` sphere test) | **-0.8%** | **-0.8%** | **-1.0%** | **-0.9%** |
+| H129 (weapon-loop prefetches) | -0.5% | -0.4% | -0.8% | -0.4% |
+| all three | -1.0% | -1.1% | -1.4% | -1.1% |
+
+**N3 never went native.** `pipe68` learned its handler hashes from the medium
+gate, but the medium replay runs an older BAR build: there even N2's damage
+handlers hash differently (only `Explosion` is native), and the learned hashes
+are that build's. A short fresh run of verylarge1 (`pipe69`) logs N2's
+`UnitPreDamaged`/`UnitDamaged` native as listed, and for N3 one `UnitCommand`
+handler (`206aa2111d832cd3`) but **two** `UnitCreated` (`fdff4e563d217ce8`,
+`7947b16000273748`) and two `UnitDestroyed` (`487301e5bee47e2c`,
+`9878c2fe535c5fed`) handlers behind BAR's wrapper, logged after LuaRules and
+LuaGaia had both loaded. The game package ships only `luarules/gadgets.lua`,
+so the second is most likely LuaGaia's handler from the engine's base content,
+which has not been read; the log line does not name its Lua state, so which
+hash is which cannot be shown, and N3 stays off. With its bit on and nothing
+native it measured ~+1% in both windows (the per-callin state lookup before
+the rejection, or the variant's position in each round; not separated).
+
+**Final setting**: `speed65`'s plus H128 and H129, `t3=6ffffff` (N3's bit
+off), on `speed66`: governed whole game below.
+
+**Insights:**
+- **A gate replay must run the same game build as the target** for anything
+  keyed on the game's code: the medium replay never exercised N2 or N3.
+- **A hash allow-list needs the source attributed per Lua state**: two states
+  can each run their own handler behind the same wrapper.
