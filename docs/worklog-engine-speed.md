@@ -6661,3 +6661,14 @@ only if the unit's direction vectors are orthonormal (the inverse is a
 transpose) and the bound is taken from the half-scales rather than the stored
 bounding radius (which a rescale must refresh by hand). Guarding both costs
 most of what it saves; ~1% at best. Kept as a candidate.
+
+**Done after all as H128** (`t3` `0x2000000`, `940c92e`), with both guards
+inside: `InvertAffine` is a plain transpose, so when the transform's axes are
+orthonormal to within 1e-3 a world distance and the volume-space one agree to
+~0.3%, and a segment farther than |h| x 1.02 + 2 elmos from the volume's
+centre (the transform applied to `relMidPos` + offsets, from the half-scales
+themselves) hits nothing. A unit's axes are what `GetTransformMatrix(true)`
+builds on the spot (`-rightdir`, `updir`, `frontdir`, `pos`); a feature's are
+read off its stored `transMatrix[true]`, which can lag its position and
+directions. Piece-tree volumes and anything less orthonormal get `DetectHit`.
+Gated and trialled in `speed66` beside N3.
