@@ -6565,3 +6565,32 @@ P12 v2's check trial: 97,515 would-be skips checked (88,047 under v1), 0 wrong.
 and run ~17% slower (the effect H105's wait is for), and a three-round MEAN
 then decides a pick on one bad trial. `pipe67`'s pick now takes each variant's
 median round.
+
+### 2026-10-21 01:35 — speed64 at 82,000; by medians all eleven items win both windows
+
+Each variant's MEDIAN round against the base's (3 rounds per window):
+
+| `t3` | adds | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|---|
+| `7b` | (base) | 7,546 ms | 27.83e9 | 6,519 ms | 23.99e9 |
+| `fb` | P11 v2 | -1.9% | -1.2% | -0.7% | -0.4% |
+| `47b` | H116 | -2.0% | -2.0% | -1.5% | -1.0% |
+| `87b` | H117 | -1.4% | -1.6% | -1.1% | -1.8% |
+| `1007b` | P12 v2 | -1.9% | -1.0% | -0.4% | -0.9% |
+| `2007b` | H122 | -0.9% | -0.3% | -0.7% | -0.5% |
+| `927b` | H115+H118+H121 | -0.9% | -0.4% | -1.3% | -0.9% |
+| `617b` | H114+H119+H120 | -3.3% | **-3.4%** | -2.9% | -2.5% |
+| `3fffb` | all eleven | **-3.4%** | -2.7% | **-3.8%** | **-3.1%** |
+
+P12 v2's check trial at 82,000: 42,619 would-be skips checked, 0 wrong.
+
+`pipe66` picked `617b` for its whole game (`617f` with H109), by 28 ms of
+three-round means that `3fffb`'s one slow restore decided. That game runs as a
+data point; `speed65` starts from all eleven (`t3=3ffff`, gated identical),
+with H123-H127 and W8 on top.
+
+**Insights:**
+- **Every one of the eleven is neutral or better alone, in both windows**, and
+  together they are worth ~3.5% of the late window.
+- **H114+H119+H120 carry half of it** (the collision-map bookkeeping, the
+  sorted-prefix anim search, the synced ray above its blocks' bounds).
