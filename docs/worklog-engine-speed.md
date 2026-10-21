@@ -6830,3 +6830,18 @@ without their profile.
 **Insight:** with PGO, an item is worth only what it measures against the
 previous build retrained on its own code; trials inside one binary compare
 toggles, not builds. `speed70` retrains on `779e4af` with the final setting.
+
+### 2026-10-21 09:10 — speed70 (retrained on 779e4af): whole game 10m01.6s identical, level with speed65
+
+`speed70` = `779e4af` (`speed65`'s code + N3, H128, H129) with a profile
+retrained on it (`pgo70`: the medium gate, the sandboxed-BAR game and
+verylarge1 to 65,580, all with `t3=6ffffff`). Medium gate identical with every
+work-size threshold at 0. **Governed whole game**, `t=d4d87abf`,
+`t2=9bae383f`, `t3=6ffffff`, widget 1.13.1: **10m01.6s active** (sim 1730 s,
+paused 1128 s, load 17 s), **identical** (`a26e920d…`).
+
+That is +0.4% against `speed65`'s 9m59.3s, inside the ±1-2% a whole game
+moves with the package temperature (this run paused 96 s longer): the retrain
+won back `speed66`'s 2.6%, but the whole game cannot say whether H128 + H129
+are worth their ~1% on top. `pipe71` dumps both binaries at both windows and
+interleaves their trials to decide the final setting.
