@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="368" viewBox="0 0 900 368" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="368" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">P7: the LOS update&#x27;s per-unit work moved into the script tick, where nothing reads LOS</text>
+  <text x="20" y="56" font-weight="bold">stock order</text>
+  <text x="130" y="83" text-anchor="end" font-size="12" fill="#5d6470">main</text>
+  <rect x="140" y="66" width="330" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="305" y="83" text-anchor="middle" font-size="12">script tick: COB threads, animations</text>
+  <rect x="474" y="66" width="190" height="26" rx="4" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="569" y="83" text-anchor="middle" font-size="12">LOS: every unit, every type</text>
+  <rect x="668" y="66" width="212" height="26" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="774" y="83" text-anchor="middle" font-size="12">Lua GameFrame (reads LOS)</text>
+  <text x="130" y="115" text-anchor="end" font-size="12" fill="#5d6470">workers</text>
+  <rect x="160" y="98" width="290" height="20" rx="2" fill="#e6e7ea"/>
+  <text x="305" y="112" text-anchor="middle" font-size="11" fill="#5d6470">P5 segments</text>
+  <text x="20" y="150" font-weight="bold">with P7</text>
+  <text x="130" y="177" text-anchor="end" font-size="12" fill="#5d6470">main</text>
+  <rect x="140" y="160" width="330" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="305" y="177" text-anchor="middle" font-size="12">script tick: COB threads, animations</text>
+  <rect x="474" y="160" width="80" height="26" rx="4" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="514" y="177" text-anchor="middle" font-size="12">LOS point</text>
+  <rect x="558" y="160" width="212" height="26" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="664" y="177" text-anchor="middle" font-size="12">Lua GameFrame (reads LOS)</text>
+  <text x="780" y="177" font-size="12" fill="#0f8f86" font-weight="bold">starts sooner</text>
+  <text x="130" y="209" text-anchor="end" font-size="12" fill="#5d6470">workers</text>
+  <rect x="160" y="192" width="290" height="20" rx="2" fill="#e6e7ea"/>
+  <text x="305" y="206" text-anchor="middle" font-size="11" fill="#5d6470">P5 segments</text>
+  <rect x="160" y="216" width="94" height="20" rx="2" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="207" y="230" text-anchor="middle" font-size="11">phase A: radar</text>
+  <rect x="258" y="216" width="94" height="20" rx="2" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="305" y="230" text-anchor="middle" font-size="11">phase A: sight</text>
+  <rect x="356" y="216" width="94" height="20" rx="2" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="403" y="230" text-anchor="middle" font-size="11">phase A: sonar, ...</text>
+  <path d="M455 226 L472 180" stroke="#b0602a" stroke-width="1.5" fill="none" marker-end="url(#o)"/>
+  <circle cx="200" cy="158" r="4" fill="#b0602a"/>
+  <circle cx="300" cy="158" r="4" fill="#b0602a"/>
+  <circle cx="400" cy="158" r="4" fill="#b0602a"/>
+  <text x="140" y="262" font-size="12">Phase A runs each sensor type&#x27;s per-unit loop on a worker while the main thread ticks the scripts: instance lookup,</text>
+  <text x="140" y="280" font-size="12">refcounts, raycasts of new instances. The LOS maps themselves are changed only at the LOS point, so every reader</text>
+  <text x="140" y="298" font-size="12">still sees last frame&#x27;s maps. Orange dots: a write in the window to something phase A read (activation, a radius,</text>
+  <text x="140" y="316" font-size="12">a transportee&#x27;s position) marks that unit, and the LOS point redoes it in unit order; a Lua write redoes everything.</text>
+  <text x="140" y="334" font-size="12">The first version ran the real update early and was wrong for a unit that died in the window: its 1.5 s lingering</text>
+  <text x="140" y="352" font-size="12">sight would have been the new instance, not the old one. Found in review; v4 reverts that case.</text>
+</svg>

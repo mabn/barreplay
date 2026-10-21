@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="292" viewBox="0 0 900 292" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="292" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">P12: the projectile collision pass, detections first on all threads, then the ordinary pass in order</text>
+  <rect x="40" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="74" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="108" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="142" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="176" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="210" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="244" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="278" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="312" y="50" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="40" y="84" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="74" y="84" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="108" y="84" width="34" height="34" rx="0" fill="#f6e3d4" stroke="#d9d6cf"/>
+  <rect x="142" y="84" width="34" height="34" rx="0" fill="#f6e3d4" stroke="#d9d6cf"/>
+  <rect x="176" y="84" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="210" y="84" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="244" y="84" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="278" y="84" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="312" y="84" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="40" y="118" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="74" y="118" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="108" y="118" width="34" height="34" rx="0" fill="#f6e3d4" stroke="#d9d6cf"/>
+  <rect x="142" y="118" width="34" height="34" rx="0" fill="#f6e3d4" stroke="#d9d6cf"/>
+  <rect x="176" y="118" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="210" y="118" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="244" y="118" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="278" y="118" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="312" y="118" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="40" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="74" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="108" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="142" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="176" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="210" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="244" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="278" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="312" y="152" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="40" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="74" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="108" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="142" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="176" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="210" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="244" y="186" width="34" height="34" rx="0" fill="#f6e3d4" stroke="#d9d6cf"/>
+  <rect x="278" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="312" y="186" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="40" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="74" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="108" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="142" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="176" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="210" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="244" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="278" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <rect x="312" y="220" width="34" height="34" rx="0" fill="#ffffff" stroke="#d9d6cf"/>
+  <circle cx="125.0" cy="104.4" r="22" fill="none" stroke="#b0602a" stroke-width="1.5" stroke-dasharray=""/>
+  <circle cx="125.0" cy="104.4" r="3" fill="#b0602a"/>
+  <text x="150.0" y="88.4" font-size="12" font-weight="bold" fill="#b0602a">a</text>
+  <circle cx="152.2" cy="138.4" r="18" fill="none" stroke="#1d1f23" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <circle cx="152.2" cy="138.4" r="3" fill="#1d1f23"/>
+  <text x="173.2" y="126.4" font-size="12" font-weight="bold" fill="#1d1f23">b</text>
+  <circle cx="261.0" cy="101.0" r="20" fill="none" stroke="#0f8f86" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <circle cx="261.0" cy="101.0" r="3" fill="#0f8f86"/>
+  <text x="284.0" y="87.0" font-size="12" font-weight="bold" fill="#0f8f86">c</text>
+  <circle cx="80.8" cy="203.0" r="18" fill="none" stroke="#0f8f86" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <circle cx="80.8" cy="203.0" r="3" fill="#0f8f86"/>
+  <text x="101.8" y="191.0" font-size="12" font-weight="bold" fill="#0f8f86">d</text>
+  <circle cx="264.4" cy="196.2" r="16" fill="none" stroke="#1d1f23" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <circle cx="264.4" cy="196.2" r="3" fill="#1d1f23"/>
+  <text x="283.4" y="186.2" font-size="12" font-weight="bold" fill="#1d1f23">e</text>
+  <text x="380" y="62" font-weight="bold">Each frame, before the pass:</text>
+  <text x="380" y="82" font-size="12">every projectile&#x27;s detection (what it would hit) runs on all threads.</text>
+  <text x="380" y="108" font-weight="bold">Then the pass, in the stock order:</text>
+  <text x="380" y="128" font-size="12" fill="#b0602a">a  hits a unit: it acts, and the cells of what it touched are marked</text>
+  <text x="380" y="148" font-size="12">b, e  found nothing, but the query reads a marked cell: runs as stock</text>
+  <text x="380" y="168" font-size="12" fill="#0f8f86">c, d  found nothing and read no marked cell: skipped</text>
+  <text x="380" y="188" font-size="12" fill="#0f8f86">     (the synced tempNum its query would have drawn is still drawn)</text>
+  <text x="380" y="214" font-size="12">Cells are 256 elmos. A Lua write, a unit or shield changing quads</text>
+  <text x="380" y="232" font-size="12">or a dying transport marks everything; v2 lets a Lua write mark</text>
+  <text x="380" y="250" font-size="12">just its unit. A check mode reran every skip as stock: 0 of 97,515</text>
+  <text x="380" y="268" font-size="12">acted. Late window: 34% skipped, 59% found a marked cell.</text>
+  <text x="40" y="276" font-size="12" fill="#5d6470">shaded: cells marked so far this pass</text>
+</svg>

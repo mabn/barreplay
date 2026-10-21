@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="320" viewBox="0 0 900 320" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="320" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">P10: fighters&#x27; enemy-aircraft searches started before the fighter&#x27;s turn, on a guess of their arguments</text>
+  <text x="130" y="67" text-anchor="end" font-size="12" fill="#5d6470">main</text>
+  <rect x="140" y="50" width="60" height="26" rx="4" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="170" y="67" text-anchor="middle" font-size="12">launch</text>
+  <rect x="204" y="50" width="88" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="248" y="67" text-anchor="middle" font-size="12" font-weight="normal">slow update</text>
+  <rect x="296" y="50" width="88" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="340" y="67" text-anchor="middle" font-size="12" font-weight="normal">slow update</text>
+  <rect x="388" y="50" width="88" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="432" y="67" text-anchor="middle" font-size="12" font-weight="normal">slow update</text>
+  <rect x="480" y="50" width="88" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="524" y="67" text-anchor="middle" font-size="12" font-weight="bold">fighter F</text>
+  <rect x="572" y="50" width="88" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="616" y="67" text-anchor="middle" font-size="12" font-weight="normal">slow update</text>
+  <rect x="664" y="50" width="88" height="26" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="708" y="67" text-anchor="middle" font-size="12" font-weight="normal">slow update</text>
+  <text x="130" y="107" text-anchor="end" font-size="12" fill="#5d6470">P4 workers</text>
+  <rect x="206" y="90" width="240" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="326" y="105" text-anchor="middle" font-size="11">F&#x27;s search with the predicted arguments</text>
+  <path d="M170 76 L206 96" stroke="#5d6470" stroke-width="1" fill="none" stroke-dasharray="3 3"/>
+  <path d="M470 112 L480 80" stroke="#0f8f86" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+  <rect x="560" y="130" width="320" height="106" rx="6" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="572" y="150" font-size="12" font-weight="bold">at F&#x27;s turn, the answer is used only if:</text>
+  <text x="572" y="170" font-size="12">- the real arguments are bitwise the predicted ones</text>
+  <text x="572" y="188" font-size="12">- nothing has been drained since the launch</text>
+  <text x="572" y="206" font-size="12">and the synced tempNum the search draws is drawn</text>
+  <text x="572" y="222" font-size="12">  at the same point. Otherwise F searches again.</text>
+  <text x="20" y="150" font-size="12" font-weight="bold">one late window (450 frames):</text>
+  <text x="170" y="175" text-anchor="end" font-size="12">launched</text>
+  <rect x="180" y="162" width="300.0" height="16" rx="2" fill="#8a919c"/>
+  <text x="486.0" y="175" font-size="12">80,206</text>
+  <text x="170" y="199" text-anchor="end" font-size="12">used</text>
+  <rect x="180" y="186" width="283.01498640999426" height="16" rx="2" fill="#0f8f86"/>
+  <text x="469.01498640999426" y="199" font-size="12">75,665</text>
+  <text x="170" y="223" text-anchor="end" font-size="12">stale (a drain since)</text>
+  <rect x="180" y="210" width="9.855871131835524" height="16" rx="2" fill="#b0602a"/>
+  <text x="195.85587113183553" y="223" font-size="12">2,635</text>
+  <text x="170" y="247" text-anchor="end" font-size="12">other arguments</text>
+  <rect x="180" y="234" width="2" height="16" rx="2" fill="#b0602a"/>
+  <text x="188" y="247" font-size="12">160</text>
+  <text x="20" y="286" font-size="12">A search is a pure function of its arguments and of state that only a drain can change, so a matching guess is the answer the</text>
+  <text x="20" y="304" font-size="12">fighter would have computed. 94% of the guesses are used. -2.2% / -0.7% wall, -2.6% / -2.4% instructions.</text>
+</svg>

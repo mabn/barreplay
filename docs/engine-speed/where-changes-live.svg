@@ -4,15 +4,15 @@
   <rect width="900" height="288" fill="#ffffff"/>
   <text x="20" y="24" font-size="15" font-weight="bold">Where each change lives</text>
   <rect x="20" y="40" width="860" height="52" rx="6" fill="#e6e7ea" stroke="#8a919c"/>
-  <text x="34" y="61" font-weight="bold">Tagged patched engine (patched-engine/2026.7.4-barreplay.3)</text>
-  <text x="34" y="80" font-size="12" fill="#5d6470">downloaded by every re-sim host today: unpaced playback, exit-only yardmap grid, PGO + LTO, lazy pool zeroing, engine event log</text>
+  <text x="34" y="61" font-weight="bold">Revision 3: patched-engine/2026.7.4-barreplay.3 (older tag)</text>
+  <text x="34" y="80" font-size="12" fill="#5d6470">unpaced playback, exit-only yardmap grid, PGO + LTO, lazy pool zeroing, engine event log</text>
   <rect x="20" y="102" width="860" height="52" rx="6" fill="#d5efec" stroke="#0f8f86"/>
-  <text x="34" y="123" font-weight="bold">Rev 4, part 1: patches 0010-0013, already in the series file (speed-optimization-2)</text>
-  <text x="34" y="142" font-size="12" fill="#5d6470">no build tagged yet: callin timers, loop prefetch, huge-page collapse, bulk sample call, reload log</text>
+  <text x="34" y="123" font-weight="bold">Revision 5: patched-engine/2026.7.4-barreplay.5 (the tag hosts download now)</text>
+  <text x="34" y="142" font-size="12" fill="#5d6470">every speed patch 0014-0160 plus 0161 (the switches default to the final setting), no sync checker, generic x86-64, Linux + Windows</text>
   <rect x="20" y="164" width="860" height="52" rx="6" fill="#d5efec" stroke="#0f8f86"/>
-  <text x="34" y="185" font-weight="bold">Widget: capture widget and its config (speed-optimization-2)</text>
-  <text x="34" y="204" font-size="12" fill="#5d6470">apply to every re-sim once merged, no engine build needed: widget profiler off, BAR widgets off, re-sim-only sample loop</text>
+  <text x="34" y="185" font-weight="bold">barreplay main, outside the engine</text>
+  <text x="34" y="204" font-size="12" fill="#5d6470">capture widget 1.13.1 (bulk sample and damage calls, re-sim-only loop), seeded widget config, no texture arena</text>
   <rect x="20" y="226" width="860" height="52" rx="6" fill="#f6e3d4" stroke="#b0602a"/>
-  <text x="34" y="247" font-weight="bold">Rev 4, part 2: patches 0014 on, not yet in the series file (speed-optimization-2)</text>
-  <text x="34" y="266" font-size="12" fill="#5d6470">behind toggles, gated byte-identical: no sync checker, parallel aircraft, LOS states, native AA priority, target searches on workers, ...</text>
+  <text x="34" y="247" font-weight="bold">Written, switched off</text>
+  <text x="34" y="266" font-size="12" fill="#5d6470">N3 (its handler hashes not yet verified) and the rejected patches kept in the series behind their bits</text>
 </svg>

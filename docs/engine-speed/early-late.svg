@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="382" viewBox="0 0 900 382" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="382" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">The same changes at three points of the game (wall time against the build without them)</text>
+  <text x="20" y="44" font-size="12" fill="#5d6470">early: frame 15,000, 1,405 units, 1.4 ms a frame;  middle: frame 35,000, 3,719 units, 5.1 ms;  late: frame 63,780, 9,961 units, 24 ms</text>
+  <text x="300" y="74" text-anchor="middle" font-weight="bold">early</text>
+  <path d="M300 82 L300 286" stroke="#1d1f23" stroke-width="1" fill="none"/>
+  <text x="540" y="74" text-anchor="middle" font-weight="bold">middle</text>
+  <path d="M540 82 L540 286" stroke="#1d1f23" stroke-width="1" fill="none"/>
+  <text x="780" y="74" text-anchor="middle" font-weight="bold">late</text>
+  <path d="M780 82 L780 286" stroke="#1d1f23" stroke-width="1" fill="none"/>
+  <text x="150" y="103" text-anchor="end" font-weight="normal">P4</text>
+  <rect x="292.2" y="88" width="7.8" height="20" rx="2" fill="#0f8f86"/>
+  <text x="287.2" y="103" font-size="12" text-anchor="end" fill="#1d1f23">-0.6%</text>
+  <rect x="491.9" y="88" width="48.1" height="20" rx="2" fill="#0f8f86"/>
+  <text x="486.9" y="103" font-size="12" text-anchor="end" fill="#1d1f23">-3.7%</text>
+  <rect x="726.7" y="88" width="53.3" height="20" rx="2" fill="#0f8f86"/>
+  <text x="721.7" y="103" font-size="12" text-anchor="end" fill="#1d1f23">-4.1%</text>
+  <text x="150" y="137" text-anchor="end" font-weight="normal">P5</text>
+  <rect x="300" y="122" width="5.2" height="20" rx="2" fill="#b0602a"/>
+  <text x="310.2" y="137" font-size="12" text-anchor="start" fill="#b0602a">+0.4%</text>
+  <rect x="530.9" y="122" width="9.1" height="20" rx="2" fill="#0f8f86"/>
+  <text x="525.9" y="137" font-size="12" text-anchor="end" fill="#1d1f23">-0.7%</text>
+  <rect x="764.4" y="122" width="15.6" height="20" rx="2" fill="#0f8f86"/>
+  <text x="759.4" y="137" font-size="12" text-anchor="end" fill="#1d1f23">-1.2%</text>
+  <text x="150" y="171" text-anchor="end" font-weight="normal">H94</text>
+  <rect x="300" y="156" width="2.6" height="20" rx="2" fill="#b0602a"/>
+  <text x="307.6" y="171" font-size="12" text-anchor="start" fill="#b0602a">+0.2%</text>
+  <rect x="520.5" y="156" width="19.5" height="20" rx="2" fill="#0f8f86"/>
+  <text x="515.5" y="171" font-size="12" text-anchor="end" fill="#1d1f23">-1.5%</text>
+  <rect x="756.6" y="156" width="23.400000000000002" height="20" rx="2" fill="#0f8f86"/>
+  <text x="751.6" y="171" font-size="12" text-anchor="end" fill="#1d1f23">-1.8%</text>
+  <text x="150" y="205" text-anchor="end" font-weight="normal">N2</text>
+  <rect x="290.9" y="190" width="9.1" height="20" rx="2" fill="#0f8f86"/>
+  <text x="285.9" y="205" font-size="12" text-anchor="end" fill="#1d1f23">-0.7%</text>
+  <rect x="540" y="190" width="10.4" height="20" rx="2" fill="#b0602a"/>
+  <text x="555.4" y="205" font-size="12" text-anchor="start" fill="#b0602a">+0.8%</text>
+  <rect x="751.4" y="190" width="28.6" height="20" rx="2" fill="#0f8f86"/>
+  <text x="746.4" y="205" font-size="12" text-anchor="end" fill="#1d1f23">-2.2%</text>
+  <text x="150" y="239" text-anchor="end" font-weight="normal">P7</text>
+  <rect x="300" y="224" width="98.8" height="20" rx="2" fill="#b0602a"/>
+  <text x="403.8" y="239" font-size="12" text-anchor="start" fill="#b0602a">+7.6%</text>
+  <rect x="540" y="224" width="37.699999999999996" height="20" rx="2" fill="#b0602a"/>
+  <text x="582.7" y="239" font-size="12" text-anchor="start" fill="#b0602a">+2.9%</text>
+  <rect x="760.5" y="224" width="19.5" height="20" rx="2" fill="#0f8f86"/>
+  <text x="755.5" y="239" font-size="12" text-anchor="end" fill="#1d1f23">-1.5%</text>
+  <text x="150" y="273" text-anchor="end" font-weight="bold">all five together</text>
+  <rect x="300" y="258" width="87.10000000000001" height="20" rx="2" fill="#b0602a"/>
+  <text x="392.1" y="273" font-size="12" text-anchor="start" fill="#b0602a">+6.7%</text>
+  <rect x="507.5" y="258" width="32.5" height="20" rx="2" fill="#0f8f86"/>
+  <text x="502.5" y="273" font-size="12" text-anchor="end" fill="#1d1f23">-2.5%</text>
+  <rect x="695.5" y="258" width="84.5" height="20" rx="2" fill="#0f8f86"/>
+  <text x="690.5" y="273" font-size="12" text-anchor="end" fill="#1d1f23">-6.5%</text>
+  <text x="20" y="332" font-size="12">Orange is slower. Every item had been measured only on the late window, where all five won. With a few hundred units their</text>
+  <text x="20" y="350" font-size="12">fixed per-frame costs (waking workers, publishing tasks, clearing an index) were bigger than the work they moved. P7 now runs</text>
+  <text x="20" y="368" font-size="12">only in frames with at least 6,000 units, P8 from 2,048, P11 and H100 from 512 entries, and every A/B runs five windows.</text>
+</svg>
