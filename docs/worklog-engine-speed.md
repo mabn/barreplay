@@ -6601,3 +6601,22 @@ for an engine that never started, spun until stopped. `fullrun.sh` now waits for
 the name to resolve and launches again (3 attempts) when `barreplay` exits with
 no engine; `pipe67`'s gates and the PGO training wait for DNS the same way, so
 a blip cannot read as a gate that differs.
+
+### 2026-10-21 02:20 — the main thread's system calls: thread-pool wake-ups
+
+`perf trace -s` on the main thread of a medium replay (`speed64`, everything
+on), 15 s of simulation: **96,977 `futex` calls** (6,500 a second, ~17 a frame
+at ~370 fps), 1,273 ms inside them under tracing; nothing else counts (294
+writes, 14 reads). Their call sites (8 s, 76,328 calls, DWARF stacks):
+
+| share | where |
+|---|---|
+| ~60% | `PushTaskGroup` at a parallel section's start (ground moves 18.4%, the LOS-state section 15%, LOS 6.8%, P11 4.5%, QTPFS 4.2%, P1 3.3%, P5 2.6%) |
+| ~25% | `linux_signal::notify_all` from `WaitForFinished` |
+| ~11% | `SimFrame`'s own locks (`std::unique_lock::unlock` 3.1%) |
+
+**Insight:** the workers sleep between parallel sections and every section's
+start wakes them through the kernel. At ~17-26 calls a frame this is a few
+percent of a medium frame (2.7 ms) and probably under 1% of a 16 ms late
+frame, and the obvious cures were measured before: H96 (workers spinning 2 or
+20 ms) +7% / +28%, H102 (forced wakes, worker 1 spinning 1 ms) noise.
