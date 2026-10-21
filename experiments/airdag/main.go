@@ -61,9 +61,9 @@ func main() {
 				crash++
 			}
 			air = append(air, struct {
-			cx, cz int
-			crash  bool
-		}{int(float64(u.Pos.X)), int(float64(u.Pos.Z)), c})
+				cx, cz int
+				crash  bool
+			}{int(float64(u.Pos.X)), int(float64(u.Pos.Z)), c})
 		}
 		fmt.Printf("frame %d: %d aircraft, %d crashing\n", fr.Frame, len(air), crash)
 		for _, cfg := range [][2]float64{{1024, 1}, {512, 2}, {342, 3}, {256, 4}, {768, 1}} {
