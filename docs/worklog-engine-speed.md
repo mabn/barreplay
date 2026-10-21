@@ -6695,3 +6695,80 @@ front of what it was aimed at; H75's had been fetching the wrong lines for many
 builds, and the end-relative ones moved when H88's cache was appended. Only
 prefetches written by member address (H112's others, H115's `id`, H121) follow
 the layout.
+
+### 2026-10-21 05:20 — speed65 governed whole game: **9m59.3s active, identical** — under ten minutes
+
+`speed65` = `163e18a` (everything through H127) with a PGO profile retrained on
+it (`pgo65`, trained with `t3=ffffff`), widget 1.13.1 (W8). Instrumented and
+final builds both gate identical with every bit on.
+
+**Late windows** (base = `speed64`'s eleven, `t3=3fffb`; 3 rounds, means):
+
+| `t3` adds | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|
+| base | 6.87 s | 25.38e9 | 6.05 s | 22.36e9 |
+| H123 (sample loop on all threads) | -0.0% | +0.1% | -0.5% | -0.7% |
+| H124 (fewer P8 drains) | -0.5% | +0.1% | -0.2% | -0.6% |
+| P12 v3 | -0.3% | +0.2% | +0.3% | +0.1% |
+| H125 (no smoke trails) | **-0.9%** | **-0.9%** | **-1.9%** | **-1.9%** |
+| H126 (LOS map work across types, ally teams, row bands) | +0.3% | +0.0% | -0.2% | -0.5% |
+| H127 (crater pre-check) | -0.1% | -0.1% | -0.2% | -0.4% |
+| **all six** | **-1.9%** | **-2.0%** | **-2.8%** | **-3.3%** |
+
+**W8** (the widget's damage drain in the engine), across two dumps of the one
+binary at 63,780 (widget 1.13.0 / 1.13.1, `t3=fffffb`): **-0.6% wall, -0.7%
+cycles, -1.4% instructions**.
+
+Against `speed63`'s window (7.46 s at 63,780, 6.47 s at 82,000, before H109)
+the late windows are now 6.75 s and 5.88 s.
+
+**Governed whole game**, `t=d4d87abf`, `t2=9bae383f`, `t3=ffffff`, widget
+1.13.1: **9m59.3s active** (sim 1631 s, paused 1032 s, load 18 s),
+**identical** (`a26e920d…`). Against `speed63`'s 10m37.4s **-6.0%**; 3.83x
+stock (38m17s).
+
+Flame graph: [2026-10-21-verylarge1-speed65.svg](flamegraphs/2026-10-21-verylarge1-speed65.svg)
+(`speed65`, `t3=fffffb`, 63,780 + 450 frames, window only, main thread).
+
+| block | main thread, % | workers, % of one core |
+|---|---|---|
+| Lua callins (gadgets) | 18.2 | 0.4 |
+| aircraft move loop (P1) | 9.5 | 52.0 |
+| `CUnit::Update` (`UpdateUnits`) | 8.7 | |
+| script tick (COB, animations, P5, P11's pass) | 8.3 | 21.2 |
+| `CUnit::SlowUpdate` | 6.0 | |
+| ground movement | 5.6 | 19.3 |
+| `CWeapon::Update` | 4.9 | |
+| LOS update | 4.8 | 43.9 |
+| projectiles and collisions | 4.4 | 3.4 |
+| unit handler, inlined unit code | 4.4 | |
+| weapon vectors (P8) | 4.1 | 31.2 |
+| beam lasers | 3.4 | |
+| P4 searches | 3.2 | 14.1 |
+| `SimFrame` own and inlined | 2.9 | |
+| `CFactory` / `CBuilder` | 2.6 | |
+| pathfinding (QTPFS) | 2.6 | 11.2 |
+| `CWeapon::SlowUpdate` | 1.9 | |
+| map damage and height map | 1.7 | 0.2 |
+| `UpdateUnits` (collision maps) | 1.5 | |
+| unit deletion | 0.4 | |
+| other | 0.8 | 7.0 |
+| workers idle in the pool | | 64.3 |
+| **total** | **100** | **268** |
+
+Largest own-time functions on the main thread: `UpdateUnits` 4.3%,
+`luaV_execute` 3.6%, `TickAllAnims` 3.5%, `luaH_get` 2.9%, P4's commit
+2.7%, `CUnitHandler::Update` 2.6%, `CWeapon::Update` 2.6%,
+`UpdateWeaponVectors` 2.6%, `SimFrame` 2.5%, `CCobThread::Tick` 2.3%,
+P1's loop 2.2%, `luaD_precall` 2.1%, `GetUnitsExact` 2.0%.
+
+**Insights:**
+- **Visual effects were still on the synced path.** H125 alone is worth as
+  much as the other five together at 82,000: missiles' and debris' smoke trails
+  are unsynced projectiles created, updated and freed every frame for nobody.
+- **P11 v2 moved its wait into the script tick:** `SimFrame`'s own time halved
+  (5.6 → 2.9%) while the script-tick block grew (5.4 → 8.3%), now holding the
+  in-order pass itself rather than its spin.
+- **Lua is the largest block left (18.2%)** and is the game's own code; what
+  the engine can still do there is make its calls and handler loops cheaper
+  (N2/N3), not do less.
