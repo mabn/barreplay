@@ -6650,3 +6650,14 @@ trials of +N3, and its whole game; they go into the list once that holds.
 (W8's damage columns) and `t3=ffffff` (speed64's eleven, H109, H123, H124,
 P12 v3, H125, H126 with its row bands, H127), every pipeline from frame 0:
 **`0558d354…`, identical**. The profile is training with all of it on.
+
+**Noted, not done — a sphere prefilter for `TraceRay`** (beam lasers and
+line-of-fire checks; `DetectHit` 1.9% of the main thread, the candidate's
+`GetTransformMatrix` inside `TraceRay`'s 0.6%): every candidate unit in the
+ray's quads gets its transform composed, translated and inverted before the
+volume-space bounding-box early-out, and most are rejected there. A world-space
+test against the volume's circumscribed sphere would skip that, but it is exact
+only if the unit's direction vectors are orthonormal (the inverse is a
+transpose) and the bound is taken from the half-scales rather than the stored
+bounding radius (which a rescale must refresh by hand). Guarding both costs
+most of what it saves; ~1% at best. Kept as a candidate.
