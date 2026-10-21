@@ -6517,9 +6517,10 @@ workers add up to 2.55 cores, of which 0.64 sit idle in the pool):
   commute; only in full view, where a visible add's report to the unsynced height
   map returns at once.
 
-**Insight:** an 8v8 has two ally teams (three with Gaia), so splitting by ally
-team alone halves the heaviest type at best; H126's balance comes mostly from
-the raycasts of all types sharing one pool of tasks.
+**Insight:** an 8v8 has two ally teams (three with Gaia), so H126 at best halves
+the heaviest type's map work (the raycasts were already parallel inside each
+type); a finer split inside one ally team's map would need atomic adds or a
+partition of the map by rows.
 
 Both join `speed65` (`pipe67`: gated on the instrumented build with the other
 new bits — a failing combination is bisected bit by bit, and only identical
