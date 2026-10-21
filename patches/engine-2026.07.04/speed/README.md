@@ -97,6 +97,14 @@ a PGO profile retrained on it with every bit on), `t=d4d87abf`, `t2=9bae383f`,
 `t3=ffffff`, widget 1.13.1 (W8): **9m59.3s active**, identical
 (`a26e920d…`), -6.0% against `speed63` and 3.83x stock.
 
+**Final setting** (the loop stopped here, 2026-10-21): `speed70` (= every
+patch through 0160, i.e. `Recoil 779e4af`, with `tools/pgo-profile-speed70.tar.xz`
+retrained on it), `t=d4d87abf`, `t2=9bae383f`, `t3=6ffffff` (N3 off),
+widget 1.13.1, `-worker-threads 7`, main thread pinned: whole game
+**10m01.6s active**, identical (`a26e920d…`) — level with `speed65` there, and
+~1% ahead of it by median in both late windows (instructions -1.3% / -2.6%).
+Next steps: [docs/engine-speed-plan.md](../../../docs/engine-speed-plan.md).
+
 ## Applying
 
 From a clean checkout of the `2026.07.04` tag:
@@ -129,6 +137,27 @@ later patches were written on top of them). Checked: applied to `speed44`,
 git am $(ls $P/speed/0*.patch $P/speed/rejected/0*.patch | awk -F/ '{print $NF" "$0}' | awk '$1 >= "0092"' | sort | cut -d' ' -f2)
 ```
 
+The final line, `Recoil 779e4af` (`speed70`), is the series, then every
+patch from 0014 in number order, kept and rejected alike, except the rejected
+ones that were never in the line (0044-0045, 0052-0062, 0068; `tools/`'
+0046-0051 are not engine patches). Checked 2026-10-21: applied to the tag,
+127 patches, no difference in `git diff` against the branch.
+
+```sh
+git am $(grep -v '^#' $P/series | sed "s|^|$P/|")
+git am $(ls $P/speed/0*.patch $P/speed/rejected/0*.patch | awk -F/ '{print $NF" "$0}' \
+	| grep -v -E '^(0044|0045|005[2-9]|006[0-2]|0068)-' | sort | cut -d' ' -f2)
+```
+
+`tools/pgo-profile-speed70.tar.xz` is the final setting's profile, trained
+on `779e4af` with `t=d4d87abf t2=9bae383f t3=6ffffff` by
+`tools/scripts/pgotrain2.sh` (the medium gate and the sandboxed-BAR game
+whole, verylarge1 to 65,580); build with `PROFILE=` naming it and
+`EXTRA_CMAKE='-DSYNCCHECK=OFF -DMARCH_FLAG=haswell -DSSE_FLAGS="-mno-fma
+-mno-fma4 -ffp-contract=off -mprefer-vector-width=128"'`.
+`tools/scripts/fullrun.sh` is the governed whole game every result here
+comes from (set `BIN` to the barreplay binary; its paths and the hwmon sensor
+are this host's), `tools/scripts/absum.py` the trial summary.
 `tools/pgo-profile-speed39.tar.xz` is the profile `speed43` to `speed53` build with
 (retrained on `speed39`: -3.6% in the late window against the `speed31` one). It is `speed24`, the branch the measured builds
 came from, with only identifiers in comments renamed. Build with

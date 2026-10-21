@@ -6845,3 +6845,38 @@ moves with the package temperature (this run paused 96 s longer): the retrain
 won back `speed66`'s 2.6%, but the whole game cannot say whether H128 + H129
 are worth their ~1% on top. `pipe71` dumps both binaries at both windows and
 interleaves their trials to decide the final setting.
+
+### 2026-10-21 10:10 — speed65 vs speed70 in the late windows; final setting speed70, and the loop stops
+
+One dump of each binary at each window (H87 on, H109 latched), trials
+interleaved, 4 rounds. `speed65` at `t3=fffffb` (its whole game's setting
+without H109's bit), `speed70` at `t3=6fffffb` (+ H128, H129):
+
+| window | `speed65` | `speed70` | median | mean | instructions |
+|---|---|---|---|---|---|
+| 63,780 | 6.81 / 6.80 / 6.74 / 6.79 s | 6.75 / 6.70 / 6.77 / 6.80 s | 6.795 → 6.76 s, **-0.5%** | -0.4% | **-1.3%** |
+| 82,000 | 6.08 / 5.91 / 5.94 / 5.94 s | 5.76 / 5.97 / 7.15 / 5.81 s | 5.94 → 5.89 s, **-0.8%** | +3.4% | **-2.6%** |
+
+The 7.15 s is a slow restore (the outlier noted under `speed64`); it alone
+turns the mean around. Medians, the three other rounds (5.85 s, -2%) and the
+instruction counts all put `speed70` ahead, by about 1%: H128 + H129 hold on
+their own profile what they measured inside `speed66`. Whole games are level
+(9m59.3s / 10m01.6s), which a ~1% difference cannot be told from at that
+resolution.
+
+**Final setting: `speed70`** (`779e4af` + `pgo70`), `t=d4d87abf`,
+`t2=9bae383f`, `t3=6ffffff`, widget 1.13.1, `-worker-threads 7`, main thread
+pinned. N3's bit stays off. The fastest whole game measured is still
+`speed65`'s 9m59.3s; `speed70`'s is 10m01.6s; both identical.
+
+`pgo70`'s profile and the runners that built and measured it are now in the
+repo: `patches/engine-2026.07.04/speed/tools/pgo-profile-speed70.tar.xz`,
+`tools/scripts/pgotrain2.sh`, `fullrun.sh` and `absum.py`.
+
+**Insight:** the pipelines' "median" of four rounds was `sorted(v)[2]`, the
+upper of the two middle values: here it read `speed70` +0.4% at 82,000 where
+the median is -0.8%. Use an odd number of rounds, or average the two middle
+ones.
+
+This ends the optimization loop (the user's call, 2026-10-21). What to do
+next is in [engine-speed-plan.md](engine-speed-plan.md).
