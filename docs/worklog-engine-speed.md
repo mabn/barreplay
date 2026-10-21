@@ -6643,3 +6643,10 @@ The three handler hashes are not on the list yet. `pipe68` (`speed66`, after
 BAR's known wrapper), enables them through `BARREPLAY_N2_HASHES` for a second
 gate (which must say "native" for the three and be identical), the dumps and
 trials of +N3, and its whole game; they go into the list once that holds.
+
+### 2026-10-21 02:35 — speed65's instrumented build: identical with W8 and every new bit on
+
+`163e18a` built instrumented (`pgo65gen`), medium gate with widget 1.13.1
+(W8's damage columns) and `t3=ffffff` (speed64's eleven, H109, H123, H124,
+P12 v3, H125, H126 with its row bands, H127), every pipeline from frame 0:
+**`0558d354…`, identical**. The profile is training with all of it on.
