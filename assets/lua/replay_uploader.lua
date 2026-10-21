@@ -77,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.13.0"
-local widgetDate = "2026-10-16"
+local widgetVersion = "1.13.1"
+local widgetDate = "2026-10-21"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -157,6 +157,14 @@ local engineLog = {
 	delta = resim and type(Spring.GetUnitSampleDelta) == "function" and Spring.GetUnitSampleDelta or nil,
 	deltaOn = false,
 	deltaOut = {},
+	-- Spring.DrainLoggedDamageColumns / TakeLoggedDamageColumns (patched
+	-- engine): drainDamage + recordHitAt run in the engine, which keeps the
+	-- H record's columns and hands them over packed, the same bytes. Used
+	-- once the damage log is on (columns), engineHits counting what it holds.
+	columnsAvailable = resim and type(Spring.DrainLoggedDamageColumns) == "function"
+		and type(Spring.TakeLoggedDamageColumns) == "function",
+	columns = false,
+	engineHits = 0,
 }
 -- Output path for resim mode. Spring's LuaIO sandbox rejects absolute paths
 -- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
@@ -1673,6 +1681,27 @@ function engineLog.drainDamage()
 	if not engineLog.damage then
 		return
 	end
+	if engineLog.columns then
+		while true do
+			local added, full, dropped, seen, named, weapon, cause, fromProj =
+				Spring.DrainLoggedDamageColumns(hitStart, 60000)
+			if added == nil then
+				return -- no full read (yet): the log keeps it for the next drain
+			end
+			engineLog.engineHits = engineLog.engineHits + added
+			hitTotal = hitTotal + added
+			engineLog.dropped = engineLog.dropped + dropped
+			dmgSeen = dmgSeen + seen
+			dmgNamedAttacker = dmgNamedAttacker + named
+			dmgNamedWeapon = dmgNamedWeapon + weapon
+			dmgEngineCause = dmgEngineCause + cause
+			dmgFromProjectile = dmgFromProjectile + fromProj
+			if not full then
+				return
+			end
+			flushDamage(spGetGameFrame(), true) -- recordHitAt's full buffer
+		end
+	end
 	local v, n, dropped = Spring.GetLoggedDamage(engineLog.dmgBuf)
 	if v == nil then
 		return -- no full read (yet): the log keeps it for the next drain
@@ -1724,7 +1753,13 @@ flushDamage = function(frame, force)
 		end
 	end
 	local b = hits
-	if b.n > 0 then
+	if engineLog.columns then
+		if engineLog.engineHits > 0 then
+			writeRecord("H", PackU32({ hitStart }) .. PackU32({ engineLog.engineHits })
+				.. Spring.TakeLoggedDamageColumns())
+			engineLog.engineHits = 0
+		end
+	elseif b.n > 0 then
 		writeRecord("H", table.concat({
 			PackU32({ hitStart }), PackU32({ b.n }),
 			PackU16(b.df), PackU16(b.v), PackU16(b.vd), PackU8(b.vt),
@@ -3096,6 +3131,7 @@ function widget:Initialize()
 		if eok then
 			engineLog.explosions, engineLog.damage = recordProjectiles, recordDamage
 			engineLog.reloads = wantReloads
+			engineLog.columns = recordDamage and engineLog.columnsAvailable
 			Echo(logTag .. " engine event log on (explosions " .. (recordProjectiles and "on" or "off")
 				.. ", damage " .. (recordDamage and "on" or "off") .. ")")
 		else
@@ -3721,6 +3757,7 @@ function widget:Shutdown()
 	if engineLog.explosions or engineLog.damage then
 		pcall(Spring.SetEngineEventLog, false, false, false)
 		engineLog.explosions, engineLog.damage = false, false
+		engineLog.columns = false
 	end
 	closeOut("shutdown")
 end

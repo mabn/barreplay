@@ -27,6 +27,12 @@
 --              hands over every explosion and hit with all its arguments. Its
 --              records must match the resim fixture's exactly
 --              -> harness_enginelog.brepstream
+--   enginecols the enginelog run with the patched engine's damage columns too
+--              (Spring.DrainLoggedDamageColumns / TakeLoggedDamageColumns:
+--              drainDamage + recordHitAt in the engine, stubbed here with the
+--              widget's own transforms), so the stream must be the enginelog
+--              fixture byte for byte; what this checks is the widget's glue
+--              -> harness_enginecols.brepstream
 --
 -- The streams are committed as internal/capture/testdata fixtures, and the
 -- tests there decode them against golden JSON dumps (TestHarnessGolden),
@@ -38,15 +44,18 @@
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua resim
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua sandboxed
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua enginelog
+--	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua enginecols
 --	cd .. && go test -run TestHarnessGolden -update .
 --
 -- and read the golden diff: it is the change in what the widget records.
 
 local widgetPath = arg[1] or "assets/lua/replay_uploader.lua"
-local enginelog = (arg[2] == "enginelog")
+local enginecols = (arg[2] == "enginecols")
+local enginelog = (arg[2] == "enginelog") or enginecols
 local sandboxed = (arg[2] == "sandboxed") or enginelog
 local resim = (arg[2] == "resim") or sandboxed
-local outName = enginelog and "harness_enginelog.brepstream"
+local outName = enginecols and "harness_enginecols.brepstream"
+	or enginelog and "harness_enginelog.brepstream"
 	or sandboxed and "harness_sandboxed.brepstream"
 	or resim and "harness_resim.brepstream" or "harness.brepstream"
 
@@ -684,6 +693,78 @@ if enginelog then
 		engineLog.dmg = {}
 		return out, n, 0
 	end
+end
+-- enginecols: the engine's damage columns, the widget's drainDamage +
+-- recordHitAt transcribed (rts/Lua/LuaEngineEventLog.cpp has the C++ twin)
+if enginecols then
+	local function newCols()
+		return { df = {}, v = {}, vd = {}, vt = {}, x = {}, z = {}, a = {}, ad = {}, at = {},
+			w = {}, po = {}, pt = {}, fl = {}, d = {}, hp = {} }
+	end
+	local cols, ncols = newCols(), 0
+	local function id16(v) if v >= 0 and v < 65535 then return v end return 65535 end
+	local function team8(v) if v >= 0 and v < 255 then return v end return 255 end
+	local function clampv(v, lo, hi) if v < lo then return lo end if v > hi then return hi end return v end
+	local function pos16(v) return clampv(math.floor(v + 0.5), 0, 65535) end
+	local function weaponCode(w)
+		if w >= 0 and w < 65535 - 7 then return w end
+		if w < 0 and w >= -7 then return 65535 + w end
+		return 65535
+	end
+	Spring.DrainLoggedDamageColumns = function(hitStart, cap)
+		local d = engineLog.dmg
+		local total = #d // 16
+		local added, seen, named, weapon, cause, fromProj, full = 0, 0, 0, 0, 0, 0, false
+		local i = 0
+		while i < total and not full do
+			local o = i * 16
+			local aID, aDef, aTeam, projectileID = d[o + 9], d[o + 10], d[o + 11], d[o + 8]
+			local po, pt = 65535, 255
+			if aTeam < 0 and projectileID >= 0 and d[o + 16] >= 0 then
+				pt, po = team8(d[o + 16]), id16(d[o + 15])
+			end
+			local damage = d[o + 5]
+			if damage > 0 then
+				seen = seen + 1
+				if aTeam >= 0 then named = named + 1 end
+				if d[o + 7] >= 0 then weapon = weapon + 1 else cause = cause + 1 end
+				if pt ~= 255 then fromProj = fromProj + 1 end
+				ncols = ncols + 1
+				local n = ncols
+				cols.df[n] = clampv(d[o + 1] - hitStart, 0, 65535)
+				cols.v[n], cols.vd[n], cols.vt[n] = id16(d[o + 2]), id16(d[o + 3]), team8(d[o + 4])
+				cols.x[n], cols.z[n] = pos16(d[o + 13]), pos16(d[o + 14])
+				cols.a[n], cols.ad[n], cols.at[n] = id16(aID), id16(aDef), team8(aTeam)
+				cols.w[n], cols.po[n], cols.pt[n] = weaponCode(d[o + 7]), po, pt
+				cols.fl[n] = (d[o + 6] ~= 0 and 1 or 0) + (projectileID >= 0 and 2 or 0)
+				cols.d[n], cols.hp[n] = damage, d[o + 12]
+				added = added + 1
+				full = ncols >= cap
+			end
+			i = i + 1
+		end
+		local rest = {}
+		for k = i * 16 + 1, #d do
+			rest[#rest + 1] = d[k]
+		end
+		engineLog.dmg = rest
+		return added, full, 0, seen, named, weapon, cause, fromProj
+	end
+	Spring.TakeLoggedDamageColumns = function()
+		local c = cols
+		local out = table.concat({
+			VFS.PackU16(c.df), VFS.PackU16(c.v), VFS.PackU16(c.vd), VFS.PackU8(c.vt),
+			VFS.PackU16(c.x), VFS.PackU16(c.z),
+			VFS.PackU16(c.a), VFS.PackU16(c.ad), VFS.PackU8(c.at), VFS.PackU16(c.w),
+			VFS.PackU16(c.po), VFS.PackU8(c.pt), VFS.PackU8(c.fl),
+			VFS.PackF32(c.d), VFS.PackF32(c.hp),
+		})
+		local n = ncols
+		cols, ncols = newCols(), 0
+		return out, n
+	end
+end
+if enginelog then
 	-- The engine's bulk sample (Spring.GetUnitSampleData): what the per-unit
 	-- reads return under full read, in GetAllUnits' order, flat. Built from the
 	-- same stubs, so TestEngineLogMatchesResim checks the widget's bulk path

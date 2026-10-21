@@ -106,6 +106,26 @@ func TestEngineLogMatchesResim(t *testing.T) {
 	}
 }
 
+// TestEngineColumnsMatchEngineLog: with the patched engine's damage columns
+// (Spring.DrainLoggedDamageColumns / TakeLoggedDamageColumns, the widget's
+// drainDamage + recordHitAt in C++; the harness stubs them with the widget's
+// own transforms) the widget writes the stream it writes without them, byte
+// for byte. What this pins is the widget's glue: when it drains, when a full
+// buffer flushes, how the H record is framed.
+func TestEngineColumnsMatchEngineLog(t *testing.T) {
+	logged, err := os.ReadFile("testdata/harness_enginelog.brepstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols, err := os.ReadFile("testdata/harness_enginecols.brepstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(logged, cols) {
+		t.Fatalf("the damage columns change the stream (%d vs %d bytes); regenerate both fixtures (see the harness header)", len(cols), len(logged))
+	}
+}
+
 // The harness scripts what each mode must and must not record; these pin the
 // headline facts so a regenerated golden cannot quietly lose them.
 func TestHarnessRecordsWhatEachModeOwes(t *testing.T) {
