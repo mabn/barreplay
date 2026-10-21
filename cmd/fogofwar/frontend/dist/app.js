@@ -558,6 +558,7 @@ function renderSettings(st) {
   $('sOut').textContent = s.outputDir; $('sOut').title = s.outputDir;
   $('sData').textContent = s.dataDir; $('sData').title = s.dataDir;
   $('sPatched').setAttribute('aria-checked', String(!!s.patchedEngine));
+  renderPatchedBuild(s.patchedEngine, st.patchedBuilds || []);
   if (document.activeElement !== $('sMin')) $('sMin').value = s.minFreeMB;
   $('sMinVal').textContent = s.minFreeMB >= 1024 ? (s.minFreeMB / 1024).toFixed(1) + ' GB' : s.minFreeMB + ' MB';
   $('sSetup').textContent = st.setup && st.setup.engineVersion
@@ -568,6 +569,19 @@ function renderSettings(st) {
   // name their machine when they ask about one.
   $('sVersion').title = st.installId ? 'Install ID ' + st.installId : '';
   if (st.installId) $('sVersion').textContent += ' · install ' + st.installId.slice(-12);
+}
+
+// Which faster engine build runs: one line per engine version it is
+// downloaded for, since a game runs on whichever its own version needs.
+function renderPatchedBuild(on, builds) {
+  const el = $('sPatchedBuild');
+  const names = builds.map((b) => b.build ? `${b.build} (engine ${b.engine})` : `a local build for engine ${b.engine}`);
+  let text;
+  if (!on) text = 'Off: games run on the standard engine' + (names.length ? `. Downloaded: ${names.join(', ')}` : '');
+  else if (!names.length) text = 'No faster build downloaded yet';
+  else text = 'Using ' + names.join(', ');
+  el.textContent = text;
+  el.classList.toggle('off', !on || !names.length);
 }
 
 async function saveSettings(patch) {
@@ -730,7 +744,7 @@ function makeMock(scene) {
   ];
   const st = {
     mode: 'ready', steps: steps(), setup: { engineVersion: '2026.07.04', gameVersion: 'Beyond All Reason test-31620-b0a3bbf', doneAt: new Date().toISOString() },
-    history: hist, settings: { dataDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\data', outputDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays', patchedEngine: true, minFreeMB: 512 },
+    history: hist, settings: { dataDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\data', outputDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays', patchedEngine: true, minFreeMB: 512 }, patchedBuilds: [{ engine: '2026.07.04', build: '2026.7.4-barreplay.3' }],
     hostRam: 16 * GB, cores: 8, version: '0.1.0', installId: '0192f3a1-7c2e-7d41-9b0e-5a3c8e21f4d7',
   };
   let timer = 0;

@@ -128,13 +128,16 @@ type State struct {
 	Last       *HistoryItem  `json:"last,omitempty"`
 	History    []HistoryItem `json:"history"`
 	Settings   Settings      `json:"settings"`
-	AutoReplay bool          `json:"autoReplay"`
-	AutoNote   string        `json:"autoNote,omitempty"`
-	Site       string        `json:"site"`
-	HostRAM    int64         `json:"hostRam"`
-	Cores      int           `json:"cores"`
-	Version    string        `json:"version"`
-	InstallID  string        `json:"installId"`
+	// PatchedBuilds are the faster engine builds in the data folder, which
+	// the Faster engine setting names.
+	PatchedBuilds []PatchedInfo `json:"patchedBuilds"`
+	AutoReplay    bool          `json:"autoReplay"`
+	AutoNote      string        `json:"autoNote,omitempty"`
+	Site          string        `json:"site"`
+	HostRAM       int64         `json:"hostRam"`
+	Cores         int           `json:"cores"`
+	Version       string        `json:"version"`
+	InstallID     string        `json:"installId"`
 }
 
 // Settings is the part of the config the page may change.
@@ -672,6 +675,7 @@ func (a *App) currentDownload() *Download {
 
 func (a *App) snapshot() State {
 	host, _ := engine.MemTotal()
+	patched := installedPatchedBuilds(a.config().DataDir)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	st := State{
@@ -687,13 +691,14 @@ func (a *App) snapshot() State {
 			PatchedEngine: a.cfg.PatchedEngine,
 			MinFreeMB:     a.cfg.MinFreeMB,
 		},
-		AutoReplay: a.cfg.AutoReplay,
-		AutoNote:   a.autoNote,
-		Site:       siteURL(),
-		HostRAM:    host,
-		Cores:      runtime.NumCPU(),
-		Version:    version,
-		InstallID:  a.cfg.InstallID,
+		PatchedBuilds: patched,
+		AutoReplay:    a.cfg.AutoReplay,
+		AutoNote:      a.autoNote,
+		Site:          siteURL(),
+		HostRAM:       host,
+		Cores:         runtime.NumCPU(),
+		Version:       version,
+		InstallID:     a.cfg.InstallID,
 	}
 	if a.mode == modeSetup {
 		if d := a.currentDownload(); d != nil {
@@ -767,6 +772,28 @@ func patchedExe() string {
 		return "spring-headless-patched.exe"
 	}
 	return "spring-headless-patched"
+}
+
+// PatchedInfo is one faster engine build in the data folder: the engine
+// version it is for, and the published build it is ("2026.7.4-barreplay.3"),
+// empty when nothing pins one for that version (a build made locally).
+type PatchedInfo struct {
+	Engine string `json:"engine"`
+	Build  string `json:"build"`
+}
+
+// installedPatchedBuilds lists the engine versions in dataDir that have a
+// patched binary beside the stock one. A download only ever lands the pinned
+// build, so the pin names what is there.
+func installedPatchedBuilds(dataDir string) []PatchedInfo {
+	ents, _ := os.ReadDir(filepath.Join(dataDir, "engine"))
+	out := []PatchedInfo{}
+	for _, e := range ents {
+		if e.IsDir() && fileExists(filepath.Join(dataDir, "engine", e.Name(), patchedExe())) {
+			out = append(out, PatchedInfo{Engine: e.Name(), Build: engine.PinnedPatchedVersion(e.Name())})
+		}
+	}
+	return out
 }
 
 // moveInto renames src to dst, replacing dst, copying across volumes (the
