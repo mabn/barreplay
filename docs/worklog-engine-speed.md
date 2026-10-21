@@ -6529,3 +6529,13 @@ circle misses it.
 Both join `speed65` (`pipe67`: gated on the instrumented build with the other
 new bits — a failing combination is bisected bit by bit, and only identical
 bits are trialled or used — then trialled one by one).
+
+**H127** (`t3` `0x800000`, `163e18a`): the craters' LOS update
+(`ILosType::UpdateHeightMapSynced`, 1.2% of the main thread in `speed62`, run
+per type on all threads) tests every used instance against every crater of the
+frame (H108's single pass). `CheckOverlap` measures from the rectangle's
+`x1`/`y1`, not its middle, so the box spanning every crater's
+`[x1 * 8 - hw, x1 * 8 + hw]` (and the same in y), widened by the instance's
+radius, holds every centre any crater accepts; an instance outside it is
+rejected at once, and inside it the tests run as before. Joins `speed65`'s
+trials.
