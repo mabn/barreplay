@@ -6672,3 +6672,19 @@ builds on the spot (`-rightdir`, `updir`, `frontdir`, `pos`); a feature's are
 read off its stored `transMatrix[true]`, which can lag its position and
 directions. Piece-tree volumes and anything less orthonormal get `DetectHit`.
 Gated and trialled in `speed66` beside N3.
+
+**H129** (`t3` `0x4000000`, `d659c3e`, for `speed66`): `CWeapon::Update`'s own
+time is 3.8% of the main thread in `speed62`, and by line 58% of it is
+`Weapon.cpp:418` (`owner->curTarget.type`, read by every weapon without a
+target of its own: the owner's cache line 20 of 69) and 22% `Weapon.cpp:404`
+(the target's `isDead`, its line 66). H75 prefetched each weapon's first two
+lines, but the members `Update` and `CanFire` read have moved past them since
+(pahole of `speed64`: `owner` at 184, `weaponDef`/`reloadStatus` 200-236,
+`salvoLeft`/`angleGood` 256-290, `fastAutoRetargeting`/`currentTarget`
+640-695). H129 prefetches the owner's `curTarget` 8 units ahead, those four
+lines of each weapon 4 ahead, and each target's `isDead` 2 ahead.
+
+**Insight:** a prefetch by raw offset goes stale when members are added in
+front of what it was aimed at; this one had been fetching the wrong lines for
+many builds. Prefetches written by member address (H112, H115, H121) follow
+the layout.
