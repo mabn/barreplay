@@ -6594,3 +6594,10 @@ with H123-H127 and W8 on top.
   together they are worth ~3.5% of the late window.
 - **H114+H119+H120 carry half of it** (the collision-map bookkeeping, the
   sorted-prefix anim search, the synced ray above its blocks' bounds).
+
+**speed64's whole game did not run**: `barreplay`'s replay lookup hit a DNS
+timeout (`lookup api.bar-rts.com ... i/o timeout`), and `fullrun.sh`, waiting
+for an engine that never started, spun until stopped. `fullrun.sh` now waits for
+the name to resolve and launches again (3 attempts) when `barreplay` exits with
+no engine; `pipe67`'s gates and the PGO training wait for DNS the same way, so
+a blip cannot read as a gate that differs.
