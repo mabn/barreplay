@@ -6880,3 +6880,50 @@ ones.
 
 This ends the optimization loop (the user's call, 2026-10-21). What to do
 next is in [engine-speed-plan.md](engine-speed-plan.md).
+
+### 2026-10-21 15:00 — published: patch series revision 5 (`2026.7.4-barreplay.5`), Linux and Windows
+
+The speed work went into the published series as revision 5: every patch
+from 0014 exactly as "Applying" applies them, then **0161**, which makes the
+three switch words default to the final setting (`d4d87abf`, `9bae383f`,
+`6ffffff`; the environment still overrides each, 0 = off) — without it a
+published build would have run with every change off. Applied to the tag the
+series reproduces the branch (`f0431ff`) with no difference. Built with
+`-DSYNCCHECK=OFF` and, unlike every measured build above, for the stock
+target (generic x86-64): Haswell was worth ~1%, and a published binary
+replaces the old one on every host, so one built for AVX2 would crash on any
+CPU without it. The profile was retrained for it (`pgo/profile.tar.xz`, same
+three training replays, the default words).
+
+| | stock | revision 5 |
+|---|---|---|
+| medium replay, Linux | 1m52s (240 sim fps) | **1m11s (385 sim fps)**, identical |
+| medium replay, Windows build under Wine 10.0 (sim) | 116 s | **78 s**, identical (no PGO) |
+| verylarge1 whole game, governed, Linux | 38m17s | **9m56.0s**, identical (`a26e920d…`) |
+
+The Windows build needed three more Windows-only fixes in
+`windows/windows-series`' one patch (nothing a Linux build compiles): the
+bench harness's new code is Linux only, H74 (off) pins its helper thread with
+Linux calls, and `unitsync.dll` — which compiles `LuaUtils.cpp` and links Lua
+but no simulation, and as a DLL must resolve every symbol — could not link
+the P4/P7/P8/P12 trampolines nor the third switch word Lua's table code
+reads (H111).
+Series + `windows-series` reproduce the Windows branch (`169e6e7`) exactly.
+
+Published (both checked back from cdn-bar by sha256):
+- `engines/2026.07.04/spring-headless-patched-2026.7.4-barreplay.5.gz`,
+  36 MB stripped, sha256 `2cdc0013…`, pinned in `patchedBuilds` (rev 3
+  superseded);
+- `engines/2026.07.04/windows-amd64/spring-headless-patched-2026.7.4-barreplay.5.exe.gz`,
+  37 MB, sha256 `9c33c520…` (FogOfWar.exe's pin table lives on its branch).
+
+**Insights:**
+- **The profile matters more than the target:** retrained for generic
+  x86-64, the published build beat both Haswell builds' whole games
+  (`speed65` 9m59.3s, `speed70` 10m01.6s).
+- **A Windows DLL is a stricter link than a Linux shared object:** an
+  undefined symbol in unitsync is allowed on Linux and fatal in MinGW, so
+  engine-only code reached from shared files shows up only in the Windows
+  build.
+- **A published build reports no desyncs** (no sync checker): the gate is the
+  check that remains, and a patched host's "0 desyncs" means nothing.

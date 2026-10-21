@@ -238,7 +238,14 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           .brp, faster (measured 200 -> 248 fps on a 16-player 13-minute
                           game) and in ~1.5 GB less memory (RESULTS.md and MEMORY.md have
                           the two axes), which is why preferring it can be the default and
-                          why the capture cannot record which build made it. It lives beside the
+                          why the capture cannot record which build made it. From revision 5
+                          (2026.7.4-barreplay.5) the series also carries the whole speed work
+                          (patches/engine-<ver>/speed/, docs/engine-speed-plan.md), its switch
+                          words defaulting to the work's final setting (speed/0161;
+                          $BARREPLAY_TOGGLES/2/3 still override, 0 = off), built with the sync
+                          checker compiled out — so a re-sim on it ALWAYS reports 0 desyncs (see
+                          SummarizeInfolog) and the publish gate is the check — and for generic
+                          x86-64 like the release (docs/building-recoil.md "Revision 5"). It lives beside the
                           stock binary rather than in its own <version>-patched dir because
                           the engine resolves base/springcontent.sdz relative to its own
                           executable, so a separate dir would duplicate the whole base/ +
@@ -492,7 +499,8 @@ internal/engine/          locate spring-headless/pr-downloader, provision, launc
                           heuristics, not a parse of a grammar the engine promises, and the
                           desync count is the point: a re-simulation that desynced describes a
                           game that never happened and is indistinguishable from a good capture
-                          on disk. Best-effort like everything reading the engine's leavings —
+                          on disk. Except on a patched build from revision 5 on, which compiles
+                          the sync checker out and so has nothing to compare: its 0 says nothing. Best-effort like everything reading the engine's leavings —
                           a missing log yields a zero summary, never an error.
 internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: demo download
                           -> provision -> widget inject -> engine run -> .brp), for the ingest
@@ -3355,7 +3363,9 @@ run dev` in `worker/` plus `pack -upload local`.)
   frame from chunk.frame + k*sampleEvery is wrong wherever a capture skipped a
   sample (the harness fixture does). The lockstep is pinned by
   worker/tests/fixtures/viewer.brp + viewer.economy.json, written by internal/viz's
-  `TestViewerFixtureUpToDate` (regenerate with `-update`) and decoded by app.js's
+  `TestViewerFixtureUpToDate` (regenerate with `-update`; when the bytes differ it
+  compares CONTENT — decoded meta and gunzipped sections — because compress/flate's
+  output changes between Go releases while the format does not) and decoded by app.js's
   own functions in worker/tests/appjs.test.ts. OLDER replays (no `.brp` — the first
   read 404s) are read as they always were: `/replays/<id>.brw` is a small binary
   **"BRW1" container** of a gzipped `J` head JSON (exactly what `headFromBrp`
@@ -3970,7 +3980,7 @@ in a systemd scope. A checkpoint restores only into the binary that made it
 (dump each build once). Nothing else may run an engine meanwhile (the restored
 one needs its UDP port back, and a trial copies its files into the data dir).
 Benchmark: "verylarge1" = 6a37d06acbb455b1d19179d8ec965f10 at frame 63780.
-The work log is docs/worklog-engine-speed.md; revision 3's PGO+LTO build recipe
+The work log is docs/worklog-engine-speed.md; the PGO+LTO build recipe
 is patches/engine-2026.07.04/pgo/ (docs/building-recoil.md). Other options:
 PERF= (perf record), PERFSTAT= (perf stat per thread), LUAPROF=1 (the Lua
 sampling profiler of a measurement build), MAINCPU=/OTHERCPUS= (pinning),

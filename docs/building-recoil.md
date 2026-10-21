@@ -175,6 +175,56 @@ Measured on the late game (docs/worklog-engine-speed.md): -10% per frame at
 ~10k units, -11% on the medium gate replay, byte-identical everywhere it was
 gated (medium, isthmus, and verylarge1's full 90,900 frames).
 
+### Revision 5: the speed work
+
+Revision 5 (`2026.7.4-barreplay.5`) adds the speed work of 2026-10-15..21
+(`patches/engine-2026.07.04/speed/`, measured and gated in
+`docs/worklog-engine-speed.md`, summed up in `docs/engine-speed-plan.md`) to
+the series: every patch of it from 0014 in number order, the `rejected/` ones
+that later patches were written on top of included (each behind a switch bit
+that is off), then 0161. Applied to the tag, the series reproduces the work's
+final engine branch with no difference.
+
+- **What runs.** The changes sit behind three switch words read from
+  `BARREPLAY_TOGGLES`, `BARREPLAY_TOGGLES2` and `BARREPLAY_TOGGLES3` (hex).
+  0161 makes each word DEFAULT to the work's final setting when its variable
+  is unset (`d4d87abf`, `9bae383f`, `6ffffff` — N3 off), so a host runs the
+  measured setting with no configuration; a variable set to 0 switches its
+  word's changes off. The speed README's tables say what each bit does.
+- **No sync checker.** The build is configured `-DSYNCCHECK=OFF` (`pgo/build.sh`
+  and `windows/build.sh` pass it; P1 does not compile with the checker). The
+  checker hashed every synced write into a checksum that only multiplayer
+  desync detection reads, 7.9% of the late game. Without it a re-simulation
+  has nothing to compare the demo's checksums with, so **a re-sim on this
+  build always reports 0 desyncs** (`SummarizeInfolog`, the job's engine-log
+  summary): that is not evidence the re-sim was faithful. What remains is the
+  byte-identity gate every publish runs.
+- **Target.** Generic x86-64, as the stock release: the work's measured
+  builds were for Haswell (AVX2/BMI), which was worth ~1% and would crash on
+  any CPU without it, on every host that updates.
+- **Profile.** Retrained on revision 5's code with the default switch words,
+  on the same three training replays as before.
+
+Gated 2026-10-21 on this host (8 threads, 15 GB):
+
+| | stock 2026.07.04 | revision 5 |
+|---|---|---|
+| medium replay `4936896a…` | 1m52s (240 sim fps) | **1m11s (385 sim fps)**, identical (`0558d354…`) |
+| verylarge1, whole game, governed | 38m17s active (2026-10-18, 4 threads) | **9m56.0s active** (`-worker-threads 7`, main thread pinned), identical (`a26e920d…`) |
+
+(The speed work's own best, built for Haswell, was 9m59.3s: the retrained
+profile more than made up for the generic target.) `publish-engine` gated the
+STRIPPED binary on the medium replay against the stock engine and uploaded it
+as `engines/2026.07.04/spring-headless-patched-2026.7.4-barreplay.5.gz`
+(36 MB, 13 MB gzipped, sha256 `2cdc0013…`).
+
+The WINDOWS build of the same series (`windows/build.sh`, no PGO) gated
+under Wine 10.0 identical to the stock LINUX engine on the medium replay, and
+on the same host simulated it in 78 s against the stock Windows release's
+116 s under the same Wine (1.5x; all three captures sha256 `1facff5b…`). It
+is `engines/2026.07.04/windows-amd64/spring-headless-patched-2026.7.4-barreplay.5.exe.gz`
+(37 MB, 12 MB gzipped, sha256 `9c33c520…`).
+
 ### Versions
 
 A patched build is named by a semver: the engine version without its leading
@@ -212,9 +262,12 @@ host's, at least on this replay; a run on real Windows is still to be done.
 ```sh
 # 1. The source exactly as for the Linux patched build (a real clone, every
 #    submodule but AI/Skirmish/*, git am of the series), PLUS the Windows-only
-#    fixes in windows/windows-series (today one: the bench harness reads Linux
-#    perf counters, so it is compiled out elsewhere — it is inert unless its
-#    env vars are set, so nothing a re-sim does changes).
+#    fixes in windows/windows-series (today one patch: the bench harness reads
+#    Linux perf counters, so it is compiled out elsewhere — it is inert unless
+#    its env vars are set, so nothing a re-sim does changes; from revision 5
+#    also H74's thread pinning, a switch that is off, and two link fixes for
+#    unitsync.dll, which compiles LuaUtils.cpp and links Lua but no simulation,
+#    and as a DLL must resolve every symbol).
 P=<barreplay>/patches/engine-2026.07.04
 git am $(grep -v '^#' "$P/series" | sed "s|^|$P/|")
 git am $(grep -v '^#' "$P/windows/windows-series" | sed "s|^|$P/windows/|")

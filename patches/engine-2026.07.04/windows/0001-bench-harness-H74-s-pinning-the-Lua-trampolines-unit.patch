@@ -1,0 +1,154 @@
+From 169e6e7b75c85e2874c710024f45bc701e83d4b1 Mon Sep 17 00:00:00 2001
+From: barreplay <b@r>
+Date: Wed, 21 Oct 2026 11:57:19 +0000
+Subject: [PATCH] bench harness, H74's pinning, the Lua trampolines, unitsync:
+ so the series builds for Windows
+
+The bench harness reads Linux perf counters and CLOCK_THREAD_CPUTIME_ID;
+compiled out elsewhere, where NEWFRAME just runs SimFrame(). H74 (switch
+0x40, off by default) pins its prefetch helper beside the main thread with
+sched_getcpu/pthread_setaffinity_np; elsewhere the helper runs unpinned.
+The Lua trampolines of P4/P7/P8/P12 in LuaUtils.cpp reach into the
+simulation, which unitsync.dll (compiling that file too) does not link, and
+a DLL must resolve every symbol: they are engine-only, like the file's other
+simulation code. For the same reason unitsync defines the third switch word
+that Lua's table code reads (0: it has no simulation). None of it changes
+what a Linux engine build compiles.
+---
+ rts/Lua/LuaUtils.cpp          |  6 ++++++
+ rts/Net/NetCommands.cpp       | 10 +++++++++-
+ rts/Sim/Units/UnitHandler.cpp |  4 ++++
+ tools/unitsync/unitsync.cpp   |  5 +++++
+ 4 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index 26dece2..d08a3e5 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -20,6 +20,11 @@
+ // state there have been (the functions entered through the two trampolines)
+ unsigned g_brLuaWrites = 0;
+ 
++// [barreplay] The trampolines below reach into the simulation (P4, P7, P8,
++// P12), which unitsync and the dedicated server, both compiling this file, do
++// not link: a Windows DLL must resolve every symbol. Only the engine installs
++// them (LuaUtils.h's BrPushDrainingRawNamedCFunc*).
++#if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
+ // [barreplay] P12 v2 (toggle3 0x10000): inside P12's collision pass, a write
+ // to ONE unit (SetUnit*, AddUnit*, UseUnit*, GiveOrder[Array]ToUnit, the unit's
+ // id first) marks that unit's cells and its shields' before and after the call
+@@ -129,6 +134,7 @@ int BrLuaDrainingCallLus(lua_State* L)
+ 	const lua_CFunction f = reinterpret_cast<lua_CFunction>(lua_touserdata(L, lua_upvalueindex(1)));
+ 	return f(L);
+ }
++#endif
+ #include "LuaConfig.h"
+ 
+ #include "Game/GameVersion.h"
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 20d4037..84d6c53 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -4,7 +4,6 @@
+ #include <ctime>
+ #include <cstdlib>
+ #include <cstdio>
+-#include <unistd.h>
+ #include <cstring>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ int BrLuaGcStatsLine(char* buf, int size);
+@@ -14,9 +13,12 @@ extern bool g_brP12Check;
+ int BrP12BenchLine(char* buf, int size);
+ #include "Sim/Units/Scripts/BrCobPar.h"
+ #include <cstring>
++#ifdef __linux__
++#include <unistd.h>
+ #include <linux/perf_event.h>
+ #include <sys/ioctl.h>
+ #include <sys/syscall.h>
++#endif
+ 
+ #include "Game/Game.h"
+ #include "Sim/Units/UnitHandler.h"
+@@ -24,6 +26,7 @@ int BrP12BenchLine(char* buf, int size);
+ #include "System/Log/ILog.h"
+ #include "GameServer.h"
+ 
++#ifdef __linux__ // the harness reads Linux perf counters and CLOCK_THREAD_CPUTIME_ID
+ // [barreplay] CPU-time micro-benchmark of a fixed sim-frame window.
+ // Env: BARREPLAY_BENCH_START=<frame> BARREPLAY_BENCH_N=<count>
+ // Accumulates per-SimFrame() CLOCK_THREAD_CPUTIME_ID (immune to other-tenant
+@@ -176,6 +179,7 @@ namespace {
+ 	};
+ 	BRBench g_brBench;
+ }
++#endif
+ 
+ #include "ExternalAI/EngineOutHandler.h"
+ #include "ExternalAI/SkirmishAIHandler.h"
+@@ -787,6 +791,7 @@ void CGame::ClientReadNet()
+ 				msgProcTimeLeft -= 1000.0f;
+ 				lastSimFrameNetPacketTime = spring_gettime();
+ 
++#ifdef __linux__
+ 				g_brBench.ensure();
+ 				if (g_brBench.start >= 0) {
+ 					const int about = gs->frameNum + 1; // frame SimFrame() is about to run
+@@ -848,6 +853,9 @@ void CGame::ClientReadNet()
+ 				} else {
+ 					SimFrame();
+ 				}
++#else
++				SimFrame();
++#endif
+ 
+ #ifdef SYNCCHECK
+ 				// both NETMSG_SYNCRESPONSE and NETMSG_NEWFRAME are used for ping calculation by server
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index ee3976c..1c8abf2 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -227,13 +227,16 @@ namespace BrRunAhead {
+ 		if ((g_brToggles & 0x40) == 0)
+ 			return;
+ 
++#ifdef __linux__ // the helper is pinned beside the main thread with Linux calls; unpinned elsewhere
+ 		const int cpu = sched_getcpu();
++#endif
+ 		if (helperCpu == -2) {
+ 			helper = std::thread(HelperLoop);
+ 			helperTid = helper.native_handle();
+ 			helper.detach();
+ 			helperCpu = -1;
+ 		}
++#ifdef __linux__
+ 		const int sib = SiblingOf(cpu);
+ 		if (sib >= 0 && sib != helperCpu) {
+ 			cpu_set_t set;
+@@ -242,6 +245,7 @@ namespace BrRunAhead {
+ 			pthread_setaffinity_np(helperTid, sizeof(set), &set);
+ 			helperCpu = sib;
+ 		}
++#endif
+ 
+ 		// the helper must be done with the previous list before it is rewritten
+ 		while (busy.load(std::memory_order_seq_cst))
+diff --git a/tools/unitsync/unitsync.cpp b/tools/unitsync/unitsync.cpp
+index 7da1def..b2a03fc 100644
+--- a/tools/unitsync/unitsync.cpp
++++ b/tools/unitsync/unitsync.cpp
+@@ -3,6 +3,11 @@
+ #include "unitsync.h"
+ #include "unitsync_api.h"
+ 
++// [barreplay] Lua's table code (rts/lib/lua, linked here too) reads the
++// engine's third switch word, which the simulation defines; unitsync has no
++// simulation and a DLL must resolve every symbol, so it gets its own, all off.
++unsigned g_brToggles3 = 0;
++
+ #include <algorithm>
+ #include <cstring>
+ #include <string>
+-- 
+2.53.0
+
