@@ -6486,3 +6486,41 @@ pick, and measures W8 across two dumps of the one binary (widget 1.13.0 /
 
 `speed64` (`d78eff2`): gate identical with everything on from frame 0
 (`t3=3ffff`), 1m15s.
+
+### 2026-10-21 00:55 — H125 (no smoke trails) and H126 (the LOS map work across types and ally teams), for speed65
+
+From `speed62`'s window-only profile, now read for every thread (the perf
+data holds them all: main 27.8% of the samples, each worker 10-15%; the
+workers add up to 2.55 cores, of which 0.64 sit idle in the pool):
+
+- **H125** (`t3` `0x200000`, `54d19de`): missiles, starburst missiles and
+  flying debris make no smoke trails. Making and updating the trails (unsynced
+  projectiles) is ~0.2% of the main thread, and freeing projectiles another
+  0.28%, which they are part of. The one thing a synced projectile takes from
+  its trail is the trail's `useAirLos` (its constructor: false, or more than 10
+  elmos above `GetApproximateHeight` at the trail's midpoint), which
+  `BrH125::AirLos` computes without it; a never-dereferenced tag stands in for
+  the trail so every "is there one" test and the old smoke position and
+  direction run as before.
+- **H126** (`t3` `0x400000`, `7315a4d`): P7's finish ran one task per sensor
+  type, and the main thread spent 2.4% running types itself and 1.0% waiting
+  for the heaviest. Line by line, `ILosType::Update` is the map's add and
+  remove loops (`LosMap.cpp:464`, the plain RLE loop, 26%; the visible-add
+  loop's lines another ~30%), the squares' first touch (10%), not the raycasts,
+  which already run in parallel. `Update` is split into its queues and
+  filtering, the map work and the cache, and the map work of every type runs as
+  one set of tasks: per type the unit loop and filtering, then every type's
+  raycasts at once, then each (type, ally team)'s removes and adds, then per type
+  the cache. A recalculated instance's old squares are moved aside before its
+  raycast, so the raycast can run first and the removal still subtracts what was
+  added; the map steps are integer adds into one ally team's map each, which
+  commute; only in full view, where a visible add's report to the unsynced height
+  map returns at once.
+
+**Insight:** an 8v8 has two ally teams (three with Gaia), so splitting by ally
+team alone halves the heaviest type at best; H126's balance comes mostly from
+the raycasts of all types sharing one pool of tasks.
+
+Both join `speed65` (`pipe67`: gated on the instrumented build with the other
+new bits — a failing combination is bisected bit by bit, and only identical
+bits are trialled or used — then trialled one by one).
