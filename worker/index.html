@@ -64,12 +64,82 @@
     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5.5 A6 2 0 1 0 16 5.5 A6 2 0 1 0 4 5.5 M4 5.5 V14.5 A6 2 0 0 0 16 14.5 V5.5 M4 10 A6 2 0 0 0 16 10"/></svg>
     <span>SQL</span>
   </a>
+  <!-- Credits and licences: who made what this site shows (BAR's artwork,
+       the maps' authors, the engine) and where the source is. Opens
+       #creditsdialog (app.js initCredits). Pinned to the foot of the menu,
+       above the admin corner, on every page. -->
+  <button type="button" id="railcredits" class="railitem" title="Credits and licences">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.75 A7.25 7.25 0 1 0 10 17.25 A7.25 7.25 0 1 0 10 2.75 M10 9 V14 M10 6.2 h.01"/></svg>
+    <span>Credits</span>
+  </button>
   <!-- Admin corner, pinned to the foot of the menu: the signed-in admin
        (Cloudflare Access, app.js probeAdmin / renderAdminNote) with a
        sign-out entry, or a muted sign-in entry. Being signed in is admin
        mode; there is no URL flag. -->
   <div id="adminnote" style="display:none"></div>
 </nav>
+
+<!-- Credits and licences (opened from the menu's Credits entry, app.js
+     initCredits). A native <dialog> at the top level, so it opens over any
+     page. The map line is filled per replay from the BAR maps API's record
+     (its author field); without a replay open it stays hidden. Licences are
+     the upstream ones as stated in each project's own licence files. -->
+<dialog id="creditsdialog" aria-labelledby="creditstitle">
+  <div class="crhead">
+    <span id="creditstitle">Credits</span>
+    <button type="button" id="creditsclose" title="Close">×</button>
+  </div>
+  <div class="crbody">
+    <p class="crlead">barreplay is an unofficial fan project for
+      <a href="https://www.beyondallreason.info/" target="_blank" rel="noopener">Beyond All Reason</a>.
+      It is not made or endorsed by the Beyond All Reason team.</p>
+
+    <section>
+      <h3>Beyond All Reason</h3>
+      <p>Unit icons and player rank badges are Beyond All Reason artwork by IceXuick,
+        Floris and PtaQ, shown unmodified and non-commercially. BAR licenses its icons
+        under <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/" target="_blank" rel="noopener">CC BY-NC-ND 4.0</a>;
+        the rank badges are all rights reserved. Unit names and statistics come from the
+        game's own unit definitions (BAR game code, GPL v2).</p>
+      <p class="crlinks">
+        <a href="https://github.com/beyond-all-reason/Beyond-All-Reason" target="_blank" rel="noopener">Game source</a>
+        <a href="https://github.com/beyond-all-reason/Beyond-All-Reason/blob/master/LICENSE.md" target="_blank" rel="noopener">BAR licences</a>
+      </p>
+    </section>
+
+    <section>
+      <h3>Maps</h3>
+      <p>Map images were provided by uBdead of the Beyond All Reason team.</p>
+      <p id="creditsmap" class="crmap" style="display:none"></p>
+    </section>
+
+    <section>
+      <h3>Recoil engine</h3>
+      <p>Replays are re-simulated in the <a href="https://github.com/beyond-all-reason/RecoilEngine" target="_blank" rel="noopener">Recoil engine</a>,
+        the engine BAR runs on, licensed under the GNU GPL v2 or later. Some re-simulations
+        use a Recoil build with barreplay's speed and logging patches; their source is
+        Recoil's own plus the patches in
+        <a href="https://github.com/mabn/barreplay/tree/main/patches" target="_blank" rel="noopener">barreplay/patches</a>.</p>
+    </section>
+
+    <section>
+      <h3>Game data</h3>
+      <p>Game listings, replay files and player details come from BAR's public replay
+        service (<a href="https://www.beyondallreason.info/replays" target="_blank" rel="noopener">beyondallreason.info/replays</a>),
+        lobby names from BAR's lobby server.</p>
+    </section>
+
+    <section>
+      <h3>barreplay</h3>
+      <p>Source code on <a href="https://github.com/mabn/barreplay" target="_blank" rel="noopener">GitHub</a>,
+        under the <a href="https://github.com/mabn/barreplay/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>;
+        the engine patches are GPL v2 or later and the BAR artwork keeps BAR's licences
+        (<a href="https://github.com/mabn/barreplay/blob/main/LICENCE_NOTICE" target="_blank" rel="noopener">LICENCE_NOTICE</a>).
+        Built with <a href="https://hono.dev/" target="_blank" rel="noopener">Hono</a> and
+        <a href="https://github.com/panva/jose" target="_blank" rel="noopener">jose</a> (both MIT).</p>
+    </section>
+  </div>
+</dialog>
 
 <header>
   <!-- Absolute, not "./": the viewer's pages live at paths now
@@ -99,7 +169,7 @@
 <div id="home" style="display:none">
   <div id="homemain">
     <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
-         capture) POSTs to /api/upload; the worker archives it and the ingest
+         capture) or a .brp (a capture already packed) POSTs to /api/upload; the worker archives it and the ingest
          daemon publishes it. Hidden with a note on hosts without the API.
          Outside the sections: a drop is accepted from either of them, and its
          progress line stays put while the Queue section is watched. -->
@@ -109,8 +179,8 @@
            The setup link is RELATIVE: it resolves to /setup on whichever
            origin serves the page (https://replay.fogofwar.dev/setup deployed,
            the loopback origin under `vite dev`). -->
-      <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
-        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
+      <span id="droplabel">Drop a <code>.brepstream</code> or <code>.brp</code> capture here to publish it —
+        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream,.brp" hidden></label>.
         Want to record your own games? <a href="/setup">Here is how.</a></span>
       <div id="dropstatus" style="display:none"></div>
     </div>
@@ -119,7 +189,8 @@
       <!-- Catalog filters. Hidden unless the backend answers GET
            /api/replays/maps: filtering is a SQL feature of the Worker's catalog,
            and a plain static host has none, so the bar appears only where it
-           works. -->
+           works. The SAME bar filters the Games section: app.js applyHomeTab
+           moves it into whichever of the two is shown. -->
       <div id="filters" style="display:none">
         <!-- Row 1 is the fields, row 2 the settings chips and the actions.
              One row could not hold both without wrapping at some widths and
@@ -160,8 +231,10 @@
           <output id="f_durout" for="f_dmin f_dmax"></output>
         </label>
         <!-- Player: free text, matched as a prefix server-side. No completion
-             list — offering one meant walking every roster in the catalog. -->
-        <label>Player <input type="search" id="f_player" placeholder="name" autocomplete="off"></label>
+             list — offering one meant walking every roster in the catalog.
+             Hidden on the Games section: the mirror's rosters are indexed
+             nowhere, so a name filter there would scan the whole mirror. -->
+        <label id="f_playerfilter">Player <input type="search" id="f_player" placeholder="name" autocomplete="off"></label>
         <!-- Game id: a paste target, not something anyone types out. It
              takes the id, the start of one, or a link with one in it (app.js
              lifts the hex out), and matches as a prefix. -->

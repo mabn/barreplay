@@ -1,0 +1,55 @@
+From 4290e275d21695eb4958f9d2febeb7c6abcebbbb Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 00:10:40 +0000
+Subject: [PATCH] [barreplay] bench harness: a "p4check" word in park.go turns
+ P4's (and P10's) check mode on after a restore
+
+---
+ rts/Net/NetCommands.cpp          | 3 +++
+ rts/Sim/Weapons/BrPipeTarget.cpp | 2 ++
+ rts/Sim/Weapons/BrPipeTarget.h   | 2 ++
+ 3 files changed, 7 insertions(+)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index e4c0a45..51fef57 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -102,6 +102,9 @@ namespace {
+ 						g_brToggles = unsigned(strtoul(word + 2, nullptr, 16));
+ 					if (strncmp(word, "t2=", 3) == 0)
+ 						g_brToggles2 = unsigned(strtoul(word + 3, nullptr, 16));
++					// "p4check": P4's (and P10's) check mode for this trial
++					if (strcmp(word, "p4check") == 0)
++						BrP4::SetCheck(true);
+ 				}
+ 				fclose(f);
+ 			}
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index 3641f11..d4d52b5 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -458,6 +458,8 @@ namespace BrP4 {
+ 		return true;
+ 	}
+ 
++	void SetCheck(bool on) { check = on; }
++
+ 	void LaunchFighters(const std::vector<CUnit*>& units, size_t beg, size_t end)
+ 	{
+ 		if ((g_brToggles2 & 0x1000000) == 0)
+diff --git a/rts/Sim/Weapons/BrPipeTarget.h b/rts/Sim/Weapons/BrPipeTarget.h
+index 6ba3c8a..cefa7fd 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.h
++++ b/rts/Sim/Weapons/BrPipeTarget.h
+@@ -83,6 +83,8 @@ namespace BrP4 {
+ 	// predicted ones and nothing was drained since the launch (and draws the
+ 	// synced tempNum the search would have), else it searches itself.
+ 	void LaunchFighters(const std::vector<CUnit*>& units, size_t beg, size_t end);
++	// the bench harness: turn the check mode on after a restore
++	void SetCheck(bool on);
+ 	CUnit* FighterQuery(const CUnit* owner, const float3& pos, float radius, int allyTeam);
+ 
+ 	// a write the searches may read is about to happen: finish and apply all
+-- 
+2.53.0
+

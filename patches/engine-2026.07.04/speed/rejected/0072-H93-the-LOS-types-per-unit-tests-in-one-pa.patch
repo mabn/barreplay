@@ -1,0 +1,131 @@
+From 5b7805f42f087e7ea66c1eaee78e1e01c38af5d9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 11:46:53 +0000
+Subject: [PATCH 72/72] [barreplay] H93: the LOS types' per-unit tests in one
+ parallel pre-pass; each type's loop visits only the units that need it
+ (toggle 0x8000000)
+
+---
+ rts/Sim/Misc/LosHandler.cpp | 62 ++++++++++++++++++++++++++++++++++++-
+ rts/Sim/Misc/LosHandler.h   |  4 +++
+ 2 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 5b92c0d..7369cf9 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LosHandler.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h" // g_brToggles, BrChunkMax
+ 
+ #include "Sim/Units/Unit.h"
+ #include "Sim/Units/UnitDef.h"
+@@ -164,6 +165,42 @@ float ILosType::GetHeight(const CUnit* unit) const
+ }
+ 
+ 
++// [barreplay] H93: UpdateUnit's tests in the same order, returning whether it
++// would get past them; the paths that return early write nothing (RemoveUnit
++// does nothing to a unit with no instance), and nothing another LOS type's
++// update writes is read here (each type touches only its own unit->los[type]
++// and its own instances), so this can be asked of every type up front
++bool ILosType::BrNeedsUpdate(const CUnit* unit) const
++{
++	if (unit->isDead || unit->beingBuilt)
++		return false;
++
++	const bool sightOnly = (type == LOS_TYPE_LOS) || (type == LOS_TYPE_AIRLOS);
++	const bool noSensors = (!unit->activated || unit->IsStunned());
++	if (!sightOnly && noSensors)
++		return (unit->los[type] != nullptr);
++
++	if (sightOnly && losHandler->GetGlobalLOS(unit->allyteam))
++		return false;
++
++	const SLosInstance* uli = unit->los[type];
++	const float radius = GetRadius(unit);
++
++	if (radius <= 0.0f)
++		return (uli != nullptr);
++	if (uli == nullptr)
++		return true;
++
++	const float height = GetHeight(unit);
++	const int2 baseLos = PosToSquare(unit->midPos);
++	int allyteam = unit->allyteam;
++
++	if (type == LOS_TYPE_JAMMER || type == LOS_TYPE_SONAR_JAMMER)
++		allyteam *= modInfo.separateJammers;
++
++	return !((uli->basePos == baseLos) && (uli->baseHeight == height) && (uli->radius == radius) && (uli->allyteam == allyteam));
++}
++
+ inline void ILosType::UpdateUnit(CUnit* unit, bool ignore)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+@@ -831,6 +868,22 @@ void CLosHandler::Update()
+ 	const size_t maxUnitIndex = minUnitIndex + losBatchSize + (activeUnits.size() % losBatchRate) * (losBatchMult == (losBatchRate - 1));
+ 	#endif
+ 
++	#if (USE_STAGGERED_UPDATES == 0)
++	if ((g_brToggles & 0x8000000) != 0) {
++		// [barreplay] H93: every type's per-unit test at once, each unit read
++		// once, on all threads; the types' own loops then visit only the units
++		// that need them (most units keep their instance every frame)
++		brNeeds.resize(activeUnits.size());
++		for_mt_chunk(0, activeUnits.size(), [&](const int n) {
++			const CUnit* u = activeUnits[n];
++			uint8_t m = 0;
++			for (size_t t = 0; t < losTypes.size(); ++t)
++				m |= uint8_t(losTypes[t]->BrNeedsUpdate(u)) << t;
++			brNeeds[n] = m;
++		}, 1, BrChunkMax(64));
++	}
++	#endif
++
+ 	for_mt(0, losTypes.size(), [&](const int idx) {
+ 		ILosType* lt = losTypes[idx];
+ 
+@@ -841,7 +894,14 @@ void CLosHandler::Update()
+ 		}
+ 		#else
+ 		// all at once
+-		{
++		if ((g_brToggles & 0x8000000) != 0) {
++			// [barreplay] H93: only the units the pre-pass found need it, in order
++			const uint8_t bit = uint8_t(1u << idx);
++			for (size_t n = 0, m = activeUnits.size(); n < m; ++n) {
++				if ((brNeeds[n] & bit) != 0)
++					lt->UpdateUnit(activeUnits[n], false);
++			}
++		} else {
+ 			ZoneScopedN("Sim::Los::UpdateLosTypeMT");
+ 			for (CUnit* u : activeUnits) {
+ 				lt->UpdateUnit(u, false);
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index 9f17fa3..4fd514d 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -132,6 +132,9 @@ public:
+ 	void UpdateHeightMapSynced(SRectangle rect);
+ 	void RemoveUnit(CUnit* unit, bool delayed = false);
+ 	void UpdateUnit(CUnit* unit, bool ignore = false);
++	// [barreplay] H93: whether UpdateUnit(unit, false) would do anything at all
++	// (each of its other paths returns with nothing written); reads only
++	bool BrNeedsUpdate(const CUnit* unit) const;
+ 
+ private:
+ 	//void PostLoad();
+@@ -329,6 +332,7 @@ private:
+ 
+ 	std::vector<float> radarErrorSizes;
+ 	std::array<ILosType*, 7> losTypes;
++	std::vector<uint8_t> brNeeds; // H93: per active unit, a bit per LOS type
+ };
+ 
+ 
+-- 
+2.53.0
+

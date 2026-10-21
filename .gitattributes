@@ -1,0 +1,4 @@
+# The patch series is hashed byte-for-byte (internal/engine SeriesDigest) and
+# its scripts run under bash: a checkout with core.autocrlf=true must not turn
+# them into CRLF, which changes the digest and breaks git am and the shebang.
+patches/** -text

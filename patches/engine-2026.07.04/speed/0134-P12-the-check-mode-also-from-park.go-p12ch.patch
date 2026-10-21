@@ -1,0 +1,61 @@
+From aaa507292b89b44b659f24256a86295059e691a0 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 18:51:50 +0000
+Subject: [PATCH 134/149] [barreplay] P12: the check mode also from park.go
+ ("p12check"), since a restored trial keeps the dump's environment
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Net/NetCommands.cpp                   | 4 ++++
+ rts/Sim/Projectiles/ProjectileHandler.cpp | 6 ++----
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index b0dbbbe..20d4037 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -10,6 +10,7 @@
+ int BrLuaGcStatsLine(char* buf, int size);
+ #include "Sim/Weapons/BrPipeTarget.h"
+ void BrP12Reset();
++extern bool g_brP12Check;
+ int BrP12BenchLine(char* buf, int size);
+ #include "Sim/Units/Scripts/BrCobPar.h"
+ #include <cstring>
+@@ -108,6 +109,9 @@ namespace {
+ 					if (strncmp(word, "t3=", 3) == 0)
+ 						g_brToggles3 = unsigned(strtoul(word + 3, nullptr, 16));
+ 					// "p4check": P4's (and P10's) check mode for this trial
++					// "p12check": P12's check mode for this trial
++					if (strcmp(word, "p12check") == 0)
++						g_brP12Check = true;
+ 					if (strcmp(word, "p4check") == 0)
+ 						BrP4::SetCheck(true);
+ 					// "sync": after the huge-page wait, say so and wait to be released
+diff --git a/rts/Sim/Projectiles/ProjectileHandler.cpp b/rts/Sim/Projectiles/ProjectileHandler.cpp
+index 8cfa01e..18cbd71 100644
+--- a/rts/Sim/Projectiles/ProjectileHandler.cpp
++++ b/rts/Sim/Projectiles/ProjectileHandler.cpp
+@@ -584,6 +584,7 @@ namespace {
+ }
+ // [barreplay] P12 (BrPreCollide.h)
+ bool g_brP12Active = false;
++bool g_brP12Check = (getenv("BARREPLAY_P12_CHECK") != nullptr); // or "p12check" in park.go
+ extern unsigned g_brToggles3;
+ namespace {
+ 	namespace BrP12 {
+@@ -596,10 +597,7 @@ namespace {
+ 		// check mode (BARREPLAY_P12_CHECK): a would-be skip runs the ordinary
+ 		// code, which must then do nothing (no mark, no collision)
+ 		long long marks = 0, checked = 0, wrong = 0;
+-		bool CheckMode() {
+-			static const bool c = (getenv("BARREPLAY_P12_CHECK") != nullptr);
+-			return c;
+-		}
++		bool CheckMode() { return g_brP12Check; }
+ 
+ 		// what the detection was run with: a skip also needs the projectile's
+ 		// own position, speed and radius unchanged
+-- 
+2.53.0
+

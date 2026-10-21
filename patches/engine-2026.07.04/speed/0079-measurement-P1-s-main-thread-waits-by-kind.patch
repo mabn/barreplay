@@ -1,0 +1,243 @@
+From dba618cbca264a2eb12e294ee934125fa282d347 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 15:28:50 +0000
+Subject: [PATCH 79/90] [barreplay] measurement: P1's main-thread waits by kind
+ and its serial items by type/state/speed; P4 and P5 counters on the bench
+ result line
+
+---
+ rts/Net/NetCommands.cpp                       |  9 +++-
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 54 ++++++++++++++++---
+ rts/Sim/Units/Scripts/BrCobPar.cpp            |  7 +++
+ rts/Sim/Units/Scripts/BrCobPar.h              |  2 +
+ rts/Sim/Weapons/BrPipeTarget.cpp              | 12 +++++
+ rts/Sim/Weapons/BrPipeTarget.h                |  3 ++
+ 6 files changed, 78 insertions(+), 9 deletions(-)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index fe19082..4741723 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -8,6 +8,8 @@
+ #include <cstring>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ int BrLuaGcStatsLine(char* buf, int size);
++#include "Sim/Weapons/BrPipeTarget.h"
++#include "Sim/Units/Scripts/BrCobPar.h"
+ #include <cstring>
+ #include <linux/perf_event.h>
+ #include <sys/ioctl.h>
+@@ -752,11 +754,14 @@ void CGame::ClientReadNet()
+ 							BrParAir::StatsLine(pline, sizeof(pline));
+ 							char gline[1024];
+ 							BrLuaGcStatsLine(gline, sizeof(gline));
++							char p4line[1024], p5line[512];
++							BrP4::BenchLine(p4line, sizeof(p4line));
++							BrP5::BenchLine(p5line, sizeof(p5line));
+ 							// the bench line last: bench-ckpt reads the result's last line
+ 							if (g_brBench.out) {
+-								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x %s%s", g_brToggles, pline, gline); fputs(line, f); fclose(f); }
++								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x %s%s%s%s", g_brToggles, pline, gline, p4line, p5line); fputs(line, f); fclose(f); }
+ 							}
+-							fprintf(stderr, "toggles=%x %s%s", g_brToggles, pline, gline);
++							fprintf(stderr, "toggles=%x %s%s%s%s", g_brToggles, pline, gline, p4line, p5line);
+ 							fputs(line, stderr); fflush(stderr);
+ 							// An instrumented (-fprofile-generate) build writes its
+ 							// profile at exit, which _exit skips: dump it first, so a
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index a11e983..4d803ee 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -5,6 +5,7 @@
+ #include "GeneralMoveSystem.h"
+ 
+ #include <vector>
++#include <x86intrin.h>
+ 
+ #include "Sim/Ecs/Registry.h"
+ #include "Sim/MoveTypes/Components/MoveTypesComponents.h"
+@@ -95,10 +96,32 @@ namespace BrParAir {
+ 	static std::atomic<int> claim{0}, frontier{0}, nextStart{0}, handoff{-1};
+ 	static std::atomic<unsigned> serialRuns{0};
+ 
++	// [barreplay] measurement: the main thread's waits by kind (cycles, count),
++	// and the serial items by (hover, aircraft state, zero speed)
++	enum { MW_START, MW_PRED, MW_SERIAL, MW_FINAL, MW_POINT, MW_N };
++	static unsigned long long mainWaitCyc[MW_N] = {}, mainWaitN[MW_N] = {};
++	static std::atomic<long long> serialHist[2][8][2];
++	static thread_local bool brIsMain = false;
++	struct MainWait {
++		int kind; unsigned long long t0;
++		explicit MainWait(int k): kind(k), t0(brIsMain? __rdtsc(): 0) {}
++		~MainWait() { if (brIsMain) { mainWaitCyc[kind] += __rdtsc() - t0; mainWaitN[kind]++; } }
++	};
++
+ 	int StatsLine(char* buf, int size) {
+-		char w[256];
++		char w[1024];
+ 		snprintf(w, sizeof(w), " serialWhy: type=%lld script=%lld collide=%lld stun=%lld speed=%lld state=%lld crash=%lld",
+ 			why[0].load(), why[1].load(), why[2].load(), why[3].load(), why[4].load(), why[5].load(), why[6].load());
++		char m[640];
++		int mk = snprintf(m, sizeof(m), " mainWaitMcyc: start=%.1f/%llu pred=%.1f/%llu serial=%.1f/%llu final=%.1f/%llu point=%.1f/%llu serialHist:",
++			mainWaitCyc[MW_START] / 1e6, mainWaitN[MW_START], mainWaitCyc[MW_PRED] / 1e6, mainWaitN[MW_PRED], mainWaitCyc[MW_SERIAL] / 1e6, mainWaitN[MW_SERIAL],
++			mainWaitCyc[MW_FINAL] / 1e6, mainWaitN[MW_FINAL], mainWaitCyc[MW_POINT] / 1e6, mainWaitN[MW_POINT]);
++		for (int h = 0; h < 2; ++h)
++			for (int st = 0; st < 8; ++st)
++				for (int z = 0; z < 2; ++z)
++					if (const long long v = serialHist[h][st][z].load(); v != 0 && mk < int(sizeof(m)) - 24)
++						mk += snprintf(m + mk, sizeof(m) - mk, " %c%d%c=%lld", h? 'h': 's', st, z? 'z': 'm', v);
++		strncat(w, m, sizeof(w) - strlen(w) - 1);
+ 		const int a = snprintf(buf, size,
+ 			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld earlyChecks=%lld statics=%lld targetEdges=%lld deferredTrails=%lld crashKills=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld\n",
+ 			stats.frames.load(), stats.serialFrames.load(), stats.items.load(), stats.parallel.load(), stats.serial.load(), stats.replanned.load(), stats.earlyChecks.load(), stats.statics.load(),
+@@ -177,6 +200,7 @@ namespace BrParAir {
+ 
+ 		stats.serialPoints++;
+ 		unsigned n = 0;
++		MainWait mw(MW_POINT);
+ 		while (frontier.load(std::memory_order_acquire) < curRank)
+ 			Spin(n);
+ 	}
+@@ -326,9 +350,12 @@ namespace BrParAir {
+ 		const bool early = !isSerial[k] && StillAsPlanned(k);
+ 
+ 		// in-order start
+-		while (nextStart.load(std::memory_order_acquire) != k) {
+-			if (!isMain || !ServiceHandoff())
+-				Spin(n);
++		if (nextStart.load(std::memory_order_acquire) != k) {
++			MainWait mw(MW_START);
++			while (nextStart.load(std::memory_order_acquire) != k) {
++				if (!isMain || !ServiceHandoff())
++					Spin(n);
++			}
+ 		}
+ 
+ 		if (!isSerial[k]) {
+@@ -355,6 +382,7 @@ namespace BrParAir {
+ 			if (same? early: StillAsPlanned(k)) {
+ 				nextStart.store(k + 1, std::memory_order_release);
+ 				if (releaseEarly) {
++					MainWait mw(MW_PRED);
+ 					for (int i = predBeg[k], e = predBeg[k + 1]; i < e; ++i) {
+ 						const int j = preds[i];
+ 						while (!done[j].load(std::memory_order_acquire)) {
+@@ -375,8 +403,11 @@ namespace BrParAir {
+ 
+ 		// serial: nothing later starts before it is done (nextStart stays at k)
+ 		if (isMain) {
+-			while (frontier.load(std::memory_order_acquire) != k)
+-				Spin(n);
++			{
++				MainWait mw(MW_SERIAL);
++				while (frontier.load(std::memory_order_acquire) != k)
++					Spin(n);
++			}
+ 			RunExclusive(k);
+ 		} else {
+ 			handoff.store(k, std::memory_order_release);
+@@ -398,6 +429,7 @@ namespace BrParAir {
+ 		if (!isMain)
+ 			return;
+ 		unsigned spins = 0;
++		MainWait mw(MW_FINAL);
+ 		while (frontier.load(std::memory_order_acquire) < n) {
+ 			if (!ServiceHandoff())
+ 				Spin(spins);
+@@ -434,8 +466,14 @@ namespace BrParAir {
+ 			}
+ 			int w = 0;
+ 			p.kind = ParallelSafeWhy(u, w)? 1: 2;
+-			if (p.kind == 2)
++			if (p.kind == 2) {
+ 				why[w].fetch_add(1, std::memory_order_relaxed);
++				// [barreplay] measurement: which aircraft are serial
++				const bool hv = (typeid(*mt) == typeid(CHoverAirMoveType));
++				const AAirMoveType* am = (hv || typeid(*mt) == typeid(CStrafeAirMoveType))? static_cast<const AAirMoveType*>(mt): nullptr;
++				const int st = (am != nullptr)? std::clamp(int(am->aircraftState), 0, 6): 7;
++				serialHist[hv][st][u->speed == ZeroVector].fetch_add(1, std::memory_order_relaxed);
++			}
+ 			p.tgtType = int(u->curTarget.type);
+ 			p.tgtUnit = (u->curTarget.type == Target_Unit)? u->curTarget.unit: nullptr;
+ 			p.tgtId = (p.tgtUnit != nullptr)? p.tgtUnit->id: -1;
+@@ -540,7 +578,9 @@ namespace BrParAir {
+ 		}
+ 		ThreadPool::NotifyWorkerThreads(true, false);
+ 
++		brIsMain = true;
+ 		Loop(true);
++		brIsMain = false;
+ 		FlushTrails(n);
+ 
+ 		{
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.cpp b/rts/Sim/Units/Scripts/BrCobPar.cpp
+index 271fb9a..3cce801 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.cpp
++++ b/rts/Sim/Units/Scripts/BrCobPar.cpp
+@@ -553,6 +553,13 @@ namespace BrP5 {
+ 		}
+ 	}
+ 
++	// [barreplay] measurement: the counters for the bench harness's result line
++	int BenchLine(char* buf, int size)
++	{
++		return snprintf(buf, size, "[BR_P5] phases=%lld ticks=%lld parallel=%lld segments=%lld segTicks=%lld serialPoints=%lld byMain=%lld byWorkers=%lld waitMcyc=%.1f startMcyc=%.1f\n",
++			st.phases, st.ticks, st.par, st.segs, st.segTicks, st.serialPoints, st.byMain, st.byWorkers.load(), st.waitCycles / 1e6, st.startCycles / 1e6);
++	}
++
+ 	void EndTick()
+ 	{
+ 		StopWorkers();
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.h b/rts/Sim/Units/Scripts/BrCobPar.h
+index 1e18232..4a5c176 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.h
++++ b/rts/Sim/Units/Scripts/BrCobPar.h
+@@ -60,6 +60,8 @@ namespace BrP5 {
+ 	void RunPhase(CCobEngine* engine, const std::vector<int>& ids, bool sleepers);
+ 	// the COB engine's tick is over: the workers go back to the pool
+ 	void EndTick();
++	// "[BR_P5] ..." one line for the bench harness
++	int BenchLine(char* buf, int size);
+ }
+ 
+ #endif
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index a7bdbce..a19fe86 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -194,6 +194,18 @@ namespace BrP4 {
+ 	}
+ 
+ 
++	// [barreplay] measurement: the counters for the bench harness's result line
++	int BenchLine(char* buf, int size)
++	{
++		int k = snprintf(buf, size, "[BR_P4] slices=%lld launched=%lld slaveCopies=%lld notNative=%lld weight=%lld full=%lld waits=%lld waitMcyc=%.1f inline=%lld drains:",
++			st.slices, st.launched, st.slaveCopies, st.notNative, st.targetWeight, st.full, st.waits, st.waitCycles / 1e6, st.inlineRuns);
++		for (int r = 0; r < DR_N && k < size; ++r)
++			k += snprintf(buf + k, size - k, " %s=%lld", DrainName(r), st.drains[r]);
++		if (k < size)
++			k += snprintf(buf + k, size - k, "\n");
++		return k;
++	}
++
+ 	bool Begin()
+ 	{
+ 		if ((g_brToggles & 0x800000) == 0)
+diff --git a/rts/Sim/Weapons/BrPipeTarget.h b/rts/Sim/Weapons/BrPipeTarget.h
+index 2c4dd44..19a230e 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.h
++++ b/rts/Sim/Weapons/BrPipeTarget.h
+@@ -71,6 +71,9 @@ namespace BrP4 {
+ 	// a script can have goes through a hooked function (Lua's too).
+ 	bool CobCallNeedsDrain(const void* cobFile, int functionId, bool pieceTreeUnit);
+ 
++	// "[BR_P4] ..." one line for the bench harness
++	int BenchLine(char* buf, int size);
++
+ 	enum DrainReason { DR_LUA, DR_COB, DR_KILL, DR_DAMAGE, DR_QUAD, DR_MOVE, DR_TEAM, DR_TRANSPORT, DR_EXPLOSION, DR_LOS, DR_FEATURE, DR_ENEMY, DR_RAYS, DR_SLAVE, DR_N };
+ }
+ 
+-- 
+2.53.0
+

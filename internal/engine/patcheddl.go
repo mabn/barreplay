@@ -42,8 +42,9 @@ type PatchedBuild struct {
 	// were gated, independent of how they happened to be compressed.
 	SHA256 string
 	// Superseded lists the SHA-256 of every EARLIER published build of the
-	// version. A host holding one of those is upgraded; a binary matching
-	// none of them was built locally and is never replaced.
+	// version; a binary matching none of them was built locally. Both are
+	// replaced (unless Config.KeepPatchedEngine); the list only lets the log
+	// say which it was.
 	Superseded []string
 }
 
@@ -52,10 +53,11 @@ type PatchedBuild struct {
 // build that passed the byte-identity gate (docs/building-recoil.md, "The
 // PATCHED build"); cmd/publish-engine prints the line to paste here.
 var patchedBuilds = map[string]PatchedBuild{
-	"2026.07.04": {Rev: 3, SHA256: "2ea1aecf0528606631625c636fe3eb31905cab145371800ca1a42d8cdb4e9d74", // 2026.7.4-barreplay.3 (PGO+LTO)
+	"2026.07.04": {Rev: 5, SHA256: "2cdc0013a5142bc94fea6070938aa4264999f6bbf0d95fc7db648f7a1b3003e2", // 2026.7.4-barreplay.5 (the speed work, PGO+LTO)
 		Superseded: []string{
 			"eeb7625d02e251282aca4fea3162a21208ff0fcb468c83cf2d3bedc8b5070a27", // .1
 			"1e7b3c417aab1afe34878cad9a557368ee0c7132c72a52d84b71314437df9c01", // .2
+			"2ea1aecf0528606631625c636fe3eb31905cab145371800ca1a42d8cdb4e9d74", // .3 (PGO+LTO)
 		}},
 }
 
@@ -72,9 +74,11 @@ func PatchedBuildKey(version string, rev int) string {
 
 // EnsurePatchedEngine installs the published patched build for version beside
 // the stock engine (<DataDir>/engine/<version>/spring-headless-patched), where
-// Locate looks for it. It is a no-op when one is already there — a build made
-// locally is never replaced — when provisioning is disabled, when an explicit
-// binary is pinned, or when no build is published for the version.
+// Locate looks for it, and REPLACES whatever other patched binary is there —
+// an earlier published build or one made locally — unless cfg.
+// KeepPatchedEngine says to keep it. It is a no-op when the pinned build is
+// already installed, when provisioning is disabled, when an explicit binary is
+// pinned, or when no build is published for the version.
 //
 // Callers treat an error as a warning: without the patched build a re-sim
 // still runs, on the stock engine, at stock speed.
@@ -90,10 +94,20 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	dst := filepath.Join(dir, patchedHeadlessName())
 	if fileExists(dst) {
 		have, err := fileSHA256(dst)
-		if err != nil || have == build.SHA256 || !contains(build.Superseded, have) {
-			return nil // current, or built here: keep it
+		if err != nil || have == build.SHA256 {
+			return nil
 		}
-		fmt.Fprintf(os.Stderr, "engine: the installed patched build (sha256 %s) is superseded; upgrading\n", have[:12])
+		what := "a patched build that is not a published one (built here?)"
+		if contains(build.Superseded, have) {
+			what = "an earlier published patched build"
+		}
+		if cfg.KeepPatchedEngine {
+			fmt.Fprintf(os.Stderr, "engine: keeping %s (sha256 %s), %s, rather than updating to %s\n",
+				dst, have[:12], what, PatchedVersion(version, build.Rev))
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "engine: %s (sha256 %s) is %s; updating to %s\n",
+			dst, have[:12], what, PatchedVersion(version, build.Rev))
 	}
 	// The patched binary resolves base/ relative to its own path, so it is
 	// only usable inside a stock install — EnsureEngine runs first.
@@ -208,4 +222,13 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// PatchedBuildKeyWindows names the object the WINDOWS patched build of this
+// engine version and series revision is published under, for FogOfWar.exe:
+// engines/<version>/windows-amd64/spring-headless-patched-<semver>.exe.gz.
+// Same revision numbers as the Linux build (one series, two platforms); the
+// platform is a directory so the two never share a name.
+func PatchedBuildKeyWindows(version string, rev int) string {
+	return "engines/" + version + "/windows-amd64/spring-headless-patched-" + PatchedVersion(version, rev) + ".exe.gz"
 }

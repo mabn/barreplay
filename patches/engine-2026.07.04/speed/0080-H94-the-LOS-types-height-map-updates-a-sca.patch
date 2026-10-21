@@ -1,0 +1,35 @@
+From 4559dfe2e164c4620648ac285e1237daabc40773 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 15:31:58 +0000
+Subject: [PATCH 80/90] [barreplay] H94: the LOS types' height-map updates (a
+ scan of every instance per crater) on all threads (toggle 0x40000000)
+
+---
+ rts/Sim/Misc/LosHandler.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 7369cf9..a77fe9b 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -917,6 +917,17 @@ void CLosHandler::Update()
+ void CLosHandler::UpdateHeightMapSynced(SRectangle rect)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] H94 (toggle 0x40000000): the sensor types on all threads. Each
++	// type's update touches only its own instances, cache and queues (and reads
++	// the instances' own fields), and does exactly what it did, in its own
++	// order; the types never share any of it. Map damage calls this once per
++	// crater, and each call scans every instance of every type.
++	if ((g_brToggles & 0x40000000) != 0 && ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection()) {
++		for_mt(0, losTypes.size(), [&](const int idx) {
++			losTypes[idx]->UpdateHeightMapSynced(rect);
++		});
++		return;
++	}
+ 	for (ILosType* lt: losTypes) {
+ 		ZoneScopedN("LosHandler::UpdateHeightMapSynced");
+ 		lt->UpdateHeightMapSynced(rect);
+-- 
+2.53.0
+

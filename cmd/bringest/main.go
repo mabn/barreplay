@@ -69,7 +69,7 @@
 //	bringest -upload local    # ...the dev simulator's instead
 //	bringest -once            # drain the backlog and exit
 //	bringest -resim -data ~/bar-data        # the independent full-view re-sim worker
-//	bringest -resim -data ~/bar-data -once  # re-sim the requested + current candidates and exit
+//	bringest -resim -data ~/bar-data -once  # re-sim the first job the worker offers and exit
 //	bringest -insights=false  # upload loop only, without serving on-demand summaries
 //
 // -upload names the whole deployment, not just a bucket: the job queue, the
@@ -92,6 +92,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -129,21 +130,22 @@ func run() int {
 	envMsgs := loadEnvFile()
 
 	var (
-		workerDir  = flag.String("worker-dir", "worker", "the Cloudflare worker project directory whose upload tooling performs the R2 puts")
-		target     = flag.String("upload", "r2", "which deployment to work off and publish to: "+packer.TargetHelp())
-		poll       = flag.Duration("poll", 10*time.Second, "how often to ask the worker for pending jobs")
-		once       = flag.Bool("once", false, "process the current backlog and exit instead of polling forever")
-		doResim    = flag.Bool("resim", false, "run the independent re-sim worker instead of the upload job loop: take queued re-sims (requested, announced by a one-sided publish, or back-filled from the games mirror), re-simulate them headlessly and publish the full view as another revision (needs -data on an engine-capable host)")
-		dataDir    = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
-		skipProv   = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
-		patchedEng = flag.Bool("patched-engine", true, "-resim: prefer the patched engine (spring-headless-patched beside the stock binary in <data>/engine/<version>/) for the replay's version, downloading the published build when there is one and the host has none; its speed patches are output-safe, so captures are unchanged. Falls back to the stock engine with a warning when there is no patched build for that version")
-		progress   = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
-		minFree    = flag.Int("min-free", 512, "-resim: stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
-		stats      = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
-		logPath    = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
-		doInsights = flag.Bool("insights", true, "upload loop only: also compute game summaries on demand — hold a WebSocket to the worker, which hands this daemon the replays whose summary a reader found stale or missing, while they wait (summaries.go). Ignored with -resim")
-		insSlots   = flag.Int("insights-slots", 2, "-insights: how many summaries to compute at once")
-		cacheFlag  = flag.String("cache", "auto", "-insights: keep files read from the bucket here, shared with cmd/insights (empty keeps none; auto is "+insightsrun.AutoCacheHelp()+")")
+		workerDir   = flag.String("worker-dir", "worker", "the Cloudflare worker project directory whose upload tooling performs the R2 puts")
+		target      = flag.String("upload", "r2", "which deployment to work off and publish to: "+packer.TargetHelp())
+		poll        = flag.Duration("poll", 10*time.Second, "how often to ask the worker for pending jobs")
+		once        = flag.Bool("once", false, "process the current backlog and exit instead of polling forever")
+		doResim     = flag.Bool("resim", false, "run the independent re-sim worker instead of the upload job loop: take queued re-sims (requested, announced by a one-sided publish, or back-filled from the games mirror), re-simulate them headlessly and publish the full view as another revision (needs -data on an engine-capable host)")
+		dataDir     = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
+		skipProv    = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
+		patchedEng  = flag.Bool("patched-engine", true, "-resim: prefer the patched engine (spring-headless-patched beside the stock binary in <data>/engine/<version>/) for the replay's version, downloading the published build when there is one and the host has none or holds another build (see -keep-patched-engine); its speed patches are output-safe, so captures are unchanged. Falls back to the stock engine with a warning when there is no patched build for that version")
+		keepPatched = flag.Bool("keep-patched-engine", false, "-resim: keep the patched engine already installed for a version even when it is not the published build pinned for it (an older published build, or one built here); by default it is replaced with the pinned build")
+		progress    = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
+		minFree     = flag.Int("min-free", 512, "-resim: stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
+		stats       = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
+		logPath     = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
+		doInsights  = flag.Bool("insights", true, "upload loop only: also compute game summaries on demand — hold a WebSocket to the worker, which hands this daemon the replays whose summary a reader found stale or missing, while they wait (summaries.go). Ignored with -resim")
+		insSlots    = flag.Int("insights-slots", 2, "-insights: how many summaries to compute at once")
+		cacheFlag   = flag.String("cache", "auto", "-insights: keep files read from the bucket here, shared with cmd/insights (empty keeps none; auto is "+insightsrun.AutoCacheHelp()+")")
 	)
 	flag.Parse()
 
@@ -195,7 +197,7 @@ func run() int {
 		// the next one's pre-simulation ETA. ro is copied per job, but the
 		// pointer is shared, which is the point: a lone Forecaster per run
 		// would never learn anything.
-		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv, PatchedEngine: *patchedEng, Forecaster: &resim.Forecaster{}}
+		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv, PatchedEngine: *patchedEng, KeepPatchedEngine: *keepPatched, Forecaster: &resim.Forecaster{}}
 		// 0 on the command line means "no guard"; resim reads 0 as "use the
 		// default", so the two are translated here rather than making the flag
 		// lie about what 0 does.
@@ -229,7 +231,7 @@ func run() int {
 				client:   &http.Client{Timeout: 5 * time.Minute},
 			},
 			process: func(ctx context.Context, streamPath string, st *jobStats) error {
-				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL, *stats, st)
+				return processUpload(ctx, client, streamPath, *target, *workerDir, indexURL, *stats, st)
 			},
 		}
 	}
@@ -258,8 +260,14 @@ func run() int {
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
 	for {
-		if _, err := loop.runOnce(ctx); err != nil && ctx.Err() == nil {
+		n, err := loop.runOnce(ctx)
+		if err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
+		}
+		// A round that did work polls again at once: a re-sim round runs one
+		// job, and the next one should not wait out a tick behind it.
+		if n > 0 && err == nil {
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -336,6 +344,9 @@ type jobStats struct {
 	PackSec   float64 `json:"packSec,omitempty"`
 	UploadSec float64 `json:"uploadSec,omitempty"`
 	BrpBytes  int64   `json:"brpBytes,omitempty"`
+	// ViewCheck is what an upload's opening frames said about whose view it
+	// is (packer.ViewCheck), which decides the view it was published under.
+	ViewCheck string `json:"viewCheck,omitempty"`
 
 	// Re-sim only, from resim.RunStats.
 	ResimSec      float64 `json:"resimSec,omitempty"`
@@ -567,9 +578,10 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 	return attempted, nil
 }
 
-// handle runs one job: claim it, download the archived stream to a temp file
-// named after the gameId (packer.Pack keys the replay off the basename), and
-// hand it to the pipeline. The stats come back on the failure path too, so a
+// handle runs one job: claim it, download the archived upload to a temp file
+// named after the gameId (packer.Pack keys the replay off the basename) with
+// the archive's own extension — .brepstream, or .brp for a capture uploaded
+// already packed — and hand it to the pipeline. The stats come back on the failure path too, so a
 // job that died carries what it managed to measure.
 func (d *daemon) handle(ctx context.Context, j ingestJob) (*jobStats, error) {
 	started := time.Now()
@@ -584,7 +596,11 @@ func (d *daemon) handle(ctx context.Context, j ingestJob) (*jobStats, error) {
 		return st, err
 	}
 	defer os.RemoveAll(tmp)
-	streamPath := filepath.Join(tmp, j.GameID+".brepstream")
+	ext := ".brepstream"
+	if strings.EqualFold(filepath.Ext(j.StreamKey), ".brp") {
+		ext = ".brp"
+	}
+	streamPath := filepath.Join(tmp, j.GameID+ext)
 	if err := d.download(ctx, j.StreamKey, streamPath); err != nil {
 		return st, fmt.Errorf("downloading %s: %w", j.StreamKey, err)
 	}
@@ -625,9 +641,16 @@ func (d *workerAPI) download(ctx context.Context, streamKey, path string) error 
 }
 
 // pendingJobs lists the worker's pending (and stalled) jobs of one kind.
+// A re-sim poll also says how much memory this host has: a lava game that ran
+// out of memory on a smaller host is offered again only to a bigger one
+// (ReplayIndex.lavaRetryCandidate), and only a daemon that says can get it.
 func (d *workerAPI) pendingJobs(ctx context.Context, kind string) ([]ingestJob, error) {
 	var jobs []ingestJob
-	if err := d.api(ctx, http.MethodGet, "/api/jobs?kind="+url.QueryEscape(kind), nil, &jobs); err != nil {
+	path := "/api/jobs?kind=" + url.QueryEscape(kind)
+	if kind == kindResim && thisHost.MemBytes > 0 {
+		path += "&mem=" + strconv.FormatInt(thisHost.MemBytes, 10)
+	}
+	if err := d.api(ctx, http.MethodGet, path, nil, &jobs); err != nil {
 		return nil, err
 	}
 	return jobs, nil
@@ -783,18 +806,34 @@ func (d *workerAPI) auth(req *http.Request) {
 // BAR API knows the game, the stream's own metadata otherwise) and publish it
 // under its content-addressed revision. Idempotent: the same stream re-lands
 // on the same keys and catalog row.
-func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, stats bool, st *jobStats) error {
+// processUpload publishes one uploaded capture. A .brepstream is packed; a
+// .brp arrives packed and is never repacked, only given the demo's
+// self-destruct orders when it lacks them (what `pack -upload x.brp` does).
+// Either way the point of view the catalog records comes from the frames
+// (packer.ViewFromFrames), not from what the capture says about itself.
+func processUpload(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, stats bool, st *jobStats) error {
 	packStart := time.Now()
-	brpPath, modOptions, err := packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
-	if errors.Is(err, packer.ErrDemoUnavailable) {
-		fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
-		brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", true)
+	var brpPath string
+	var modOptions map[string]string
+	var err error
+	if strings.EqualFold(filepath.Ext(streamPath), ".brp") {
+		brpPath, modOptions, err = checkedBRP(ctx, client, streamPath)
+	} else {
+		brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
+		if errors.Is(err, packer.ErrDemoUnavailable) {
+			fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
+			brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", true)
+		}
 	}
 	if err != nil {
 		return err
 	}
 	if st != nil {
 		st.PackSec = time.Since(packStart).Seconds()
+	}
+	view, ally, err := frameView(brpPath, st)
+	if err != nil {
+		return err
 	}
 	recordBRP(st, brpPath, stats)
 	// AFTER the pack, and from the packed file: the fallback just above is
@@ -813,12 +852,70 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 		IndexURL:   indexURL,
 		Rev:        rev,
 		ModOptions: modOptions,
+		View:       view,
+		Ally:       ally,
 		BarAPI:     client,
 	})
 	if st != nil {
 		st.UploadSec = time.Since(uploadStart).Seconds()
 	}
 	return err
+}
+
+// checkedBRP validates an uploaded .brp — the container, the meta and every
+// chunk, decoded one at a time and dropped, so a big game is never held
+// whole — and returns the file to publish: the upload itself, or a copy
+// with the demo's self-destruct orders added. A game whose demo cannot be had
+// publishes without them, as a stream upload does without its demo metadata.
+func checkedBRP(ctx context.Context, client *barapi.Client, path string) (string, map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", nil, err
+	}
+	bf, err := snapshot.ParseBRP(bufio.NewReader(f))
+	f.Close()
+	if err != nil {
+		return "", nil, fmt.Errorf("not a readable .brp: %w", err)
+	}
+	for i := range bf.Chunks {
+		if _, err := bf.DecodeChunk(i); err != nil {
+			return "", nil, fmt.Errorf("not a readable .brp: %w", err)
+		}
+	}
+	dir := filepath.Join(filepath.Dir(path), "orders") // inside the job's temp dir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", nil, err
+	}
+	out, modOptions, err := packer.AddDemoOrders(ctx, client, path, dir, "")
+	if errors.Is(err, packer.ErrDemoUnavailable) {
+		fmt.Fprintf(os.Stderr, "bringest: %v; publishing without the demo's orders\n", err)
+		return path, nil, nil
+	}
+	return out, modOptions, err
+}
+
+// frameView decides the point of view to publish under from the capture's
+// opening frames (packer.UploadView) and notes the verdict on the job.
+func frameView(brpPath string, st *jobStats) (string, *int32, error) {
+	f, err := os.Open(brpPath)
+	if err != nil {
+		return "", nil, err
+	}
+	bf, err := snapshot.ParseBRP(bufio.NewReader(f))
+	f.Close()
+	if err != nil {
+		return "", nil, err
+	}
+	vc, err := packer.ViewFromFrames(bf)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading the opening frames: %w", err)
+	}
+	view, ally := packer.UploadView(bf.Meta, vc)
+	fmt.Fprintf(os.Stderr, "bringest: %s: %s -> view %q\n", bf.Meta.GameID, vc, view)
+	if st != nil {
+		st.ViewCheck = vc.String()
+	}
+	return view, ally, nil
 }
 
 // recordBRP measures the finished .brp and — when the size report is wanted —
@@ -929,7 +1026,7 @@ type resimDaemon struct {
 // scrolling.
 const idleNoteEvery = 10 * time.Minute
 
-// runOnce works through the queued re-sims. Returns how many it attempted; the
+// runOnce runs the first queued re-sim it can claim. Returns how many it attempted; the
 // error covers the listing only — per-game failures are reported onto their
 // rows and do not stop the round.
 func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
@@ -1021,10 +1118,15 @@ func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 			// With the stats: forty minutes of engine time that ended badly is
 			// the record most worth keeping, not the one to throw away.
 			r.reportError(ctx, j.ID, rerr, st)
-			continue
+			return attempted, nil
 		}
 		fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", j.GameID)
 		r.report(ctx, j.ID, "done", "", st)
+		// ONE job per poll, never the rest of the list: the worker orders the
+		// work (the most recently ended lava game first, see
+		// ReplayIndex.jobsOffer), and a lava game that finished while this one
+		// ran must be what comes next, not the tail of a list read an hour ago.
+		return attempted, nil
 	}
 	return attempted, nil
 }

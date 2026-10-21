@@ -206,6 +206,11 @@ export function emptyFilter(): ReplayFilter {
   };
 }
 
+/** isEmptyFilter: does the filter narrow nothing? */
+export function isEmptyFilter(f: ReplayFilter): boolean {
+  return JSON.stringify(f) === JSON.stringify(emptyFilter());
+}
+
 /** parseReplayFilter reads a ReplayFilter off a GET /api/replays query string,
  * or returns a string describing what was malformed. Dates accept either unix
  * seconds or YYYY-MM-DD; a YYYY-MM-DD `to` covers the WHOLE day (a date range

@@ -1,0 +1,147 @@
+From 15bd2f95cfd445ecbf137cd6632d52c52eaea856 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 20:30:17 +0000
+Subject: [PATCH] [barreplay] P7 v4.1: phase A in two stages, tests in chunks
+ then each type's UpdateUnit over the flagged units only (toggle2 0x100000)
+
+In v4 each type's task walked every unit (a miss per unit per type) and two
+of them ran long during the script tick, taking workers from P5 and the
+animation section. Every task claims test chunks, waits for the claimed ones,
+then claims types; a join or the LOS point does the same.
+---
+ rts/Sim/Misc/LosHandler.cpp | 74 +++++++++++++++++++++++++++++++++++++
+ rts/Sim/Misc/LosHandler.h   |  2 +
+ 2 files changed, 76 insertions(+)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 2f500e4..f040851 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -905,6 +905,15 @@ namespace BrP7 {
+ 		std::vector<SLosInstance*> prevInst[8];
+ 		std::vector<uint8_t> reverted;  // per unit: phase A taken back
+ 		long long revertedUnits = 0, revertedAll = 0;
++
++		// P7 v4.1 (toggle2 0x100000): phase A in two stages, the tests in chunks
++		// (needs[], idxOf, prevInst) and then each type's UpdateUnit for the
++		// units its test flagged only; every task claims chunks, waits for the
++		// claimed ones, then claims types
++		bool v41 = false;
++		int numChunks = 0;
++		std::atomic<int> nextChunk{0};
++		std::atomic<int> doneChunks{0};
+ 	}
+ 
+ 	void MarkSlow(const CUnit* unit) {
+@@ -984,9 +993,59 @@ void CLosHandler::BrP7RevertAll()
+ 	all = true;
+ }
+ 
++// P7 v4.1: one chunk of units tested for every type (v3's test), with each
++// unit's index and its instances before phase A recorded
++void CLosHandler::BrP7TestChunk(int chunk)
++{
++	using namespace BrP7;
++	const size_t b = size_t(chunk) * CHUNK, e = std::min(units.size(), b + CHUNK);
++	for (size_t k = b; k < e; ++k) {
++		const CUnit* u = units[k];
++		idxOf[u->id] = int(k);
++		uint8_t m = 0;
++		for (size_t t = 0; t < losTypes.size(); ++t) {
++			ILosType* lt = losTypes[t];
++			prevInst[t][k] = u->los[lt->type];
++			m |= uint8_t(lt->BrNeedsUpdate(u)) << t;
++		}
++		needs[k] = m;
++	}
++}
++
++// P7 v4.1: claim and test chunks, wait for the claimed ones, then claim
++// types and run each one's UpdateUnit over the units its test flagged
++void CLosHandler::BrP7RunStages()
++{
++	using namespace BrP7;
++	for (int c; (c = nextChunk.fetch_add(1, std::memory_order_acq_rel)) < numChunks; ) {
++		BrP7TestChunk(c);
++		doneChunks.fetch_add(1, std::memory_order_acq_rel);
++	}
++	while (doneChunks.load(std::memory_order_acquire) < numChunks) {
++		_mm_pause();
++	}
++	const int n = int(losTypes.size());
++	for (int t; (t = nextType.fetch_add(1, std::memory_order_acq_rel)) < n; ) {
++		ILosType* lt = losTypes[t];
++		const uint8_t bit = uint8_t(1u << t);
++		for (size_t k = 0, m = units.size(); k < m; ++k) {
++			if ((needs[k] & bit) != 0)
++				lt->UpdateUnit(units[k], false);
++		}
++		doneTypes.fetch_add(1, std::memory_order_acq_rel);
++	}
++	while (doneTypes.load(std::memory_order_acquire) < n) {
++		_mm_pause();
++	}
++}
++
+ void CLosHandler::BrP7RunTypes()
+ {
+ 	using namespace BrP7;
++	if (v41) {
++		BrP7RunStages();
++		return;
++	}
+ 	const int n = int(losTypes.size());
+ 	for (int t; (t = nextType.fetch_add(1, std::memory_order_acq_rel)) < n; ) {
+ 		ILosType* lt = losTypes[t];
+@@ -1008,6 +1067,10 @@ void CLosHandler::BrP7RunTypes()
+ void CLosHandler::BrP7PhaseA(int chunk)
+ {
+ 	using namespace BrP7;
++	if (v41) {
++		BrP7RunStages();
++		return;
++	}
+ 	if (v4) {
+ 		// each task claims types until none is left
+ 		const int n = int(losTypes.size());
+@@ -1063,6 +1126,7 @@ void CLosHandler::BrP7Begin()
+ 	all = false;
+ 	launched = true;
+ 	v4 = (g_brToggles2 & 0x80000) != 0;
++	v41 = v4 && (g_brToggles2 & 0x100000) != 0;
+ 	if (v4) {
+ 		for (size_t t = 0; t < losTypes.size(); ++t)
+ 			prevInst[t].resize(units.size());
+@@ -1070,6 +1134,16 @@ void CLosHandler::BrP7Begin()
+ 		nextType.store(0, std::memory_order_relaxed);
+ 		doneTypes.store(0, std::memory_order_relaxed);
+ 		joined = false;
++		if (v41) {
++			needs.assign(units.size(), 0);
++			numChunks = int((units.size() + CHUNK - 1) / CHUNK);
++			nextChunk.store(0, std::memory_order_relaxed);
++			doneChunks.store(0, std::memory_order_relaxed);
++			open.store(1, std::memory_order_release);
++			// one task per worker thread: each claims chunks, then types
++			task = for_mt_background(0, std::max(1, int(ThreadPool::GetNumThreads()) - 1), phaseA);
++			return;
++		}
+ 		open.store(1, std::memory_order_release);
+ 		task = for_mt_background(0, int(losTypes.size()), phaseA);
+ 		return;
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index 3832e13..e6dcbb9 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -345,6 +345,8 @@ public:
+ 	bool BrP7Finish();
+ 	void BrP7PhaseA(int idx);
+ 	void BrP7RunTypes();
++	void BrP7RunStages();
++	void BrP7TestChunk(int chunk);
+ 	void BrP7RevertUnit(const CUnit* unit);
+ 	void BrP7RevertAll();
+ };
+-- 
+2.53.0
+

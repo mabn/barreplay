@@ -1,0 +1,600 @@
+From 5b526e14ffedcee54b59b6822c6788522ffa5064 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 18:51:05 +0000
+Subject: [PATCH 133/149] [barreplay] P12: the synced projectile collision pass
+ with its detections run on all threads first (toggle3 0x2)
+
+A projectile whose detection found nothing to act on (no shield it would
+reach, no unit or feature it would hit) is skipped in the pass, drawing the
+synced tempNum its query would have, when nothing it read can have changed:
+the pass's effects mark the cells (256 elmos) of what they touch - a damaged
+or killed unit and its shields, an added or removed feature, a shield taking
+a projectile - and a Lua write other than rules params and team resources, a
+unit or shield changing quads, or a transport dying marks everything. The
+projectile's own position, speed and radius must be unchanged too. Every
+other projectile runs the ordinary code. From 256 projectiles
+(BARREPLAY_P12_MINPROJ); BARREPLAY_P12_CHECK runs the ordinary code for every
+would-be skip and counts the ones that acted (wrong= on the bench line).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Lua/LuaUtils.cpp                      |   5 +
+ rts/Sim/Features/Feature.cpp              |   2 +
+ rts/Sim/Misc/QuadField.cpp                |  80 ++++++++
+ rts/Sim/Misc/QuadField.h                  |   4 +
+ rts/Sim/Projectiles/BrPreCollide.h        |  36 ++++
+ rts/Sim/Projectiles/ProjectileHandler.cpp | 219 +++++++++++++++++++++-
+ rts/Sim/Units/Unit.cpp                    |   7 +
+ rts/Sim/Weapons/PlasmaRepulser.cpp        |   2 +
+ 8 files changed, 352 insertions(+), 3 deletions(-)
+ create mode 100644 rts/Sim/Projectiles/BrPreCollide.h
+
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index d1d18ea..e69ee6b 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -9,6 +9,7 @@
+ #include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/Misc/BrLosOverlap.h"
+ #include "Sim/Units/BrWeaponVectors.h"
++#include "Sim/Projectiles/BrPreCollide.h"
+ 
+ // [barreplay] H101: how many calls of a Lua function that writes simulation
+ // state there have been (the functions entered through the two trampolines)
+@@ -19,6 +20,9 @@ int BrLuaDrainingCall(lua_State* L)
+ 	++g_brLuaWrites;
+ 	// [barreplay] P8: Lua can change anything a weapon vector reads
+ 	BrP8::LuaWrite(static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2))), lua_toboolean(L, lua_upvalueindex(3)));
++	// [barreplay] P12: any write but rules params and team resources
++	if (!lua_toboolean(L, lua_upvalueindex(3)))
++		BrP12Global();
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	// [barreplay] P7: a Lua write in the script tick can change any LOS input
+ 	BrP7::MarkAll();
+@@ -49,6 +53,7 @@ int BrLuaDrainingCallLus(lua_State* L)
+ 	++g_brLuaWrites;
+ 	// [barreplay] P8: Lua can change anything a weapon vector reads
+ 	BrP8::LuaWrite(static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2))), false);
++	BrP12Global(); // [barreplay] P12: unit-script pieces
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	const lua_CFunction f = reinterpret_cast<lua_CFunction>(lua_touserdata(L, lua_upvalueindex(1)));
+ 	return f(L);
+diff --git a/rts/Sim/Features/Feature.cpp b/rts/Sim/Features/Feature.cpp
+index 6b3b92c..17e1499 100644
+--- a/rts/Sim/Features/Feature.cpp
++++ b/rts/Sim/Features/Feature.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "Feature.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
++#include "Sim/Projectiles/BrPreCollide.h"
+ #include "FeatureDef.h"
+ #include "FeatureDefHandler.h"
+ #include "FeatureMemPool.h"
+@@ -403,6 +404,7 @@ void CFeature::DoDamage(
+ 		return;
+ 	// [barreplay] P4 (BrPipeTarget.h)
+ 	BrP4::Drain(BrP4::DR_FEATURE);
++	BrP12MarkFeature(this); // [barreplay] P12
+ 	// paralyzers do not damage features
+ 	if (damages.paralyzeDamageTime)
+ 		return;
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 4d6af55..918ef56 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -5,6 +5,7 @@
+ #include "QuadField.h"
+ #include "Sim/Units/BrWeaponVectors.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
++#include "Sim/Projectiles/BrPreCollide.h"
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Map/ReadMap.h"
+ #include "Sim/Misc/CollisionVolume.h"
+@@ -516,6 +517,7 @@ bool CQuadField::InsertUnitIf(CUnit* unit, const float3& wpos)
+ 
+ 	// [barreplay] P4: the unit lists change
+ 	BrP4::Drain(BrP4::DR_QUAD);
++	BrP12Global(); // [barreplay] P12
+ 
+ 	const bool h97 = BrH97Begin();
+ 
+@@ -605,6 +607,7 @@ bool CQuadField::BrQuadsChanged(const CUnit* unit)
+ void CQuadField::MovedUnit(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP12Global(); // [barreplay] P12: a unit moving inside the collision pass
+ 	QuadFieldQuery qfQuery;
+ 	GetQuads(qfQuery, unit->pos, unit->radius);
+ 
+@@ -654,6 +657,7 @@ void CQuadField::MovedUnit(CUnit* unit)
+ void CQuadField::RemoveUnit(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP12MarkUnit(unit); // [barreplay] P12
+ 	BrP4::Drain(BrP4::DR_QUAD);
+ 	if (BrH97Begin()) {
+ 		auto& s = brSlots[unit->id];
+@@ -688,6 +692,7 @@ void CQuadField::RemoveUnit(CUnit* unit)
+ 
+ void CQuadField::MovedRepulser(CPlasmaRepulser* repulser)
+ {
++	BrP12Global(); // [barreplay] P12: its old place is gone
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	QuadFieldQuery qfQuery;
+ 	GetQuads(qfQuery, repulser->weaponMuzzlePos, repulser->GetRadius());
+@@ -713,6 +718,7 @@ void CQuadField::MovedRepulser(CPlasmaRepulser* repulser)
+ 
+ void CQuadField::RemoveRepulser(CPlasmaRepulser* repulser)
+ {
++	BrP12MarkShield(repulser); // [barreplay] P12
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	for (const int qi: repulser->GetQuads()) {
+ 		spring::VectorErase(baseQuads[qi].repulsers, repulser);
+@@ -733,6 +739,7 @@ void CQuadField::RemoveRepulser(CPlasmaRepulser* repulser)
+ void CQuadField::AddFeature(CFeature* feature)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP12MarkFeature(feature); // [barreplay] P12
+ 	BrP4::Drain(BrP4::DR_QUAD);
+ 	QuadFieldQuery qfQuery;
+ 	GetQuads(qfQuery, feature->pos, feature->radius);
+@@ -745,6 +752,7 @@ void CQuadField::AddFeature(CFeature* feature)
+ void CQuadField::RemoveFeature(CFeature* feature)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP12MarkFeature(feature); // [barreplay] P12
+ 	BrP4::Drain(BrP4::DR_QUAD);
+ 	QuadFieldQuery qfQuery;
+ 	GetQuads(qfQuery, feature->pos, feature->radius);
+@@ -1130,6 +1138,78 @@ bool CQuadField::NoSolidsExact(
+ 
+ 
+ // optimization specifically for projectile collisions
++// [barreplay] P12 (Sim/Projectiles/BrPreCollide.h): GetUnitsAndFeaturesColVol's
++// walk, order and tests, with the thread's own marks and pools
++void CQuadField::BrGetUnitsAndFeaturesColVolMt(
++	const float3& pos,
++	const float radius,
++	std::vector<CUnit*>& units,
++	std::vector<CFeature*>& features,
++	std::vector<CPlasmaRepulser*>& repulsers,
++	int thread
++) {
++	const int tempNum = gs->GetMtTempNum(thread);
++
++	QuadFieldQuery qfQuery;
++	qfQuery.threadOwner = thread;
++	GetQuads(qfQuery, pos, radius);
++
++	for (const int qi: *qfQuery.quads) {
++		const Quad& quad = baseQuads[qi];
++
++		for (CUnit* u: quad.units) {
++			int& mark = u->mtTempNum[thread];
++			if (mark == tempNum)
++				continue;
++			mark = tempNum;
++
++			const auto* colvol = &u->collisionVolume;
++			const float totRad = radius + colvol->GetBoundingRadius();
++
++			if (pos.SqDistance(colvol->GetWorldSpacePos(u)) >= (totRad * totRad))
++				continue;
++
++			units.push_back(u);
++		}
++
++		for (CFeature* f: quad.features) {
++			int& mark = f->mtTempNum[thread];
++			if (mark == tempNum)
++				continue;
++			mark = tempNum;
++
++			const auto* colvol = &f->collisionVolume;
++			const float totRad = radius + colvol->GetBoundingRadius();
++
++			if (pos.SqDistance(colvol->GetWorldSpacePos(f)) >= (totRad * totRad))
++				continue;
++
++			features.push_back(f);
++		}
++
++		for (CPlasmaRepulser* r: quad.repulsers) {
++			if (std::find(repulsers.begin(), repulsers.end(), r) != repulsers.end())
++				continue;
++			// the ordinary walk marks a repulser seen even when it fails the test
++			bool seen = false;
++			for (CPlasmaRepulser* s: brSeenRepulsers[thread])
++				seen |= (s == r);
++			if (seen)
++				continue;
++			brSeenRepulsers[thread].push_back(r);
++
++			const auto* colvol = &r->collisionVolume;
++			const float totRad = radius + colvol->GetBoundingRadius();
++
++			if (pos.SqDistance(r->weaponMuzzlePos) >= (totRad * totRad))
++				continue;
++
++			repulsers.push_back(r);
++		}
++	}
++	brSeenRepulsers[thread].clear();
++}
++
+ void CQuadField::GetUnitsAndFeaturesColVol(
+ 	const float3& pos,
+ 	const float radius,
+diff --git a/rts/Sim/Misc/QuadField.h b/rts/Sim/Misc/QuadField.h
+index 337aea0..e5827f3 100644
+--- a/rts/Sim/Misc/QuadField.h
++++ b/rts/Sim/Misc/QuadField.h
+@@ -158,6 +158,10 @@ public:
+ 	void RemoveUnit(CUnit* unit);
+ 
+ 	void AddFeature(CFeature* feature);
++	// [barreplay] P12: GetUnitsAndFeaturesColVol on pool thread <thread> (its
++	// pools and per-thread marks; repulsers deduplicated in the list)
++	std::array<std::vector<CPlasmaRepulser*>, ThreadPool::MAX_THREADS> brSeenRepulsers;
++	void BrGetUnitsAndFeaturesColVolMt(const float3& pos, const float radius, std::vector<CUnit*>& units, std::vector<CFeature*>& features, std::vector<CPlasmaRepulser*>& repulsers, int thread);
+ 	void RemoveFeature(CFeature* feature);
+ 
+ 	void MovedProjectile(CProjectile* projectile);
+diff --git a/rts/Sim/Projectiles/BrPreCollide.h b/rts/Sim/Projectiles/BrPreCollide.h
+new file mode 100644
+index 0000000..3115383
+--- /dev/null
++++ b/rts/Sim/Projectiles/BrPreCollide.h
+@@ -0,0 +1,36 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_PRE_COLLIDE_H
++#define BR_PRE_COLLIDE_H
++
++// [barreplay] P12 (toggle3 0x2): the synced projectile collision pass
++// (CProjectileHandler::CheckUnitFeatureCollisions) with its detections run on
++// all threads first. A projectile whose detection found nothing to act on (no
++// shield it would reach, no unit or feature it would hit) is skipped in the
++// pass, drawing the synced tempNum its query would have, as long as nothing the
++// detection read can have changed since: every effect of the pass marks the
++// cells of a coarse grid it may have touched (a damaged or killed unit, an
++// added or removed feature, a shield taking a projectile), and a skip needs
++// the cells under its query to be unmarked. A Lua write (other than rules
++// params and team resources) or a unit changing quads marks everything. Every
++// other projectile runs the ordinary code. From 256 projectiles
++// (BARREPLAY_P12_MINPROJ).
++
++class CUnit;
++class CFeature;
++class CPlasmaRepulser;
++struct float3;
++
++extern bool g_brP12Active;
++
++void BrP12MarkUnitSlow(const CUnit* u);
++void BrP12MarkFeatureSlow(const CFeature* f);
++void BrP12MarkShieldSlow(const CPlasmaRepulser* r);
++void BrP12GlobalSlow();
++
++inline void BrP12MarkUnit(const CUnit* u) { if (__builtin_expect(g_brP12Active, false)) BrP12MarkUnitSlow(u); }
++inline void BrP12MarkFeature(const CFeature* f) { if (__builtin_expect(g_brP12Active, false)) BrP12MarkFeatureSlow(f); }
++inline void BrP12MarkShield(const CPlasmaRepulser* r) { if (__builtin_expect(g_brP12Active, false)) BrP12MarkShieldSlow(r); }
++inline void BrP12Global() { if (__builtin_expect(g_brP12Active, false)) BrP12GlobalSlow(); }
++
++#endif
+diff --git a/rts/Sim/Projectiles/ProjectileHandler.cpp b/rts/Sim/Projectiles/ProjectileHandler.cpp
+index e77491f..8cfa01e 100644
+--- a/rts/Sim/Projectiles/ProjectileHandler.cpp
++++ b/rts/Sim/Projectiles/ProjectileHandler.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include "Projectile.h"
+ #include "ProjectileHandler.h"
++#include "Map/ReadMap.h"
++#include "Sim/Weapons/BrPipeTarget.h"
++#include "BrPreCollide.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include <x86intrin.h>
+ #include <cstdio>
+ #include "ProjectileMemPool.h"
+@@ -578,12 +582,151 @@ void CProjectileHandler::CheckShieldCollisions(
+ namespace {
+ 	struct BrP12Stats { long long checked[2] = {}, candidates[2] = {}, hits[2] = {}, cycles[2] = {}, passes = 0; } brP12;
+ }
+-void BrP12Reset() { brP12 = BrP12Stats(); }
++// [barreplay] P12 (BrPreCollide.h)
++bool g_brP12Active = false;
++extern unsigned g_brToggles3;
++namespace {
++	namespace BrP12 {
++		constexpr int CELL = 256; // elmos
++		int cellsX = 0, cellsZ = 0;
++		std::vector<uint32_t> cells;  // the pass that last marked the cell
++		uint32_t pass = 0;
++		bool global = false;
++		long long skipped = 0, dirty = 0, acting = 0, prepassed = 0;
++		// check mode (BARREPLAY_P12_CHECK): a would-be skip runs the ordinary
++		// code, which must then do nothing (no mark, no collision)
++		long long marks = 0, checked = 0, wrong = 0;
++		bool CheckMode() {
++			static const bool c = (getenv("BARREPLAY_P12_CHECK") != nullptr);
++			return c;
++		}
++
++		// what the detection was run with: a skip also needs the projectile's
++		// own position, speed and radius unchanged
++		struct Pre { const CProjectile* p; float3 pos; float3 spd; float r; uint8_t acts; };
++		bool Same(const Pre& e, const CProjectile* p) {
++			// exact (float3's == allows an epsilon)
++			return e.p == p && e.pos.x == p->pos.x && e.pos.y == p->pos.y && e.pos.z == p->pos.z
++				&& e.spd.x == p->speed.x && e.spd.y == p->speed.y && e.spd.z == p->speed.z
++				&& e.r == p->speed.w + p->radius;
++		}
++		std::vector<Pre> pre;
++
++		void MarkBox(float x0, float z0, float x1, float z1) {
++			marks += 1;
++			const int cx0 = std::clamp(int(x0) / CELL, 0, cellsX - 1), cx1 = std::clamp(int(x1) / CELL, 0, cellsX - 1);
++			const int cz0 = std::clamp(int(z0) / CELL, 0, cellsZ - 1), cz1 = std::clamp(int(z1) / CELL, 0, cellsZ - 1);
++			for (int z = cz0; z <= cz1; ++z)
++				for (int x = cx0; x <= cx1; ++x)
++					cells[z * cellsX + x] = pass;
++		}
++		void MarkSphere(const float3& c, float r) {
++			r += 2.0f * SQUARE_SIZE; // slack for float rounding at cell edges
++			MarkBox(c.x - r, c.z - r, c.x + r, c.z + r);
++		}
++		bool Dirty(const float3& c, float r) {
++			if (global)
++				return true;
++			r += 2.0f * SQUARE_SIZE;
++			const int cx0 = std::clamp(int(c.x - r) / CELL, 0, cellsX - 1), cx1 = std::clamp(int(c.x + r) / CELL, 0, cellsX - 1);
++			const int cz0 = std::clamp(int(c.z - r) / CELL, 0, cellsZ - 1), cz1 = std::clamp(int(c.z + r) / CELL, 0, cellsZ - 1);
++			for (int z = cz0; z <= cz1; ++z)
++				for (int x = cx0; x <= cx1; ++x)
++					if (cells[z * cellsX + x] == pass)
++						return true;
++			return false;
++		}
++		size_t MinProjectiles() {
++			static const size_t m = []() { const char* v = getenv("BARREPLAY_P12_MINPROJ"); return (v != nullptr)? size_t(atoi(v)): size_t(256); }();
++			return m;
++		}
++	}
++}
++
++// a unit's sphere as the collision query sees it (its volume's world centre and
++// bounding radius), and as wide as the unit itself
++void BrP12MarkUnitSlow(const CUnit* u) {
++	const auto* cv = &u->collisionVolume;
++	BrP12::MarkSphere(cv->GetWorldSpacePos(u), std::max(cv->GetBoundingRadius(), u->radius));
++	BrP12::MarkSphere(u->pos, std::max(cv->GetBoundingRadius(), u->radius));
++	// a stun turns its shields off, a death removes them
++	for (const CWeapon* w: u->weapons)
++		if (w->weaponDef->isShield)
++			BrP12MarkShieldSlow(static_cast<const CPlasmaRepulser*>(w));
++}
++void BrP12MarkFeatureSlow(const CFeature* f) {
++	const auto* cv = &f->collisionVolume;
++	BrP12::MarkSphere(cv->GetWorldSpacePos(f), std::max(cv->GetBoundingRadius(), f->radius));
++	BrP12::MarkSphere(f->pos, std::max(cv->GetBoundingRadius(), f->radius));
++}
++void BrP12MarkShieldSlow(const CPlasmaRepulser* r) {
++	BrP12::MarkSphere(r->weaponMuzzlePos, r->collisionVolume.GetBoundingRadius());
++}
++void BrP12GlobalSlow() { BrP12::global = true; BrP12::marks += 1; }
++
++// the three checks below without their effects: would this projectile reach a
++// shield's IncomingProjectile, or hit a unit or a feature?
++static bool CheckProjectileCollisionFlags(const CProjectile* p, const CUnit* u);
++static bool BrP12WouldAct(CProjectile* p, const std::vector<CUnit*>& units, const std::vector<CFeature*>& features, const std::vector<CPlasmaRepulser*>& repulsers, const float3 ppos0, const float3 ppos1)
++{
++	if (!p->checkCol)
++		return false;
++
++	CollisionQuery cq;
++
++	if (p->weapon) {
++		CWeaponProjectile* wpro = static_cast<CWeaponProjectile*>(p);
++		const WeaponDef* wdef = wpro->GetWeaponDef();
++		const unsigned int interceptType = wdef->interceptedByShieldType;
++		const unsigned int projAllyTeam = p->GetAllyteamID();
++
++		if (interceptType != 0) {
++			for (CPlasmaRepulser* repulser: repulsers) {
++				if (!repulser->CanIntercept(interceptType, projAllyTeam))
++					continue;
++				const float3 rpvec  = ppos0 - ppos1;
++				const float3 rppos0 = ppos0 + rpvec * repulser->GetDeltaDist();
++				const float3 cvpos  = repulser->weaponMuzzlePos - repulser->owner->relMidPos;
++				if (!CCollisionHandler::DetectHit(repulser->owner, &repulser->collisionVolume, CMatrix44f{cvpos}, rppos0, ppos1, &cq))
++					continue;
++				if (cq.InsideHit() && repulser->IgnoreInteriorHit(wpro))
++					continue;
++				return true;
++			}
++		}
++	}
++
++	for (CUnit* unit: units) {
++		if (unit == p->owner())
++			continue;
++		if (!unit->HasCollidableStateBit(CSolidObject::CSTATE_BIT_PROJECTILES))
++			continue;
++		if (!CheckProjectileCollisionFlags(p, unit))
++			continue;
++		if (CCollisionHandler::DetectHit(unit, unit->GetTransformMatrix(true), ppos0, ppos1, &cq))
++			return true;
++	}
++
++	if ((p->GetCollisionFlags() & Collision::NOFEATURES) != 0)
++		return false;
++
++	for (CFeature* feature: features) {
++		if (!feature->HasCollidableStateBit(CSolidObject::CSTATE_BIT_PROJECTILES))
++			continue;
++		if (CCollisionHandler::DetectHit(feature, feature->GetTransformMatrix(true), ppos0, ppos1, &cq))
++			return true;
++	}
++
++	return false;
++}
++
++void BrP12Reset() { brP12 = BrP12Stats(); BrP12::prepassed = BrP12::skipped = BrP12::dirty = BrP12::acting = BrP12::checked = BrP12::wrong = 0; }
+ int BrP12BenchLine(char* buf, int size)
+ {
+-	return snprintf(buf, size, "[BR_P12] passes=%lld synced: checked=%lld candidates=%lld hits=%lld Mcyc=%.1f unsynced: checked=%lld candidates=%lld hits=%lld Mcyc=%.1f ",
++	return snprintf(buf, size, "[BR_P12] passes=%lld synced: checked=%lld candidates=%lld hits=%lld Mcyc=%.1f unsynced: checked=%lld candidates=%lld hits=%lld Mcyc=%.1f pre: prepassed=%lld skipped=%lld dirty=%lld acting=%lld check=%lld wrong=%lld ",
+ 		brP12.passes, brP12.checked[1], brP12.candidates[1], brP12.hits[1], brP12.cycles[1] / 1e6,
+-		brP12.checked[0], brP12.candidates[0], brP12.hits[0], brP12.cycles[0] / 1e6);
++		brP12.checked[0], brP12.candidates[0], brP12.hits[0], brP12.cycles[0] / 1e6,
++		BrP12::prepassed, BrP12::skipped, BrP12::dirty, BrP12::acting, BrP12::checked, BrP12::wrong);
+ }
+ 
+ void CProjectileHandler::CheckUnitFeatureCollisions(bool synced)
+@@ -595,6 +738,45 @@ void CProjectileHandler::CheckUnitFeatureCollisions(bool synced)
+ 	const unsigned long long brT0 = __rdtsc();
+ 	brP12.passes += synced;
+ 
++	// [barreplay] P12: the detections first, on all threads
++	const size_t brN = projectiles[synced].size();
++	const bool brPre = synced && (g_brToggles3 & 0x2) != 0 && brN >= BrP12::MinProjectiles()
++		&& ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection()
++		&& !BrP8::active.load(std::memory_order_relaxed);
++	if (brPre) {
++		if (BrP12::cells.empty()) {
++			BrP12::cellsX = std::max(1, (mapDims.mapx * SQUARE_SIZE + BrP12::CELL - 1) / BrP12::CELL);
++			BrP12::cellsZ = std::max(1, (mapDims.mapy * SQUARE_SIZE + BrP12::CELL - 1) / BrP12::CELL);
++			BrP12::cells.assign(size_t(BrP12::cellsX) * BrP12::cellsZ, 0);
++		}
++		BrP12::pass += 1;
++		BrP12::global = false;
++		BrP12::pre.resize(brN);
++
++		static thread_local std::vector<CUnit*> mtUnits;
++		static thread_local std::vector<CFeature*> mtFeatures;
++		static thread_local std::vector<CPlasmaRepulser*> mtRepulsers;
++		for_mt_chunk(0, int(brN), [&](const int i) {
++			CProjectile* p = projectiles[true][i];
++			BrP12::pre[i].p = p;
++			BrP12::pre[i].pos = p->pos;
++			BrP12::pre[i].spd = float3(p->speed);
++			BrP12::pre[i].r = p->speed.w + p->radius;
++			BrP12::pre[i].acts = 1;
++			if (!p->checkCol || p->deleteMe)
++				return;
++			const int thread = ThreadPool::GetThreadNum();
++			// piece matrices: a dirty one is computed into scratch, never written
++			BrP4::inWorker = true;
++			mtUnits.clear(); mtFeatures.clear(); mtRepulsers.clear();
++			quadField.BrGetUnitsAndFeaturesColVolMt(p->pos, p->speed.w + p->radius, mtUnits, mtFeatures, mtRepulsers, thread);
++			BrP12::pre[i].acts = BrP12WouldAct(p, mtUnits, mtFeatures, mtRepulsers, p->pos, p->pos + p->speed)? 1: 0;
++			BrP4::inWorker = false;
++		}, 1, 64);
++		BrP12::prepassed += brN;
++		g_brP12Active = true;
++	}
++
+ 	//can't use iterators here, because instructions inside the loop modify projectiles[synced]
+ 	for (size_t i = 0; i < projectiles[synced].size(); ++i) {
+ 		CProjectile* p = projectiles[synced][i];
+@@ -602,6 +784,35 @@ void CProjectileHandler::CheckUnitFeatureCollisions(bool synced)
+ 		if (!p->checkCol) continue;
+ 		if ( p->deleteMe) continue;
+ 
++		// [barreplay] P12: nothing to act on, and nothing it read has changed
++		if (brPre && i < brN && BrP12::pre[i].acts == 0 && BrP12::Same(BrP12::pre[i], p)) {
++			if (!BrP12::Dirty(p->pos, p->speed.w + p->radius)) {
++				if (BrP12::CheckMode()) {
++					const long long m0 = BrP12::marks;
++					const bool c0 = p->checkCol, d0 = p->deleteMe;
++					quadField.GetUnitsAndFeaturesColVol(p->pos, p->speed.w + p->radius, tempUnits, tempFeatures, &tempRepulsers);
++					const float3 q0 = p->pos, q1 = p->pos + p->speed;
++					CheckShieldCollisions (p, tempRepulsers, q0, q1); tempRepulsers.clear();
++					CheckUnitCollisions   (p, tempUnits    , q0, q1); tempUnits.clear();
++					CheckFeatureCollisions(p, tempFeatures , q0, q1); tempFeatures.clear();
++					BrP12::checked += 1;
++					if (BrP12::marks != m0 || p->checkCol != c0 || p->deleteMe != d0) {
++						if (BrP12::wrong < 20)
++							LOG("[BR_P12] check: f=%d projectile %d (index %d) acted after a skip decision", gs->frameNum, p->id, int(i));
++						BrP12::wrong += 1;
++					}
++					continue;
++				}
++				gs->GetTempNum(); // the synced number the query would have drawn
++				BrP12::skipped += 1;
++				brP12.checked[synced] += 1;
++				continue;
++			}
++			BrP12::dirty += 1;
++		} else if (brPre && i < brN) {
++			BrP12::acting += 1;
++		}
++
+ 		const float3 ppos0 = p->pos;
+ 		const float3 ppos1 = p->pos + p->speed;
+ 		// const float3 ppos1 = p->pos + p->dir * (p->speed.w + p->radius);
+@@ -616,6 +827,8 @@ void CProjectileHandler::CheckUnitFeatureCollisions(bool synced)
+ 		brP12.hits[synced] += (!p->checkCol || p->deleteMe);
+ 	}
+ 	brP12.cycles[synced] += __rdtsc() - brT0;
++	if (brPre)
++		g_brP12Active = false;
+ }
+ 
+ void CProjectileHandler::CheckGroundCollisions(bool synced)
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 96ead18..5e76c1c 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -3,6 +3,7 @@
+ #include "UnitDef.h"
+ #include "Unit.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
++#include "Sim/Projectiles/BrPreCollide.h"
+ #include "UnitHandler.h"
+ #include "UnitDefHandler.h"
+ #include "UnitLoader.h"
+@@ -482,6 +483,11 @@ void CUnit::ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, i
+ {
+ 	++g_brKillCalls; // [barreplay] P8 measurement
+ 	BrP8::Ensure(this); // [barreplay] P8: the death script and the weapon-use flags
++	// [barreplay] P12: a death changes what a collision check reads here; a
++	// transport's passengers are moved anywhere
++	BrP12MarkUnit(this);
++	if (!transportedUnits.empty())
++		BrP12Global();
+ 	BrP7::Mark(this); // [barreplay] P7: an LOS input changes
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (isDead)
+@@ -1335,6 +1341,7 @@ void CUnit::DoDamage(
+ ) {
+ 	++g_brDamageCalls; // [barreplay] P8 measurement
+ 	BrP8::Ensure(this); // [barreplay] P8: hit-by-weapon scripts, stuns, kills change what the vectors read
++	BrP12MarkUnit(this); // [barreplay] P12: hit-by-weapon scripts move pieces, stuns turn shields off
+ 	if (isDead)
+ 		return;
+ 	if (IsCrashing() || IsInVoid())
+diff --git a/rts/Sim/Weapons/PlasmaRepulser.cpp b/rts/Sim/Weapons/PlasmaRepulser.cpp
+index 837fa7c..a9ab007 100644
+--- a/rts/Sim/Weapons/PlasmaRepulser.cpp
++++ b/rts/Sim/Weapons/PlasmaRepulser.cpp
+@@ -1,5 +1,6 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
++#include "Sim/Projectiles/BrPreCollide.h"
+ #include "PlasmaRepulser.h"
+ #include "Sim/Misc/GlobalSynced.h"
+ #include "Sim/Misc/QuadField.h"
+@@ -191,6 +192,7 @@ void CPlasmaRepulser::SetRechargeDelay(int delay, bool overwrite)
+ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hitPos)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP12MarkShield(this); // [barreplay] P12: power, repulsed list, hit frames
+ 	const int defHitFrames = weaponDef->visibleShieldHitFrames;
+ 
+ 	// gadget handles the collision event, don't touch the projectile
+-- 
+2.53.0
+

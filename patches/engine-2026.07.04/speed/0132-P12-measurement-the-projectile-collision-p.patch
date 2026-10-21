@@ -1,0 +1,114 @@
+From ce8ccacd7c04d3765c61e68c92a18c0e0906a772 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 18:39:37 +0000
+Subject: [PATCH 132/149] [barreplay] P12 measurement: the projectile collision
+ pass's checks, candidates, hits and cycles per kind in the bench window (on
+ the bench line after P5's)
+
+---
+ rts/Net/NetCommands.cpp                   | 13 ++++++++++++-
+ rts/Sim/Projectiles/ProjectileHandler.cpp | 23 +++++++++++++++++++++++
+ 2 files changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 1aa95d5..b0dbbbe 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -9,6 +9,8 @@
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ int BrLuaGcStatsLine(char* buf, int size);
+ #include "Sim/Weapons/BrPipeTarget.h"
++void BrP12Reset();
++int BrP12BenchLine(char* buf, int size);
+ #include "Sim/Units/Scripts/BrCobPar.h"
+ #include <cstring>
+ #include <linux/perf_event.h>
+@@ -788,6 +790,7 @@ void CGame::ClientReadNet()
+ 						if (about == g_brBench.start) {
+ 							g_brBench.parkHere();
+ 							g_brBench.countersOn();
++							BrP12Reset(); // [barreplay] P12 measurement: the window's own
+ 						}
+ 						const long long t0 = brNowNs(CLOCK_THREAD_CPUTIME_ID);
+ 						const long long w0 = brNowNs(CLOCK_MONOTONIC);
+@@ -810,9 +813,17 @@ void CGame::ClientReadNet()
+ 							BrParAir::StatsLine(pline, sizeof(pline));
+ 							char gline[1024];
+ 							BrLuaGcStatsLine(gline, sizeof(gline));
+-							char p4line[1024], p5line[512];
++							char p4line[1024], p5line[768];
+ 							BrP4::BenchLine(p4line, sizeof(p4line));
+ 							BrP5::BenchLine(p5line, sizeof(p5line));
++							{
++								// [barreplay] P12 measurement, after P5's line
++								const size_t l = strlen(p5line);
++								const size_t nl = (l > 0 && p5line[l - 1] == '\n')? l - 1: l;
++								BrP12BenchLine(p5line + nl, int(sizeof(p5line) - nl));
++								const size_t l2 = strlen(p5line);
++								if (nl != l && l2 + 1 < sizeof(p5line)) { p5line[l2] = '\n'; p5line[l2 + 1] = 0; }
++							}
+ 							// the bench line last: bench-ckpt reads the result's last line
+ 							if (g_brBench.out) {
+ 								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x toggles2=%x toggles3=%x %s%s%s%s", g_brToggles, g_brToggles2, g_brToggles3, pline, gline, p4line, p5line); fputs(line, f); fclose(f); }
+diff --git a/rts/Sim/Projectiles/ProjectileHandler.cpp b/rts/Sim/Projectiles/ProjectileHandler.cpp
+index 1961b82..e77491f 100644
+--- a/rts/Sim/Projectiles/ProjectileHandler.cpp
++++ b/rts/Sim/Projectiles/ProjectileHandler.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "Projectile.h"
+ #include "ProjectileHandler.h"
++#include <x86intrin.h>
++#include <cstdio>
+ #include "ProjectileMemPool.h"
+ #include "Game/GameSetup.h"
+ #include "Game/GameVersion.h"
+@@ -569,12 +571,29 @@ void CProjectileHandler::CheckShieldCollisions(
+ 	}
+ }
+ 
++// [barreplay] P12 measurement: the collision pass in the bench window, per
++// kind (0 unsynced, 1 synced): projectiles checked, candidates the quad query
++// returned, checks that ended in a hit (the projectile stopped colliding or
++// was marked for deletion), the pass's cycles
++namespace {
++	struct BrP12Stats { long long checked[2] = {}, candidates[2] = {}, hits[2] = {}, cycles[2] = {}, passes = 0; } brP12;
++}
++void BrP12Reset() { brP12 = BrP12Stats(); }
++int BrP12BenchLine(char* buf, int size)
++{
++	return snprintf(buf, size, "[BR_P12] passes=%lld synced: checked=%lld candidates=%lld hits=%lld Mcyc=%.1f unsynced: checked=%lld candidates=%lld hits=%lld Mcyc=%.1f ",
++		brP12.passes, brP12.checked[1], brP12.candidates[1], brP12.hits[1], brP12.cycles[1] / 1e6,
++		brP12.checked[0], brP12.candidates[0], brP12.hits[0], brP12.cycles[0] / 1e6);
++}
++
+ void CProjectileHandler::CheckUnitFeatureCollisions(bool synced)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	static std::vector<CUnit*> tempUnits;
+ 	static std::vector<CFeature*> tempFeatures;
+ 	static std::vector<CPlasmaRepulser*> tempRepulsers;
++	const unsigned long long brT0 = __rdtsc();
++	brP12.passes += synced;
+ 
+ 	//can't use iterators here, because instructions inside the loop modify projectiles[synced]
+ 	for (size_t i = 0; i < projectiles[synced].size(); ++i) {
+@@ -588,11 +607,15 @@ void CProjectileHandler::CheckUnitFeatureCollisions(bool synced)
+ 		// const float3 ppos1 = p->pos + p->dir * (p->speed.w + p->radius);
+ 
+ 		quadField.GetUnitsAndFeaturesColVol(p->pos, p->speed.w + p->radius, tempUnits, tempFeatures, &tempRepulsers);
++		brP12.checked[synced] += 1;
++		brP12.candidates[synced] += tempUnits.size() + tempFeatures.size() + tempRepulsers.size();
+ 
+ 		CheckShieldCollisions (p, tempRepulsers, ppos0, ppos1); tempRepulsers.clear();
+ 		CheckUnitCollisions   (p, tempUnits    , ppos0, ppos1); tempUnits.clear();
+ 		CheckFeatureCollisions(p, tempFeatures , ppos0, ppos1); tempFeatures.clear();
++		brP12.hits[synced] += (!p->checkCol || p->deleteMe);
+ 	}
++	brP12.cycles[synced] += __rdtsc() - brT0;
+ }
+ 
+ void CProjectileHandler::CheckGroundCollisions(bool synced)
+-- 
+2.53.0
+

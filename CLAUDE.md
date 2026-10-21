@@ -20,7 +20,9 @@ go build ./cmd/insights         # build the game-summary backfill CLI (one repla
 go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go run ./cmd/publish-engine -data <BARdata>   # gate, strip and upload the patched engine build under <data>/engine/*/ to R2, then print the patchedBuilds pin to commit and the tag to push (hosts download it once the pin is merged; -dry = everything but the upload; -gate <gameIds> for a version with no default gate replay)
+go run ./cmd/publish-engine -data <BARdata> -windows <spring-headless.exe>   # the WINDOWS build of the same series (patches/engine-<ver>/windows/build.sh, MinGW cross-compile) for FogOfWar.exe: gated under Wine against the stock LINUX engine, uploaded to engines/<ver>/windows-amd64/, pinned in patchedBuildsWindows (needs wine64)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
+go run ./cmd/upload-maps <dir>   # upload the BAR team's high-res map PNGs to the replay bucket as maps/highres/<file name> (image/png; same-size objects skipped, so a rerun resumes; -j 8 at once, -dry lists only; R2 keys from ./.env)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
@@ -131,7 +133,14 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           the guarded GET /api/streams/<gameId>/<file> route (daemon->worker is
                           HTTPS only: no S3 reads, no inbound connectivity — runs behind NAT),
                           publishes via internal/packer under the stream's content-addressed
-                          revision (demo fetch falling back to the stream's own GAME metadata
+                          revision (an archived .brp is never repacked: it is fully decoded once
+                          as a check and given the demo's self-destruct orders and modoptions via
+                          packer.AddDemoOrders; WHOSE VIEW an upload of either kind is published
+                          under comes from its FRAMES, not its own claim — packer.ViewFromFrames
+                          counts the sides owning an identified unit in the first 10 s, when no
+                          side can have seen another yet: two or more = "full", one = "ally";
+                          with no opening frames a one-sided claim stands and a full one becomes
+                          "unknown" (packer.UploadView); the verdict rides jobStats.viewCheck) (demo fetch falling back to the stream's own GAME metadata
                           when the BAR API doesn't know the game), and reports done/error for
                           the browser to poll. -once drains the backlog and exits; jobs survive
                           daemon downtime as pending, stalled "processing" jobs are re-offered
@@ -230,7 +239,14 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           .brp, faster (measured 200 -> 248 fps on a 16-player 13-minute
                           game) and in ~1.5 GB less memory (RESULTS.md and MEMORY.md have
                           the two axes), which is why preferring it can be the default and
-                          why the capture cannot record which build made it. It lives beside the
+                          why the capture cannot record which build made it. From revision 5
+                          (2026.7.4-barreplay.5) the series also carries the whole speed work
+                          (patches/engine-<ver>/speed/, docs/engine-speed-plan.md), its switch
+                          words defaulting to the work's final setting (speed/0161;
+                          $BARREPLAY_TOGGLES/2/3 still override, 0 = off), built with the sync
+                          checker compiled out — so a re-sim on it ALWAYS reports 0 desyncs (see
+                          SummarizeInfolog) and the publish gate is the check — and for generic
+                          x86-64 like the release (docs/building-recoil.md "Revision 5"). It lives beside the
                           stock binary rather than in its own <version>-patched dir because
                           the engine resolves base/springcontent.sdz relative to its own
                           executable, so a separate dir would duplicate the whole base/ +
@@ -260,8 +276,15 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           not the bucket: a download that does not hash to it is refused
                           and never reaches the path Locate prefers (temp file + rename),
                           and a pin is added only for a binary that passed the gate, so
-                          the table is also the record of what was verified. A build
-                          already on the host (e.g. made locally) is never replaced.
+                          the table is also the record of what was verified. Any other
+                          patched binary already on the host — an EARLIER published build
+                          (PatchedBuild.Superseded, which only lets the log say which) or
+                          one made locally — is REPLACED with the pinned build, so every
+                          host runs the latest gated one (Marcin's call: update by default).
+                          -keep-patched-engine (engine.Config.KeepPatchedEngine) keeps it
+                          instead, e.g. while testing a fresh local build before its pin
+                          lands — without it the daemon would swap that build back for
+                          the older pinned one.
                           Missing is a WARNING, not a failure — only versions somebody
                           has patched, gated and published have a build, so a daemon
                           routinely meets versions nobody has patched and must still run
@@ -353,6 +376,16 @@ cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim 
                           whenever the widget or codec changes the capture. A failed gate
                           keeps both captures. Run from the repo root; it takes the data
                           dir's lock, so a bringest -resim on the same -data must be idle.
+                          -windows publishes the WINDOWS build of the series instead
+                          (windows.go; built by patches/engine-<ver>/windows/build.sh in
+                          Recoil's pinned MinGW image, plus windows/windows-series fixes):
+                          it installs the stock Windows release beside the native one
+                          (engine.EnsureWindowsEngine, <data>/engine/<ver>-windows-amd64),
+                          strips the exe into it and gates it UNDER WINE against the stock
+                          LINUX engine — byte-identical across platforms, the claim the
+                          volunteer pool rests on — through a wrapper that rewrites absolute
+                          unix paths to Z: (a bare /tmp/x write-dir makes the Windows build's
+                          archive scan find nothing). No PGO (the profile is Linux GCC data).
 internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the bash-sourceable
                           subset (`export FOO=bar`, # comments, optional surrounding quotes) so
                           ONE file works both auto-loaded and sourced. Already-set vars WIN (the
@@ -467,7 +500,8 @@ internal/engine/          locate spring-headless/pr-downloader, provision, launc
                           heuristics, not a parse of a grammar the engine promises, and the
                           desync count is the point: a re-simulation that desynced describes a
                           game that never happened and is indistinguishable from a good capture
-                          on disk. Best-effort like everything reading the engine's leavings —
+                          on disk. Except on a patched build from revision 5 on, which compiles
+                          the sync checker out and so has nothing to compare: its 0 says nothing. Best-effort like everything reading the engine's leavings —
                           a missing log yields a zero summary, never an error.
 internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: demo download
                           -> provision -> widget inject -> engine run -> .brp), for the ingest
@@ -1596,7 +1630,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           down the trail of cursors this visit came through (gamesTrail),
                           the pager states the range and NO total or page count; the cursors
                           are component state, not in the URL, and a backend that 404s
-                          the route is what the section says; open to every visitor, since
+                          the route is what the section says; the replay list's FILTER BAR
+                          moves over to it (placeFilters, Player hidden; the filters stay in
+                          the URL, so they carry between the two sections, and the replay
+                          list re-reads on the way back when they changed — listQuery; a map
+                          the catalog's datalist does not know applies as typed on Enter); open to every visitor, since
                           it is public games rather than the pipeline's state), "Queue"
                           (the ingest jobs, below) and "SQL" (the DO's row accounting).
                           Queue and SQL are ADMIN-ONLY — the entry is hidden when signed
@@ -1640,7 +1678,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           /admin/logout clears that cookie on any origin and is the
                           menu's sign-out entry (the admin's initial, the address in its
                           tooltip — the menu is 72px); signed out, the foot of the menu
-                          carries a muted sign-in entry (#adminnote), on every page. A 404 from /api/admin/me (a backend
+                          carries a muted sign-in entry (#adminnote), on every page. Just above
+                          it, a CREDITS entry (#railcredits) opens #creditsdialog (app.js
+                          initCredits): BAR's artwork and its licences, the open replay's map
+                          and its author (mapCredit, from the maps API record loadMap reads),
+                          the Recoil engine (GPL v2+) and where the patches' source is — keep
+                          it in step with internal/viz/bardata/README.md's licence list. A 404 from /api/admin/me (a backend
                           with no login and no admin routes) shows nothing and no admin
                           controls. Every admin fetch in app.js treats a
                           401 as adminSignedOut (controls off, sign-in link back). Why: app.js is served unminified, the
@@ -1822,8 +1865,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           replayList as the catalog — it is a filtered page — so any well-formed
                           id is attempted and loadReplay reports a real failure rather than
                           silently bouncing a shared link to the list.
-                          DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream to
-                          /api/upload (open endpoint; the Hono app lives in src/worker/app.ts, kept
+                          DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream OR an
+                          already-packed .brp to /api/upload (told apart by the first bytes, never the
+                          file name; a .brp's head is checked by src/worker/brphead.ts — magic, version
+                          5/6, the gzipped M meta's gameId and recorder — and archived the same way with
+                          a .brp extension, which is what tells bringest not to pack it) (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is
                           the wrangler entry re-exporting the DO class). The worker never transcodes
                           (viewer serves the .brp wire only; the Go pipeline produces it): it scans
@@ -2087,20 +2133,37 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           latest-ENDED first, KEYSET-paged — ?after=<endUnix>:<id> is the
                           order key of the previous page's last row (games.ts
                           encodeGamesCursor/parseGamesCursor; the reply's `next`, null on
-                          the last page) and the query resumes strictly after it. Both the
-                          ORDER BY and the cursor predicate repeat games_backfill_end's
-                          expression textually, so the planner seeks into the index and
-                          walks to the page edge — a page deep in the mirror costs the same
-                          as the first (rowcost.test.ts bounds both), where an OFFSET stepped
-                          over every row before it and shifted under a list that gains a
-                          game a minute. Two indexed queries: the dated walk (`expr <= end`,
-                          the shown tie rows filtered off; `IS NOT NULL` on the first page,
-                          or the DESC walk runs on into the undated rows the tail then
-                          repeats) and the undated tail (`expr IS NULL AND id > ?`, an
-                          equality seek), the tail only when the walk fell short. Each row
-                          is joined with whether a playable catalog row exists and the
-                          state of the game's last job, both seeks. No total and no count
-                          anywhere: `next` is read off one row more than the page shows.
+                          the last page) and the query resumes strictly after it. The order
+                          key is games.END_UNIX, a STORED column (start + duration, written
+                          by gamesInsert, backfilled by the schema-7 migration) rather than
+                          the expression it replaced, so it can lead the four (x, end_unix
+                          DESC, id) indexes the listing walks: games_end (the plain listing
+                          and every walk below), games_map_end, games_count_end and
+                          games_durmin_end (on duration_sec / 60). A page deep in the
+                          mirror costs the same as the first (rowcost.test.ts bounds it),
+                          where an OFFSET stepped over every row before it and shifted under
+                          a list that gains a game a minute. Games with no start (none
+                          observed) are not listed. Each row is joined with whether a
+                          playable catalog row exists and the state of the game's last job,
+                          both seeks. No total and no count anywhere: `next` is read off one
+                          row more than the page shows.
+                          FILTERS (the Games page's bar, the replay list's own, moved there
+                          by app.js placeFilters): from/to on END time, map (exact),
+                          min/maxPlayers, min/maxDuration, idPrefix (?id= is fetch-by-ids
+                          below), settings — parsed by the same parseReplayFilter. NO player
+                          name: the mirror's rosters are indexed nowhere (see ROW BUDGET).
+                          gamesPage DRIVES the walk from the most selective index the filter
+                          names — the PK range for an id prefix of 4+ characters, else
+                          games_map_end, else ONE seek per player count (lo..32 plus a "> 32"
+                          branch) or per duration minute (lo..90 plus "> 90"), merged by end
+                          — and checks everything else row by row. Settings chips are such a
+                          per-row check (an EXISTS on replay_settings' covering index), never
+                          a driver: the common flags hold most games, and a rare one (lava
+                          ~2%) is too sparse to drive by end order without sorting all its
+                          rows. A walk stops after GAMES_SCAN_MAX = 2000 rows; when that cut
+                          it short before the page filled, the reply says `partial: true`
+                          and `next` resumes past what was searched, so the page reads "Next
+                          keeps looking" instead of a short page passing for the end.
                           FETCH-BY-IDS: ?id=<id>[,<id>...] (up to 100 ids) answers exactly
                           the named games instead of a listing page (ReplayIndex.gamesByIds:
                           chunked IN() PK seeks with the same per-row joins, rows in asked
@@ -2701,7 +2764,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           three were lava-map team games, the same thing to a spectator.
                           8v8 is the game_size SPEC, not player_count=16 (a 4v4v4v4 FFA is
                           16 players too). No ranking beyond recency inside it: every 8v8
-                          is sixteen players. The walk is games_backfill_end stopped at the
+                          is sixteen players. The walk is games_end stopped at the
                           window's edge, so it costs a DAY of BAR's output (~2200 rows,
                           measured; rowcost.test.ts bounds it) whatever the mirror has
                           grown to — a seek through every lava game ever mirrored would
@@ -2714,6 +2777,25 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           than jobsPending; its OWN meta key (lava_after), so neither
                           scan's rest can silence the other. Only the empty answer rests,
                           for the same reason as below.
+                          LAVA ORDERING (Marcin, 2026-10-17: lava first, NEWEST first): a
+                          resim poll's pending list is reordered with its 8v8 lava jobs at the
+                          head, latest-ENDED first (lavaEnds), and the lava lookup runs even
+                          when work is pending, jumping that list when its game ended later
+                          than every queued lava game. The daemon runs ONE job per poll
+                          (runQueued returns after it; the loop re-polls at once), so a lava
+                          game that ends while another runs is what the next poll gets.
+                          LAVA RETRIES (lavaRetryCandidate, after the pending list, before the
+                          ranked window): a failed job is never re-offered by the scans, which
+                          lost every lava 8v8 that ran out of memory on the 8 GB host (19 of
+                          29 uncaptured in four days; the other 10 were the pre-1.11.1 widget
+                          sandbox). The resim poll carries ?mem=<host RAM> (bringest, from
+                          hostinfo), and a lava 8v8 whose jobs are all failures (none active,
+                          done or disabled), with no catalog row, is offered again when it
+                          ran out of memory and no host with >= this RAM ever did on it
+                          (stats.host.memBytes; none = 0). No other failure is retried
+                          automatically (Marcin's call). Walks the jobs_failed partial index over two weeks
+                          (LAVA_RETRY_WINDOW_SEC), rests 5 min per GiB size on the empty
+                          answer; a poll without ?mem= gets no retries.
                           THEN the ranked window: of the BACKFILL_WINDOW=200 most recently ENDED
                           eligible ones, the one
                           that is MODDED, and failing that the one with the MOST PLAYERS —
@@ -2757,14 +2839,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           none) is neither refused nor preferred; it ranks by size, as it did
                           before. And the scan is
                           cheap because it STOPS EARLY, not because it looks at a slice, and
-                          because games_backfill_end — an EXPRESSION index on
-                          ((start_unix + COALESCE(duration_sec, 0)) DESC, id, player_count),
-                          which the ORDER BY must match TEXTUALLY or the planner sorts the
-                          whole mirror into a temp b-tree (the rowcost test guards this) —
+                          because games_end — an index on (end_unix DESC, id, player_count),
+                          end_unix being the stored end time (it replaced games_backfill_end,
+                          an EXPRESSION index on start + duration that the ORDER BY had to
+                          match textually) —
                           COVERS exactly what the walk reads, so it never touches the games
-                          table and its id tiebreak needs no sort (it replaced the
-                          start-ordered games_backfill, which itself replaced games_start). It
-                          walks games_backfill_end latest-ended-first and quits at the 200th
+                          table and its id tiebreak needs no sort (the rowcost test guards
+                          that the planner never sorts the mirror into a temp b-tree). It
+                          walks games_end latest-ended-first and quits at the 200th
                           candidate, which on a mirror no host can keep up with is the first
                           two hundred rows
                           it touches. The distinction is the design. A fixed window over the
@@ -3287,7 +3369,9 @@ run dev` in `worker/` plus `pack -upload local`.)
   frame from chunk.frame + k*sampleEvery is wrong wherever a capture skipped a
   sample (the harness fixture does). The lockstep is pinned by
   worker/tests/fixtures/viewer.brp + viewer.economy.json, written by internal/viz's
-  `TestViewerFixtureUpToDate` (regenerate with `-update`) and decoded by app.js's
+  `TestViewerFixtureUpToDate` (regenerate with `-update`; when the bytes differ it
+  compares CONTENT — decoded meta and gunzipped sections — because compress/flate's
+  output changes between Go releases while the format does not) and decoded by app.js's
   own functions in worker/tests/appjs.test.ts. OLDER replays (no `.brp` — the first
   read 404s) are read as they always were: `/replays/<id>.brw` is a small binary
   **"BRW1" container** of a gzipped `J` head JSON (exactly what `headFromBrp`
@@ -3744,6 +3828,16 @@ run dev` in `worker/` plus `pack -upload local`.)
   (only the demo startscript path does), so a `.brp` packed from a raw `.brepstream` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
+  HIGH-RES TERRAIN: once the API texture is up, loadMap also asks the CDN
+  hostname (`HIGHRES_MAP_ORIGIN`: the data origin, or cdn-bar under `vite dev`,
+  since only the production bucket has them) for `maps/highres/<name>_<W>x<H>.png` (the BAR team's images, uploaded
+  by cmd/upload-maps) and swaps it in when it arrives; a 404 keeps the API
+  texture. The key is computed, never looked up (`highResMapFile`): the map name
+  exactly as the startscript spells it (R2 is case-sensitive) with spaces as
+  `_`, and the size from the map record already fetched: 4096 on the long side,
+  the short side scaled to the aspect and rounded DOWN to a multiple of 4
+  (checked against every uploaded file). `mapTexGen` is in the base layer's
+  repaint key, since a texture swap changes nothing else in it.
 - **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
   framework, no build step for the app itself** (Vite only wraps it for the Cloudflare
   deploy). `app.js` reads the flat unit arrays by index (no per-unit objects), renders
@@ -3902,7 +3996,7 @@ in a systemd scope. A checkpoint restores only into the binary that made it
 (dump each build once). Nothing else may run an engine meanwhile (the restored
 one needs its UDP port back, and a trial copies its files into the data dir).
 Benchmark: "verylarge1" = 6a37d06acbb455b1d19179d8ec965f10 at frame 63780.
-The work log is docs/worklog-engine-speed.md; revision 3's PGO+LTO build recipe
+The work log is docs/worklog-engine-speed.md; the PGO+LTO build recipe
 is patches/engine-2026.07.04/pgo/ (docs/building-recoil.md). Other options:
 PERF= (perf record), PERFSTAT= (perf stat per thread), LUAPROF=1 (the Lua
 sampling profiler of a measurement build), MAINCPU=/OTHERCPUS= (pinning),
@@ -4133,13 +4227,15 @@ median/max distinction is moot, so this is a free ~+25% ceiling). Consequences: 
 idles ~40%/~25% of wall time by design, and whenever the client outruns the feed its
 packet queue starves, `ClientReadNet` returns empty-handed, and the main loop spins full
 `UpdateUnsynced`+`Draw` passes (the heartbeat `draws=` counter exposes this: hundreds of
-draws/s late game despite `MinDrawFPS=1`). Fully removing the governor (pin
-`internalSpeed` to `userSpeedFactor` when a demo is being read) needs a small engine
-patch — sync-safe, since pacing changes only when pre-recorded packets are released,
-never their content — and is the main remaining speed lever (~25-35% at the 60% target).
+draws/s late game despite `MinDrawFPS=1`). The PATCHED engine removes the governor:
+`patches/engine-2026.07.04/0001-demo-unpaced-playback.patch` releases a demo's packets
+at the client's consumption rate instead of `internalSpeed`'s pace — sync-safe, since
+pacing changes only when pre-recorded packets are released, never their content
+(measured +35% sim fps on an 8v8, sim 93% of wall). A stock engine still runs governed.
 
 ## Conventions / gotchas
 
+- LICENSING: the repo is MIT (LICENSE), `patches/` is GPL-2.0-or-later (patches/LICENSE, it derives from Recoil), `internal/viz/bardata/` keeps BAR's licences — LICENCE_NOTICE says which is which, and the Credits dialog repeats it.
 - Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only).
 - Unit-def internal names (`armcom`, `corllt`, …) and side names (`armada`, `cortex`)
   have no spaces — the preamble `T` parser relies on that.

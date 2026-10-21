@@ -102,9 +102,9 @@ func TestEnsurePatchedEngineRefusesAWrongHash(t *testing.T) {
 	}
 }
 
-func TestEnsurePatchedEngineKeepsAnExistingBuild(t *testing.T) {
+func TestEnsurePatchedEngineReplacesALocalBuild(t *testing.T) {
 	binary := []byte("published")
-	hits := servePatched(t, binary, sha(binary))
+	servePatched(t, binary, sha(binary))
 	dataDir, engineDir := stockInstall(t)
 	local := filepath.Join(engineDir, patchedHeadlessName())
 	if err := os.WriteFile(local, []byte("built here"), 0o755); err != nil {
@@ -114,11 +114,48 @@ func TestEnsurePatchedEngineKeepsAnExistingBuild(t *testing.T) {
 	if err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir}, testVersion); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(local); string(got) != "built here" {
-		t.Errorf("a locally built patched engine was replaced with %q", got)
+	if got, _ := os.ReadFile(local); string(got) != string(binary) {
+		t.Errorf("a patched engine other than the pinned build was kept: %q", got)
+	}
+}
+
+func TestEnsurePatchedEngineKeepPatchedEngine(t *testing.T) {
+	binary := []byte("published")
+	hits := servePatched(t, binary, sha(binary))
+	old := []byte("published rev 1")
+	b := patchedBuilds[testVersion]
+	b.Superseded = []string{sha(old)}
+	patchedBuilds[testVersion] = b
+	for _, have := range [][]byte{[]byte("built here"), old} {
+		dataDir, engineDir := stockInstall(t)
+		local := filepath.Join(engineDir, patchedHeadlessName())
+		if err := os.WriteFile(local, have, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir, KeepPatchedEngine: true}, testVersion); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(local); string(got) != string(have) {
+			t.Errorf("KeepPatchedEngine replaced %q with %q", have, got)
+		}
 	}
 	if hits.Load() != 0 {
-		t.Errorf("made %d requests with a build already installed", hits.Load())
+		t.Errorf("made %d requests with KeepPatchedEngine", hits.Load())
+	}
+}
+
+func TestEnsurePatchedEngineLeavesTheCurrentBuild(t *testing.T) {
+	binary := []byte("published")
+	hits := servePatched(t, binary, sha(binary))
+	dataDir, engineDir := stockInstall(t)
+	if err := os.WriteFile(filepath.Join(engineDir, patchedHeadlessName()), binary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir}, testVersion); err != nil {
+		t.Fatal(err)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("made %d requests with the pinned build installed", hits.Load())
 	}
 }
 
@@ -174,5 +211,13 @@ func TestEnsurePatchedEngineNeedsTheStockInstall(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Errorf("downloaded before checking for the stock install")
+	}
+}
+
+func TestPatchedBuildKeyWindows(t *testing.T) {
+	got := PatchedBuildKeyWindows("2026.07.04", 3)
+	want := "engines/2026.07.04/windows-amd64/spring-headless-patched-2026.7.4-barreplay.3.exe.gz"
+	if got != want {
+		t.Errorf("PatchedBuildKeyWindows = %q, want %q", got, want)
 	}
 }

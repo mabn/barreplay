@@ -1229,6 +1229,8 @@ const growIcons = true;      // grow a building's icon toward its footprint when
 const autoTeamColors = false; // true: distinct auto colours per team; false: the real in-game team colours from the replay
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
+let mapCredit = null;      // {name, author} of the open replay's map, for the credits dialog
+let mapTexGen = 0;         // bumped whenever mapTex changes (the base layer's repaint key)
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
 // viewW*DPR x viewH*DPR and the context is pre-scaled by DPR, so all drawing is
 // done in CSS px while staying crisp on HiDPI displays.
@@ -2405,7 +2407,7 @@ function draw() {
     const b = data.bounds;
     const key = loadGen + ',' + dispIdx + ',' + scale + ',' + center.x + ',' + center.z + ',' +
       viewW + ',' + viewH + ',' + DPR + ',' + showTexture + ',' + showGrid + ',' + showFootprints + ',' +
-      (mapTex && mapTex.complete ? 1 : 0) + ',' + mapW + ',' + mapH + ',' + colorGen + ',' +
+      (mapTex && mapTex.complete ? mapTexGen : 0) + ',' + mapW + ',' + mapH + ',' + colorGen + ',' +
       b.minX + ',' + b.maxX;
     if (key === lastBaseKey) { updateTooltip(); return; }
     lastBaseKey = key;
@@ -4815,15 +4817,44 @@ async function resolveMapFile(name, gameId) {
   return (await res.json()).Map || null;
 }
 
+// The high-res map images live only in the production bucket, so they are
+// always read from its CDN hostname — also under `vite dev`, whose data origin
+// is the local simulator bucket. Its CORS policy (r2-cors.json) lists the dev
+// server's origins.
+const HIGHRES_MAP_ORIGIN = DATA_BASE || 'https://cdn-bar.fogofwar.dev';
+
+// highResMapFile names the BAR team's high-res image of a map in the bucket
+// (maps/highres/, uploaded by cmd/upload-maps), or '' when it cannot be named.
+// The files are "<map name, spaces as _>_<W>x<H>.png": the name exactly as the
+// startscript spells it (R2 keys are case-sensitive, and it is the API's
+// scriptName too), and the image's size, 4096 on the long side and the short
+// side scaled to the map's aspect, rounded DOWN to a multiple of 4. Checked
+// against all 124 uploaded files: every one the API knows matches. Nothing is
+// asked to find it — the size comes from the map record loadMap already has —
+// so a map with no image costs one cached 404 on the data origin.
+function highResMapFile(name, mapUnitsW, mapUnitsH) {
+  if (!name || !(mapUnitsW > 0) || !(mapUnitsH > 0)) return '';
+  const long = Math.max(mapUnitsW, mapUnitsH);
+  const side = (u) => u === long ? 4096 : Math.floor(Math.floor(4096 * u / long) / 4) * 4;
+  return name.trim().replace(/ /g, '_') + '_' + side(mapUnitsW) + 'x' + side(mapUnitsH) + '.png';
+}
+
 // Fetch this replay's map extent + terrain texture straight from the BAR maps
 // API, using the map name stored in the capture's meta. Best-effort: if the
 // map is unknown or the API unreachable, the viewer just keeps the plain
 // background (and falls back to unit bounds for the field extent).
+//
+// The API's texture (1-2 MB) is drawn first; when the bucket holds the
+// high-res image of the map (highResMapFile, ~20 MB) it replaces that once it
+// has downloaded, and a missing one simply leaves the API's texture in place.
 async function loadMap(name, gameId) {
   const gen = loadGen; // ignore responses if the user switched replays mid-fetch
   mapW = mapH = 0;
   mapTex = null;
+  mapCredit = name ? { name, author: '' } : null;
+  mapTexGen++;
   let file = mapFileGuess(name);
+  let hiRes = '';
   try {
     const info = await resolveMapFile(name, gameId);
     if (gen !== loadGen) return;
@@ -4831,15 +4862,55 @@ async function loadMap(name, gameId) {
       file = info.fileName || file;
       mapW = (info.width || 0) * MAP_ELMOS_PER_UNIT;
       mapH = (info.height || 0) * MAP_ELMOS_PER_UNIT;
+      const mapName = info.scriptName || info.name || name;
+      if (mapName) mapCredit = { name: mapName, author: info.author || '' };
+      hiRes = highResMapFile(name || info.scriptName, info.width, info.height);
     }
   } catch (_) { /* offline/unknown: keep unit-bounds extent, still try the texture */ }
   if (gen !== loadGen || !file) return;
+  let hiResShown = false;
   const img = new Image();
   img.crossOrigin = 'anonymous'; // the API sends CORS headers; keeps the canvas untainted
-  img.onload = () => { if (gen !== loadGen) return; mapTex = img; draw(); };
+  img.onload = () => { if (gen !== loadGen || hiResShown) return; mapTex = img; mapTexGen++; draw(); };
   img.onerror = () => { /* no texture for this map: keep the plain background */ };
   img.src = MAP_API + '/maps/' + encodeURIComponent(file) + '/texture-mq.jpg';
+  if (hiRes) {
+    const hi = new Image();
+    hi.crossOrigin = 'anonymous'; // the bucket's CORS policy allows the viewer's origins
+    hi.onload = () => { if (gen !== loadGen) return; hiResShown = true; mapTex = hi; mapTexGen++; draw(); };
+    hi.onerror = () => { /* no high-res image of this map: keep the API's texture */ };
+    hi.src = HIGHRES_MAP_ORIGIN + '/maps/highres/' + encodeURIComponent(hiRes);
+  }
   draw(); // reflect the (possibly updated) map extent immediately
+}
+
+// initCredits wires the menu's Credits entry to its dialog. The dialog's text
+// is static (index.html) except for the line naming the open replay's map and
+// who made it, filled in each time it opens. Closes on ✕, Escape (native) and
+// a backdrop click, like the lavabalance preview.
+function initCredits() {
+  const dialog = document.getElementById('creditsdialog');
+  const button = document.getElementById('railcredits');
+  if (!dialog || !button) return;
+  button.addEventListener('click', () => {
+    const line = document.getElementById('creditsmap');
+    const onReplay = document.body.classList.contains('replay-page');
+    if (line && onReplay && mapCredit) {
+      line.textContent = 'This replay: ' + mapCredit.name;
+      if (mapCredit.author) {
+        const who = document.createElement('span');
+        who.className = 'who';
+        who.textContent = ' by ' + mapCredit.author;
+        line.append(who);
+      }
+      line.style.display = '';
+    } else if (line) {
+      line.style.display = 'none';
+    }
+    dialog.showModal();
+  });
+  document.getElementById('creditsclose').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', (ev) => { if (ev.target === dialog) dialog.close(); });
 }
 
 // Render-smoothness FPS monitor. Fully self-contained: when enabled (?debug, any value)
@@ -4944,11 +5015,24 @@ function setFilter(key, value) {
 }
 
 let reloadSeq = 0;
+// The filters the replay list was last read with: a filter changed on the
+// Games section (the bar is shared) leaves the list stale, and applyHomeTab
+// re-reads it on the way back.
+let listQuery = '';
 // keepPage is for the pager itself; every other caller is a filter change,
 // and staying on page 4 of a listing that just became something else would
 // show an empty table for no visible reason.
 async function reloadList(keepPage) {
+  // The bar also filters the Games section (applyHomeTab moves it there),
+  // whose listing is cursor-paged: a filter change starts it over.
+  if (homeTab() === 'games') {
+    gamesAfter = null; gamesNext = null; gamesBefore = 0; gamesTrail = [];
+    listQuery = null; // the replay list is re-read when it is next shown
+    refreshGames();
+    return;
+  }
   if (!keepPage) homePage = 0;
+  listQuery = filterQuery();
   const seq = ++reloadSeq;
   try {
     const page = await fetchReplayList();
@@ -5064,6 +5148,17 @@ async function initFilters() {
       const pick = exact ?? (holding.length === 1 ? holding[0] : null);
       if (pick) setFilter('map', pick);
     }, 300);
+  };
+  // The datalist is the CATALOG's maps; the games mirror holds many more
+  // (every map BAR played), so on the Games section a typed name the list
+  // cannot resolve still applies, as typed, once it is committed (Enter or
+  // leaving the field).
+  mapIn.onchange = () => {
+    if (homeTab() !== 'games') return;
+    clearTimeout(mapTyping);
+    const v = mapIn.value.trim();
+    const exact = knownMaps.find(m => m.toLowerCase() === v.toLowerCase());
+    setFilter('map', exact ?? v);
   };
 
   // Players: a range with two thumbs. Both bounds are one gesture — drag the
@@ -5495,6 +5590,34 @@ function applyHomeTab() {
   // The Games section likewise reads when opened (the mirror gains a game a
   // minute, so a page shown an hour ago is stale), staying on its page.
   if (tab === 'games') refreshGames();
+  placeFilters(tab);
+  if (tab === 'replays' && listQuery !== filterQuery()) reloadList();
+}
+
+// placeFilters moves the one filter bar into the section shown: the replay
+// list and the games mirror share it, and its state, which lives in the URL,
+// carries from one to the other. The Player field is the one control the
+// games listing does not take (its rosters are indexed nowhere).
+function placeFilters(tab) {
+  const box = document.getElementById('filters');
+  if (!box) return;
+  const host = document.getElementById(tab === 'games' ? 'tab-games' : 'tab-replays');
+  if (box.parentElement !== host) host.insertBefore(box, host.firstChild);
+  document.getElementById('f_playerfilter').style.display = tab === 'games' ? 'none' : '';
+  if (tab === 'games') document.getElementById('f_count').textContent = '';
+}
+
+// gamesQuery is the filter bar's state as GET /api/games takes it: the game
+// id is a PREFIX there under idPrefix (?id= names whole games to fetch), and
+// a player name is not a filter it offers.
+function gamesQuery() {
+  const q = new URLSearchParams(filterQuery());
+  q.delete('player');
+  const id = q.get('id');
+  q.delete('id');
+  if (id) q.set('idPrefix', id);
+  const s = q.toString();
+  return s ? '&' + s : '';
 }
 
 function initHomeNav() {
@@ -5750,6 +5873,7 @@ function statsLines(j, s) {
   add('Packed in', s.packSec ? fmtDur(s.packSec) : null);
   add('Uploaded in', s.uploadSec ? fmtDur(s.uploadSec) : null);
   add('.brp', s.brpBytes ? fmtSize(s.brpBytes) : null);
+  add('View check', s.viewCheck);
   add('Total', s.tookSec ? fmtDur(s.tookSec) : null);
   // WHAT made it: the daemon binary, the widget build, the .brp format.
   if (s.bringest) {
@@ -6247,6 +6371,8 @@ let gamesBefore = 0;         // rows on the pages before this one, for the range
 let gamesTrail = [];         // [{after, before}] of the pages Prev returns to
 let gamesSeq = 0;            // ignore a reply overtaken by a newer request
 let gamesSupported = true;   // cleared by a 404: a backend won't grow the route
+let gamesPartial = false;    // the reply stopped searching before filling the page
+let gamesFiltered = false;   // the shown page was read with filters
 // lavabalance (the sibling LOS-ratings worker) takes a game as the verbatim
 // BAR API replay detail, POSTed to this URL; the admin LOS button on each
 // row previews exactly that (previewLavabalance below).
@@ -6259,10 +6385,23 @@ async function refreshGames() {
   let page;
   try {
     const after = gamesAfter ? `&after=${encodeURIComponent(gamesAfter)}` : '';
-    const r = await fetch(`/api/games?limit=${GAMES_PAGE}${after}`);
+    const filters = gamesQuery();
+    gamesFiltered = filters !== '';
+    const r = await fetch(`/api/games?limit=${GAMES_PAGE}${after}${filters}`);
     if (r.status === 404 || r.status === 405) {
       gamesSupported = false;
       renderGames(GAMES_UNSUPPORTED);
+      return;
+    }
+    if (r.status === 400 || r.status === 503) {
+      // 400: a malformed filter. 503: the catalog cannot filter yet (an older
+      // build mid-deploy) — said, rather than listing games that do not match.
+      const body = await r.json().catch(() => null);
+      if (seq !== gamesSeq) return;
+      gamesRows = [];
+      gamesNext = null;
+      const why = (body && body.error) || `HTTP ${r.status}`;
+      renderGames(r.status === 400 ? 'Invalid filter: ' + why : 'Could not filter the games: ' + why);
       return;
     }
     if (!r.ok) { renderGames(`Could not read the games: HTTP ${r.status}`); return; }
@@ -6275,6 +6414,7 @@ async function refreshGames() {
   if (seq !== gamesSeq) return; // a newer read already went out
   gamesRows = page.games;
   gamesNext = typeof page.next === 'string' && page.next ? page.next : null;
+  gamesPartial = page.partial === true && !!gamesNext;
   renderGames();
 }
 
@@ -6650,9 +6790,19 @@ function renderGames(errMsg) {
     document.getElementById('g_prev').disabled = gamesTrail.length === 0;
     document.getElementById('g_next').disabled = !gamesNext;
   }
-  msg.style.display = rows.length ? 'none' : '';
-  if (!rows.length) msg.textContent = gamesRows === null ? 'Reading the mirror…'
-    : 'The mirror is empty — the worker\'s cron has not recorded a game yet.';
+  const filtered = gamesFiltered;
+  // A PARTIAL page: the worker stopped searching before the page filled (a
+  // rare filter, see ReplayIndex.gamesPage), so a short page is not the end —
+  // Next carries on from where it stopped.
+  const text = gamesRows === null ? 'Reading the mirror…'
+    : gamesPartial
+      ? (rows.length ? 'Searched part of the mirror for these filters — Next keeps looking further back.'
+        : 'Nothing matching yet in this stretch of the mirror — Next keeps looking further back.')
+      : rows.length ? ''
+        : filtered ? 'No games match these filters.'
+          : 'The mirror is empty — the worker\'s cron has not recorded a game yet.';
+  msg.textContent = text;
+  msg.style.display = text ? '' : 'none';
 }
 
 // fillProgressCell renders a running job's live self-report into the Detail
@@ -7137,7 +7287,7 @@ function renderQueue(errMsg) {
   }
 
   const text = errMsg || (rows.length ? '' :
-    'Nothing in the queue. Drop a .brepstream above, or paste a replay link to re-simulate one nobody uploaded, and it shows up here until a daemon has published it.');
+    'Nothing in the queue. Drop a .brepstream or .brp above, or paste a replay link to re-simulate one nobody uploaded, and it shows up here until a daemon has published it.');
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -7558,7 +7708,7 @@ function renderHome(errMsg) {
       ? 'Nothing on this page any more — go back a page.'
       : filtered
         ? 'No replays match these filters.'
-        : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
+        : 'No replays yet. Drop a .brepstream or .brp above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -7753,7 +7903,7 @@ function settingsBadges(settings) {
 }
 
 // ---- drag&drop publishing --------------------------------------------------
-// A dropped .brepstream POSTs to /api/upload; the worker archives it and
+// A dropped .brepstream or .brp POSTs to /api/upload; the worker archives it and
 // records an ingest job, the Go daemon publishes it, and we poll the job
 // until the replay is ready to open. The same front-end also runs against
 // backends without the upload API (a plain static host) — there the attempt
@@ -8569,6 +8719,7 @@ async function init() {
   initQueue();   // the queue's pager buttons (it reads on demand only)
   initResim();   // the queue's "re-simulate this replay" box
   initLavabalanceDialog();   // the Games rows' LOS upload preview
+  initCredits();             // the menu's Credits entry
   initUpload(); // the dropzone works without the catalog being loaded
   initReplayTabs(); // Replay / Summary on a replay page, and the clip player
   initEmbedClip();  // ?embed=clip: the clip player alone, framed by another site

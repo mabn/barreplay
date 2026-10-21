@@ -1,0 +1,244 @@
+From 18a95c8d3efed4f68e76ee697ef1746af5457829 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 00:33:42 +0000
+Subject: [PATCH 152/156] [barreplay] W8: the capture widget's damage drain in
+ the engine (DrainLoggedDamageColumns / TakeLoggedDamageColumns)
+
+luaprof63: the widget's recordHitAt and drainDamage loop are 0.48% of the
+main thread in the late window (each death drains the log, so the per-hit
+Lua work runs from inside UnitDestroyed). DrainLoggedDamageColumns runs that
+loop here over the logged hits and keeps an H record's columns;
+TakeLoggedDamageColumns hands them over packed. Each value takes the Lua
+path's steps: the logged double becomes a lua_Number (float), then the
+widget's comparisons, clamps and floor(v + 0.5) in float, and VFS.Pack*'s
+static_cast. A drain stops when the columns hold cap hits (the widget's
+60000-hit flush), and the columns are dropped when the damage log is switched.
+Widget 1.13.1 feature-detects both (barreplay repo).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Lua/LuaEngineEventLog.cpp | 159 ++++++++++++++++++++++++++++++++++
+ rts/Lua/LuaEngineEventLog.h   |   2 +
+ 2 files changed, 161 insertions(+)
+
+diff --git a/rts/Lua/LuaEngineEventLog.cpp b/rts/Lua/LuaEngineEventLog.cpp
+index dad7ed1..6cfb3dd 100644
+--- a/rts/Lua/LuaEngineEventLog.cpp
++++ b/rts/Lua/LuaEngineEventLog.cpp
+@@ -23,6 +23,8 @@
+ #include "System/EventHandler.h"
+ #include "System/Threading/ThreadPool.h"
+ 
++#include <cstring>
++#include <string>
+ #include <vector>
+ 
+ namespace {
+@@ -57,6 +59,22 @@ struct ValueLog {
+ 	}
+ };
+ 
++// [barreplay] W8: the hits DrainLoggedDamageColumns has moved out of the
++// damage log, as an H record's columns (see there)
++struct BrHitCols {
++	std::vector<uint16_t> df, v, vd, x, z, a, ad, w, po;
++	std::vector<uint8_t> vt, at, pt, fl;
++	std::vector<float> d, hp;
++	size_t size() const { return df.size(); }
++	void clear() {
++		for (auto* c: {&df, &v, &vd, &x, &z, &a, &ad, &w, &po}) c->clear();
++		for (auto* c: {&vt, &at, &pt, &fl}) c->clear();
++		d.clear();
++		hp.clear();
++	}
++};
++BrHitCols brHits;
++
+ // projectileOwnerTeam reads the shooter off the projectile: the engine names
+ // the attacker from the projectile's owner, which is gone once the shooter
+ // died, while the projectile still knows who fired it.
+@@ -228,6 +246,8 @@ bool LuaEngineEventLog::PushEntries(lua_State* L)
+ 	REGISTER_LUA_CFUNC(GetUnitSampleData);
+ 	REGISTER_LUA_CFUNC(GetUnitSampleDelta);
+ 	REGISTER_LUA_CFUNC(GetLoggedReloads);
++	REGISTER_LUA_CFUNC(DrainLoggedDamageColumns);
++	REGISTER_LUA_CFUNC(TakeLoggedDamageColumns);
+ 	return true;
+ }
+ 
+@@ -235,6 +255,7 @@ void LuaEngineEventLog::Reset()
+ {
+ 	setRegistered(explosionLog(), explosionLog()->log, false);
+ 	setRegistered(damageLog(), damageLog()->log, false);
++	brHits.clear(); // [barreplay] W8
+ 	g_brReloadLogOn = false;
+ 	g_brReloadLog.clear();
+ 	g_brReloadLog.shrink_to_fit();
+@@ -252,6 +273,7 @@ int LuaEngineEventLog::SetEngineEventLog(lua_State* L)
+ {
+ 	setRegistered(explosionLog(), explosionLog()->log, luaL_optboolean(L, 1, false));
+ 	setRegistered(damageLog(), damageLog()->log, luaL_optboolean(L, 2, false));
++	brHits.clear(); // [barreplay] W8: a buffer from before the switch belongs to nobody
+ 	g_brReloadLogOn = luaL_optboolean(L, 3, false) && CLuaHandle::GetHandleFullRead(L);
+ 	if (!g_brReloadLogOn) {
+ 		g_brReloadLog.clear();
+@@ -324,6 +346,143 @@ int LuaEngineEventLog::GetLoggedDamage(lua_State* L)
+ }
+ 
+ 
++/***
++ * [barreplay] W8: the capture widget's damage drain (engineLog.drainDamage
++ * and recordHitAt in assets/lua/replay_uploader.lua) run in C++ over the
++ * logged hits, which stay here as an H record's columns instead of becoming
++ * Lua tables. Each value takes the path the Lua one does: the double the log
++ * holds becomes a lua_Number (float, as lua_pushnumber makes it), then the
++ * widget's comparisons, clamps and floor(v + 0.5) in float, and VFS.Pack*'s
++ * static_cast makes the bytes; so the H records come out byte for byte.
++ *
++ * DrainLoggedDamageColumns(hitStart, cap) -> added, full, dropped, seen,
++ *   namedAttacker, namedWeapon, engineCause, fromProjectile
++ *     moves the logged hits into the columns until they hold cap hits (full:
++ *     the widget writes the window, as recordHitAt does at its 60000th hit,
++ *     and drains again with the new window start)
++ * TakeLoggedDamageColumns() -> string
++ *     the columns df..hpAfter of the buffered hits, packed; empties them
++ *
++ * @function Spring.DrainLoggedDamageColumns
++ */
++namespace {
++	// the widget's id16, team8, clamp, pos16 and weaponCode on lua_Numbers
++	inline float BrId16(float v) { return (v >= 0.0f && v < 65535.0f) ? v : 65535.0f; }
++	inline float BrTeam8(float v) { return (v >= 0.0f && v < 255.0f) ? v : 255.0f; }
++	inline float BrClampF(float v, float lo, float hi) { if (v < lo) return lo; if (v > hi) return hi; return v; }
++	inline float BrPos16(float v) { return BrClampF(math::floor(v + 0.5f), 0.0f, 65535.0f); }
++	inline float BrWeaponCode(float w) {
++		if (w >= 0.0f && w < 65535.0f - 7.0f)
++			return w;
++		if (w < 0.0f && w >= -7.0f)
++			return 65535.0f + w;
++		return 65535.0f;
++	}
++
++	template <typename T>
++	void BrAppendColumn(std::string& out, const std::vector<T>& col) {
++		const size_t at = out.size();
++		out.resize(at + col.size() * sizeof(T));
++		if (!col.empty())
++			memcpy(&out[at], col.data(), col.size() * sizeof(T));
++	}
++}
++
++int LuaEngineEventLog::DrainLoggedDamageColumns(lua_State* L)
++{
++	if (!CLuaHandle::GetHandleFullRead(L))
++		return 0;
++
++	ValueLog& log = damageLog()->log;
++	const float hitStart = lua_tonumber(L, 1);
++	const size_t cap = size_t(std::max(1, luaL_optint(L, 2, 60000)));
++	const size_t stride = LOG_DAMAGE_STRIDE;
++	const size_t total = log.values.size() / stride;
++	const double* v = log.values.data();
++
++	int added = 0, seen = 0, namedAttacker = 0, namedWeapon = 0, engineCause = 0, fromProjectile = 0;
++	bool full = false;
++	size_t i = 0;
++	for (; i < total && !full; ++i) {
++		const double* e = v + i * stride;
++		// what the widget's table entries hold: lua_Numbers
++		const float frame = float(e[0]), unitID = float(e[1]), unitDefID = float(e[2]), unitTeam = float(e[3]);
++		const float damage = float(e[4]), paralyzer = float(e[5]), weaponDefID = float(e[6]), projectileID = float(e[7]);
++		const float aID = float(e[8]), aDef = float(e[9]), aTeam = float(e[10]);
++		const float hp = float(e[11]), x = float(e[12]), z = float(e[13]), pOwner = float(e[14]), pTeam = float(e[15]);
++
++		float po = 65535.0f, pt = 255.0f;
++		if (aTeam < 0.0f && projectileID >= 0.0f && pTeam >= 0.0f) {
++			pt = BrTeam8(pTeam);
++			po = BrId16(pOwner);
++		}
++		if (damage <= 0.0f)
++			continue;
++
++		seen++;
++		if (aTeam >= 0.0f) namedAttacker++;
++		if (weaponDefID >= 0.0f) namedWeapon++;
++		if (weaponDefID < 0.0f) engineCause++;
++		if (pt != 255.0f) fromProjectile++;
++
++		BrHitCols& b = brHits;
++		b.df.push_back(static_cast<uint16_t>(BrClampF(frame - hitStart, 0.0f, 65535.0f)));
++		b.v.push_back(static_cast<uint16_t>(BrId16(unitID)));
++		b.vd.push_back(static_cast<uint16_t>(BrId16(unitDefID)));
++		b.vt.push_back(static_cast<uint8_t>(BrTeam8(unitTeam)));
++		b.x.push_back(static_cast<uint16_t>(BrPos16(x)));
++		b.z.push_back(static_cast<uint16_t>(BrPos16(z)));
++		b.a.push_back(static_cast<uint16_t>(BrId16(aID)));
++		b.ad.push_back(static_cast<uint16_t>(BrId16(aDef)));
++		b.at.push_back(static_cast<uint8_t>(BrTeam8(aTeam)));
++		b.w.push_back(static_cast<uint16_t>(BrWeaponCode(weaponDefID)));
++		b.po.push_back(static_cast<uint16_t>(po));
++		b.pt.push_back(static_cast<uint8_t>(pt));
++		b.fl.push_back(static_cast<uint8_t>(((paralyzer != 0.0f) ? 1.0f : 0.0f) + ((projectileID >= 0.0f) ? 2.0f : 0.0f)));
++		b.d.push_back(damage);
++		b.hp.push_back(hp);
++		added++;
++		full = (b.size() >= cap);
++	}
++	log.values.erase(log.values.begin(), log.values.begin() + i * stride);
++
++	lua_pushnumber(L, added);
++	lua_pushboolean(L, full);
++	lua_pushnumber(L, log.dropped);
++	log.dropped = 0;
++	lua_pushnumber(L, seen);
++	lua_pushnumber(L, namedAttacker);
++	lua_pushnumber(L, namedWeapon);
++	lua_pushnumber(L, engineCause);
++	lua_pushnumber(L, fromProjectile);
++	return 8;
++}
++
++/***
++ * [barreplay] W8: see DrainLoggedDamageColumns.
++ *
++ * @function Spring.TakeLoggedDamageColumns
++ */
++int LuaEngineEventLog::TakeLoggedDamageColumns(lua_State* L)
++{
++	if (!CLuaHandle::GetHandleFullRead(L))
++		return 0;
++
++	const BrHitCols& b = brHits;
++	std::string out;
++	out.reserve(b.size() * (9 * 2 + 4 + 2 * 4));
++	BrAppendColumn(out, b.df); BrAppendColumn(out, b.v); BrAppendColumn(out, b.vd); BrAppendColumn(out, b.vt);
++	BrAppendColumn(out, b.x); BrAppendColumn(out, b.z);
++	BrAppendColumn(out, b.a); BrAppendColumn(out, b.ad); BrAppendColumn(out, b.at); BrAppendColumn(out, b.w);
++	BrAppendColumn(out, b.po); BrAppendColumn(out, b.pt); BrAppendColumn(out, b.fl);
++	BrAppendColumn(out, b.d); BrAppendColumn(out, b.hp);
++	lua_pushlstring(L, out.data(), out.size());
++	lua_pushnumber(L, b.size());
++	brHits.clear();
++	return 2;
++}
++
++
+ /***
+  * [barreplay] Every unit's sampled state in one call, for a full-read handle:
+  * what Spring.GetAllUnits + GetUnitTeam / GetUnitPosition / GetUnitDefID /
+diff --git a/rts/Lua/LuaEngineEventLog.h b/rts/Lua/LuaEngineEventLog.h
+index 067b3b0..1c21dd7 100644
+--- a/rts/Lua/LuaEngineEventLog.h
++++ b/rts/Lua/LuaEngineEventLog.h
+@@ -64,6 +64,8 @@ private:
+ 	static int GetUnitSampleData(lua_State* L);
+ 	static int GetUnitSampleDelta(lua_State* L);
+ 	static int GetLoggedReloads(lua_State* L);
++	static int DrainLoggedDamageColumns(lua_State* L); // [barreplay] W8
++	static int TakeLoggedDamageColumns(lua_State* L);
+ };
+ 
+ #endif // LUA_ENGINE_EVENT_LOG_H
+-- 
+2.53.0
+

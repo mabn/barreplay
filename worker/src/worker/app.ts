@@ -35,7 +35,8 @@ import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
-import { isReplayFolder, monthFolder, parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
+import { isBrp, scanBrpHead } from "./brphead";
+import { isEmptyFilter, isReplayFolder, monthFolder, parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream inside Worker memory. Real
  * streams are single-digit MB (~6.5x smaller than the text format), so this
@@ -367,7 +368,9 @@ app.post("/api/admin/replays/:id/refresh-settings", async (c) => {
 });
 
 // Drag&drop upload: the Worker does NOT transcode (the viewer's .brp wire is
-// produced by the Go pipeline). It validates the stream's preamble, archives
+// produced by the Go pipeline). It accepts a raw .brepstream or a capture
+// already packed into a .brp — told apart by their first bytes, never by a
+// file name — validates the stream's preamble or the .brp's meta, archives
 // the raw bytes under streams/<gameId>/ — a prefix nothing lists and
 // /replays/* never serves, and from which nothing is ever deleted — and
 // records a pending job for the ingest daemon (cmd/bringest), which
@@ -379,7 +382,8 @@ app.post("/api/upload", async (c) => {
   const body = new Uint8Array(await c.req.arrayBuffer());
   if (body.length > MAX_UPLOAD) return c.json({ error: `upload exceeds ${MAX_UPLOAD} bytes` }, 413);
 
-  const p = scanStreamPreamble(body);
+  const brp = isBrp(body);
+  const p = brp ? await scanBrpHead(body) : scanStreamPreamble(body);
   if (typeof p === "string") return c.json({ error: p }, 400);
 
   // The key carries a hash of the BYTES, because nothing else in it is unique.
@@ -408,7 +412,7 @@ app.post("/api/upload", async (c) => {
   // under the month it was uploaded in.
   const started = await indexStub(c.env).gameStartUnix(p.gameId);
   const month = monthFolder(started ?? Math.floor(Date.now() / 1000));
-  const streamKey = `streams/${month}/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}.brepstream`;
+  const streamKey = `streams/${month}/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}${brp ? ".brp" : ".brepstream"}`;
   await c.env.BUCKET.put(streamKey, body);
 
   const job = crypto.randomUUID();
@@ -727,9 +731,37 @@ app.get("/api/games", async (c) => {
     if (after === null) return c.json({ error: "after is not a cursor this listing issued" }, 400);
   }
 
-  const page = await indexStub(c.env).gamesPage(limit, after);
+  // The replay list's filters (parseReplayFilter), on END time for the dates,
+  // with two differences: the id PREFIX is ?idPrefix= because ?id= above is
+  // already the fetch-by-ids lookup, and there is no player-name filter (see
+  // ReplayIndex.gamesPage).
+  const fp = new URLSearchParams(params);
+  fp.delete("id");
+  fp.delete("player");
+  const prefix = params.get("idPrefix");
+  if (prefix !== null) fp.set("id", prefix);
+  const filter = parseReplayFilter(fp);
+  if (typeof filter === "string") return c.json({ error: filter.replace(/^id /, "idPrefix ") }, 400);
+
+  const page = await indexStub(c.env).gamesPage(limit, after, filter);
+  // A ReplayIndex from before the filters drops the third argument and answers
+  // with the whole mirror — which happens for a while after a deploy, when the
+  // new route reaches the old instance (and always under dev:prod until
+  // production is deployed). Its reply has no `partial`; a filtered request
+  // then fails loudly rather than listing games that do not match.
+  if (typeof page.partial !== "boolean" && !isEmptyFilter(filter)) {
+    return c.json({ error: "game filters are not available yet: the catalog is still running an older build" }, 503, {
+      "cache-control": "no-store",
+    });
+  }
   return c.json(
-    { games: page.games, next: page.next === null ? null : encodeGamesCursor(page.next) },
+    {
+      games: page.games,
+      next: page.next === null ? null : encodeGamesCursor(page.next),
+      // A filtered page that stopped searching before it filled: `next`
+      // resumes the search, and there may be nothing more to find.
+      partial: page.partial,
+    },
     200,
     { "cache-control": "no-cache" },
   );
@@ -849,7 +881,15 @@ app.get("/api/jobs", async (c) => {
   if (!JOB_KINDS.includes(kind as JobKind)) {
     return c.json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
   }
-  const jobs = await indexStub(c.env).jobsOffer(kind as JobKind, crypto.randomUUID());
+  // ?mem= is the daemon's total RAM in bytes (bringest -resim sends it), which
+  // is what lets a lava game that ran out of memory on a small host go to a
+  // bigger one. Anything unparseable reads as "not said".
+  const mem = Number(new URL(c.req.url).searchParams.get("mem") ?? 0);
+  const jobs = await indexStub(c.env).jobsOffer(
+    kind as JobKind,
+    crypto.randomUUID(),
+    Number.isFinite(mem) && mem > 0 ? Math.floor(mem) : 0,
+  );
   return c.json(jobs, 200, { "cache-control": "no-cache" });
 });
 

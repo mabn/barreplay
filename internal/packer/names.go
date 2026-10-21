@@ -158,7 +158,8 @@ var errObjectExists = errors.New("object already exists")
 func putIfAbsent(ctx context.Context, o UploadOptions, native *R2Client, key string, body []byte) (created, supported bool, err error) {
 	switch {
 	case native != nil:
-		err = native.put(ctx, key, body, true)
+		ct, cc := objectHTTPMeta(key)
+		err = native.put(ctx, key, body, ct, cc, true)
 	case o.Target == "local" && o.IndexURL != "":
 		err = workerPut(ctx, o.IndexURL, key, body, true)
 		if err != nil && !errors.Is(err, errObjectExists) {

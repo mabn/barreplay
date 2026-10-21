@@ -1,0 +1,516 @@
+From 795676db0f9bd660848641ce81966724217be448 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 00:09:13 +0000
+Subject: [PATCH] [barreplay] P10: the fighters' enemy-aircraft searches
+ launched at the slow-update slice's start and run on P4's workers ahead of it
+ (toggle2 0x1000000)
+
+The slow update takes a precomputed answer when its arguments are bitwise the
+predicted ones and no drain happened since the launch (and draws the synced
+tempNum the search would have); otherwise it searches itself. The search on a
+pool thread walks the same quads, teams and lists with the same filter and
+closest rule, marking units with the thread's own numbers. Entering the crash
+state drains (the search reads the crash bit).
+---
+ rts/Game/GameHelper.cpp                 |  38 +++++++
+ rts/Game/GameHelper.h                   |   2 +
+ rts/Sim/MoveTypes/HoverAirMoveType.cpp  |   4 +
+ rts/Sim/MoveTypes/StrafeAirMoveType.cpp |   4 +
+ rts/Sim/Units/CommandAI/AirCAI.cpp      |  56 ++++++++++-
+ rts/Sim/Units/CommandAI/AirCAI.h        |   6 ++
+ rts/Sim/Units/UnitHandler.cpp           |   3 +
+ rts/Sim/Weapons/BrPipeTarget.cpp        | 126 +++++++++++++++++++++++-
+ rts/Sim/Weapons/BrPipeTarget.h          |  17 ++++
+ 9 files changed, 252 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index fa66526..395aa6b 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -890,6 +890,44 @@ CUnit* CGameHelper::GetClosestEnemyAircraft(const CUnit* excludeUnit, const floa
+ 	return q.GetClosestUnit();
+ }
+ 
++// [barreplay] P10 (Sim/Weapons/BrPipeTarget.h): GetClosestEnemyAircraft(nullptr,
++// ...) run on a pool thread. QueryUnits' walk in the same order with the same
++// filter and the same closest-unit rule, so the same answer; units are marked
++// with the thread's own numbers (as GenerateWeaponTargets does there), not the
++// synced tempNum, and the quad query uses the thread's pools
++CUnit* CGameHelper::BrClosestEnemyAircraftMt(const float3& pos, float searchRadius, int searchAllyteam, int thread)
++{
++	Query::ClosestUnit q(pos, searchRadius);
++	Filter::EnemyAircraft filter(nullptr, searchAllyteam);
++
++	QuadFieldQuery qfQuery;
++	qfQuery.threadOwner = thread;
++	quadField.GetQuads(qfQuery, q.pos, q.radius);
++	const int tempNum = gs->GetMtTempNum(thread);
++
++	for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) {
++		if (!filter.Team(t))
++			continue;
++
++		for (const int qi: *qfQuery.quads) {
++			for (CUnit* u: quadField.GetQuad(qi).teamUnits[t]) {
++				int& mark = u->mtTempNum[thread];
++				if (mark == tempNum)
++					continue;
++
++				mark = tempNum;
++
++				if (!filter.Unit(u))
++					continue;
++
++				q.AddUnit(u);
++			}
++		}
++	}
++
++	return q.GetClosestUnit();
++}
++
+ size_t CGameHelper::GetEnemyUnits(const float3& pos, float searchRadius, int searchAllyteam, std::vector<int>& found)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Game/GameHelper.h b/rts/Game/GameHelper.h
+index 9239efd..41c5624 100644
+--- a/rts/Game/GameHelper.h
++++ b/rts/Game/GameHelper.h
+@@ -141,6 +141,8 @@ public:
+ 	);
+ 	static CUnit* GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam);
+ 	static CUnit* GetClosestEnemyAircraft(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam);
++	// [barreplay] P10: GetClosestEnemyAircraft(nullptr, ...) on pool thread <thread>
++	static CUnit* BrClosestEnemyAircraftMt(const float3& pos, float searchRadius, int searchAllyteam, int thread);
+ 
+ 	static void BuggerOff(const float3& pos, float radius, bool spherical, bool forced, int teamId, const CUnit* excludeUnit);
+ 	static void BuggerOffRectangle(const float3& mins, const float3& maxs, bool forced, int teamId, const CUnit* excludeUnit);
+diff --git a/rts/Sim/MoveTypes/HoverAirMoveType.cpp b/rts/Sim/MoveTypes/HoverAirMoveType.cpp
+index c3ab10d..cf467fe 100644
+--- a/rts/Sim/MoveTypes/HoverAirMoveType.cpp
++++ b/rts/Sim/MoveTypes/HoverAirMoveType.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ 
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "HoverAirMoveType.h"
+ #include "Sim/Units/BrWeaponVectors.h"
+ #include "Systems/BrParallelAir.h"
+@@ -180,6 +181,9 @@ void CHoverAirMoveType::SetState(AircraftState newState)
+ 
+ 	if (newState == aircraftState)
+ 		return;
++	// [barreplay] P10: the enemy-aircraft searches read the crash bit
++	if (newState == AIRCRAFT_CRASHING)
++		BrP4::Drain(BrP4::DR_KILL);
+ 
+ 
+ 	BrP8::Ensure(owner); // [barreplay] P8: a weapon-use flag
+diff --git a/rts/Sim/MoveTypes/StrafeAirMoveType.cpp b/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
+index c487748..5e1c7ee 100644
+--- a/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
++++ b/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ 
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "StrafeAirMoveType.h"
+ #include "Systems/BrParallelAir.h"
+ #include "System/Threading/ThreadPool.h"
+@@ -1233,6 +1234,9 @@ void CStrafeAirMoveType::SetState(AAirMoveType::AircraftState newState)
+ 
+ 	if (newState == aircraftState)
+ 		return;
++	// [barreplay] P10: the enemy-aircraft searches read the crash bit
++	if (newState == AIRCRAFT_CRASHING)
++		BrP4::Drain(BrP4::DR_KILL);
+ 
+ 	// make sure we only go into takeoff mode when landed
+ 	if (aircraftState == AIRCRAFT_LANDED) {
+diff --git a/rts/Sim/Units/CommandAI/AirCAI.cpp b/rts/Sim/Units/CommandAI/AirCAI.cpp
+index 74eb2cc..075d77f 100644
+--- a/rts/Sim/Units/CommandAI/AirCAI.cpp
++++ b/rts/Sim/Units/CommandAI/AirCAI.cpp
+@@ -2,6 +2,7 @@
+ 
+ 
+ #include "AirCAI.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "Game/GameHelper.h"
+ #include "Game/GlobalUnsynced.h"
+ #include "Game/SelectedUnitsHandler.h"
+@@ -241,7 +242,7 @@ bool CAirCAI::AirAutoGenerateTarget(AAirMoveType* myPlane) {
+ 	const CWeapon* wpn = owner->weapons[0];
+ 
+ 	if (ownerDef->IsFighterAirUnit()) {
+-		tgt = CGameHelper::GetClosestEnemyAircraft(nullptr, owner->pos + owner->speed * 10.0f, searchRadius, owner->allyteam);
++		tgt = BrP4::FighterQuery(owner, owner->pos + owner->speed * 10.0f, searchRadius, owner->allyteam); // [barreplay] P10
+ 	} else {
+ 		tgt = CGameHelper::GetClosestValidTarget(owner->pos + owner->speed * 20.0f, searchRadius, owner->allyteam, this);
+ 	}
+@@ -257,6 +258,57 @@ bool CAirCAI::AirAutoGenerateTarget(AAirMoveType* myPlane) {
+ }
+ 
+ 
++// [barreplay] P10: ExecuteFight's (and AirAutoGenerateTarget's) way to the
++// search, replayed on copies; an argument that comes out different later just
++// means the precomputed answer is not used
++bool CAirCAI::BrPredictEnemyAircraftQuery(float3& pos, float& radius) const
++{
++	const UnitDef* ownerDef = owner->unitDef;
++
++	if (!ownerDef->IsFighterAirUnit() || owner->UsingScriptMoveType())
++		return false;
++	if (!(owner->fireState >= FIRESTATE_FIREATWILL && owner->moveState != MOVESTATE_HOLDPOS && owner->maxRange > 0.0f && ownerDef->canAttack))
++		return false;
++
++	if (commandQue.empty()) {
++		// AirAutoGenerateTarget (a Lua callin may still change the radius)
++		if (owner->weapons.empty())
++			return false;
++		pos = owner->pos + owner->speed * 10.0f;
++		radius = 1000.0f * owner->moveState;
++		return true;
++	}
++
++	const Command& c = commandQue.front();
++	if (c.GetID() != CMD_FIGHT || c.GetNumParams() < 3 || c.GetTimeOut() < gs->frameNum)
++		return false;
++
++	int inCmd = inCommand;
++	if (tempOrder)
++		inCmd = CMD_FIGHT;
++
++	float3 cp1 = commandPos1;
++	float3 cp2 = commandPos2;
++
++	if (c.GetNumParams() >= 6) {
++		if (inCmd == CMD_STOP)
++			cp1 = c.GetPos(3);
++	} else {
++		cp1 = ClosestPointOnLine(cp1, cp2, owner->pos);
++
++		if ((owner->pos - cp1).SqLength2D() > Square(150.0f))
++			cp1 = owner->pos;
++	}
++
++	if (inCmd == CMD_STOP)
++		cp2 = c.GetPos(0);
++
++	const float3 ofs = owner->speed * 10.0f;
++	pos = ClosestPointOnLine(cp1, cp2, owner->pos + ofs);
++	radius = 1000.0f * owner->moveState;
++	return true;
++}
++
+ void CAirCAI::ExecuteMove(Command& c)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+@@ -330,7 +382,7 @@ void CAirCAI::ExecuteFight(Command& c)
+ 			const float3 ofs = owner->speed * 10.0f;
+ 			const float3 pos = ClosestPointOnLine(commandPos1, commandPos2, owner->pos + ofs);
+ 
+-			enemy = CGameHelper::GetClosestEnemyAircraft(nullptr, pos, 1000.0f * owner->moveState, owner->allyteam);
++			enemy = BrP4::FighterQuery(owner, pos, 1000.0f * owner->moveState, owner->allyteam); // [barreplay] P10
+ 		}
+ 
+ 		if (IsValidTarget(enemy, nullptr) && (owner->moveState != MOVESTATE_MANEUVER || LinePointDist(commandPos1, commandPos2, enemy->pos) < 1000)) {
+diff --git a/rts/Sim/Units/CommandAI/AirCAI.h b/rts/Sim/Units/CommandAI/AirCAI.h
+index a252c99..3badff2 100644
+--- a/rts/Sim/Units/CommandAI/AirCAI.h
++++ b/rts/Sim/Units/CommandAI/AirCAI.h
+@@ -34,6 +34,12 @@ public:
+ 
+ 	bool IsValidTarget(const CUnit* enemy, CWeapon* weapon) const override;
+ 
++	// [barreplay] P10: the arguments this slow update would give
++	// GetClosestEnemyAircraft (CMD_FIGHT, or auto-targeting with an empty
++	// queue), computed the same way without writing anything; false = it
++	// would not search
++	bool BrPredictEnemyAircraftQuery(float3& pos, float& radius) const;
++
+ private:
+ 	bool AirAutoGenerateTarget(AAirMoveType*);
+ 	bool SelectNewAreaAttackTargetOrPos(const Command& ac) override;
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index bbd34a6..3312709 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -581,6 +581,9 @@ void CUnitHandler::SlowUpdateUnits()
+ 		// [barreplay] P4: weapon target searches on worker threads, applied in
+ 		// order (Sim/Weapons/BrPipeTarget.h)
+ 		const bool pipelined = (idxEnd > idxBeg) && BrP4::Begin();
++		// [barreplay] P10: the fighters' enemy-aircraft searches ahead
++		if (pipelined)
++			BrP4::LaunchFighters(activeUnits, idxBeg, idxEnd);
+ 
+ 		for (size_t i = idxBeg; i < idxEnd; ++i) {
+ 			BrRunAhead::At(int(i - idxBeg));
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index 351709e..8e7bc89 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -18,6 +18,9 @@
+ #include <x86intrin.h>
+ 
+ #include "Weapon.h"
++#include "Sim/Units/UnitDef.h"
++#include "Sim/Units/CommandAI/AirCAI.h"
++#include "Game/GameHelper.h"
+ #include "WeaponDef.h"
+ #include "Map/ReadMap.h"
+ #include "Sim/Misc/GlobalSynced.h"
+@@ -37,6 +40,7 @@ namespace BrP4 {
+ 	namespace {
+ 		struct Task {
+ 			CWeapon* w;
++			uint8_t kind;       // 0 a search, 1 a slave's copy, 2 P10's enemy-aircraft search
+ 			bool slave;         // a slaved weapon's copy of its master's target
+ 			const CUnit* avoid;
+ 			float cx, cz, r;    // the scan circle: GenerateWeaponTargets' GetQuads
+@@ -44,6 +48,10 @@ namespace BrP4 {
+ 			CUnit* result;
+ 			CUnit* checkResult; // BARREPLAY_P4_CHECK: the search run in order
+ 			std::atomic<int> done;
++			// P10: the query, its owner and the drain count at the launch
++			float3 qpos;
++			const CUnit* owner;
++			unsigned epoch;
+ 		};
+ 
+ 		constexpr int MAX_TASKS = 8192;
+@@ -68,6 +76,13 @@ namespace BrP4 {
+ 		thread_local std::vector<std::pair<float, CUnit*>> tlPairs;
+ 		std::vector<std::pair<float, CUnit*>> checkPairs;
+ 
++		// P10: drains in this slice (any write the searches may read), and each
++		// unit's P10 task of this slice
++		unsigned p10Epoch = 0;
++		std::vector<int> p10Task;
++		std::vector<long long> p10Slice;
++		struct { long long launched = 0, used = 0, stale = 0, args = 0, none = 0, mismatches = 0; } p10;
++
+ 		struct Stats {
+ 			long long slices = 0, launched = 0, notNative = 0, targetWeight = 0, full = 0;
+ 			long long drains[DR_N] = {};
+@@ -81,6 +96,11 @@ namespace BrP4 {
+ 		}
+ 
+ 		void RunTask(Task& t, int thread) {
++			if (t.kind == 2) {
++				t.result = CGameHelper::BrClosestEnemyAircraftMt(t.qpos, t.r, t.ownerAlly, thread);
++				t.done.store(1, std::memory_order_release);
++				return;
++			}
+ 			// [barreplay] P8: the search reads the weapon's own vectors
+ 			if (!t.slave)
+ 				BrP8::Ensure(t.w->owner);
+@@ -143,6 +163,9 @@ namespace BrP4 {
+ 		}
+ 
+ 		void Apply(Task& t) {
++			// P10: the answer is taken by the slow update that asks for it
++			if (t.kind == 2)
++				return;
+ 			if (t.slave) {
+ 				// CWeapon::SlowUpdate's copy, where its master's result now is
+ 				t.w->SetAttackTarget(t.w->slavedTo->GetCurrentTarget());
+@@ -191,6 +214,7 @@ namespace BrP4 {
+ 			for (int r = 0; r < DR_N && k < int(sizeof(buf)); ++r)
+ 				k += snprintf(buf + k, sizeof(buf) - k, " %s=%lld", DrainName(r), st.drains[r]);
+ 			LOG("%s", buf);
++			LOG("[BR_P10] f=%d launched=%lld used=%lld stale=%lld argsDiffer=%lld notLaunched=%lld mismatches=%lld", gs->frameNum, p10.launched, p10.used, p10.stale, p10.args, p10.none, p10.mismatches);
+ 		}
+ 
+ 		auto workerFn = [](const int) { WorkerLoop(); };
+@@ -205,6 +229,8 @@ namespace BrP4 {
+ 			st.slices, st.launched, st.slaveCopies, st.notNative, st.targetWeight, st.full, st.waits, st.waitCycles / 1e6, st.inlineRuns);
+ 		for (int r = 0; r < DR_N && k < size; ++r)
+ 			k += snprintf(buf + k, size - k, " %s=%lld", DrainName(r), st.drains[r]);
++		if (k < size)
++			k += snprintf(buf + k, size - k, " [BR_P10] launched=%lld used=%lld stale=%lld argsDiffer=%lld notLaunched=%lld", p10.launched, p10.used, p10.stale, p10.args, p10.none);
+ 		if (k < size)
+ 			k += snprintf(buf + k, size - k, "\n");
+ 		return k;
+@@ -295,7 +321,7 @@ namespace BrP4 {
+ 
+ 		for (int i = committed; i < n; ++i) {
+ 			const Task& t = tasks[i];
+-			if (t.slave)
++			if (t.kind != 0)
+ 				continue;
+ 			const float dx = ux - t.cx;
+ 			const float dz = uz - t.cz;
+@@ -338,7 +364,7 @@ namespace BrP4 {
+ 
+ 		for (int i = committed; i < n; ++i) {
+ 			const Task& t = tasks[i];
+-			if (t.slave)
++			if (t.kind != 0)
+ 				continue;
+ 			const float dx = ux - t.cx;
+ 			const float dz = uz - t.cz;
+@@ -371,6 +397,7 @@ namespace BrP4 {
+ 
+ 		Task& t = tasks[n];
+ 		t.w = w;
++		t.kind = 1;
+ 		t.slave = true;
+ 		t.avoid = nullptr;
+ 		t.cx = t.cz = t.r = 0.0f;
+@@ -406,6 +433,7 @@ namespace BrP4 {
+ 		const CUnit* o = w->owner;
+ 		Task& t = tasks[n];
+ 		t.w = w;
++		t.kind = 0;
+ 		t.slave = false;
+ 		t.avoid = avoidUnit;
+ 		t.cx = o->pos.x;
+@@ -430,8 +458,102 @@ namespace BrP4 {
+ 		return true;
+ 	}
+ 
++	void LaunchFighters(const std::vector<CUnit*>& units, size_t beg, size_t end)
++	{
++		if ((g_brToggles2 & 0x1000000) == 0)
++			return;
++
++		for (size_t i = beg; i < end; ++i) {
++			const CUnit* u = units[i];
++			if (!u->unitDef->IsFighterAirUnit() || u->isDead)
++				continue;
++			const CAirCAI* cai = dynamic_cast<const CAirCAI*>(u->commandAI);
++			if (cai == nullptr)
++				continue;
++
++			float3 pos;
++			float radius;
++			if (!cai->BrPredictEnemyAircraftQuery(pos, radius))
++				continue;
++
++			const int n = published.load(std::memory_order_relaxed);
++			if (n >= MAX_TASKS)
++				return;
++
++			Task& t = tasks[n];
++			t.w = nullptr;
++			t.kind = 2;
++			t.slave = false;
++			t.avoid = nullptr;
++			t.cx = pos.x;
++			t.cz = pos.z;
++			t.r = radius;
++			t.ownerAlly = u->allyteam;
++			t.result = nullptr;
++			t.checkResult = nullptr;
++			t.qpos = pos;
++			t.owner = u;
++			t.epoch = p10Epoch;
++			t.done.store(0, std::memory_order_relaxed);
++
++			if (size_t(u->id) >= p10Task.size()) {
++				p10Task.resize(u->id + 1, -1);
++				p10Slice.resize(u->id + 1, -1);
++			}
++			p10Task[u->id] = n;
++			p10Slice[u->id] = st.slices;
++
++			published.store(n + 1, std::memory_order_release);
++			p10.launched++;
++		}
++	}
++
++	CUnit* FighterQuery(const CUnit* owner, const float3& pos, float radius, int allyTeam)
++	{
++		if (Active() && (g_brToggles2 & 0x1000000) != 0) {
++			const int id = owner->id;
++
++			if (size_t(id) < p10Task.size() && p10Slice[id] == st.slices) {
++				const int i = p10Task[id];
++				Task& t = tasks[i];
++
++				if (t.kind != 2 || t.owner != owner) {
++					p10.none++;
++				} else if (t.epoch != p10Epoch) {
++					p10.stale++;
++				} else if (std::memcmp(&t.qpos, &pos, sizeof(float3)) != 0 || std::memcmp(&t.r, &radius, sizeof(float)) != 0 || t.ownerAlly != allyTeam) {
++					p10.args++;
++				} else {
++					Complete(i);
++					p10.used++;
++
++					if (check) {
++						// the search in order, which also draws its tempNum
++						CUnit* ref = CGameHelper::GetClosestEnemyAircraft(nullptr, pos, radius, allyTeam);
++						if (ref != t.result) {
++							p10.mismatches++;
++							LOG_L(L_WARNING, "[BR_P10] mismatch f=%d unit %d: pipelined %d, in order %d", gs->frameNum, id, (t.result != nullptr)? t.result->id: -1, (ref != nullptr)? ref->id: -1);
++						}
++						return ref;
++					}
++
++					// the synced tempNum the search would have drawn
++					gs->GetTempNum();
++					return t.result;
++				}
++			} else {
++				p10.none++;
++			}
++		}
++
++		return CGameHelper::GetClosestEnemyAircraft(nullptr, pos, radius, allyTeam);
++	}
++
+ 	void DrainSlow(int reason)
+ 	{
++		// P10: whatever was searched before this write may be stale now
++		if (!inWorker)
++			p10Epoch++;
+ 		if (inWorker) {
+ 			// a search wrote something: a hook in a path searches were
+ 			// believed not to take (the check mode would show what it cost)
+diff --git a/rts/Sim/Weapons/BrPipeTarget.h b/rts/Sim/Weapons/BrPipeTarget.h
+index c2be1c7..6ba3c8a 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.h
++++ b/rts/Sim/Weapons/BrPipeTarget.h
+@@ -35,11 +35,15 @@
+ // (LocalModelPiece::BrScratchModelSpaceMatrix), by the same operations.
+ 
+ #include <atomic>
++#include <vector>
++
++#include "System/float3.h"
+ 
+ class CUnit;
+ class CWeapon;
+ 
+ extern unsigned g_brToggles;
++extern unsigned g_brToggles2;
+ 
+ namespace BrP4 {
+ 	// inside a pipelined slow-update slice (written by the main thread only)
+@@ -68,6 +72,19 @@ namespace BrP4 {
+ 	// AutoTarget's search for w, run out of order; false = run it now
+ 	bool Launch(CWeapon* w, const CUnit* avoidUnit);
+ 
++	// [barreplay] P10 (toggle2 0x1000000): the fighters' enemy-aircraft
++	// searches of this slice (CAirCAI: CMD_FIGHT, or auto-targeting with an
++	// empty queue), launched at its start with the arguments the slow update
++	// would use, and run on the workers ahead of it. The search reads the
++	// enemy aircraft in its circle (quad lists, def, crash bit, LOS status,
++	// ally team, neutrality, midPos), all of which change only through the
++	// drained writes; a drain makes every answer of the slice stale. A slow
++	// update takes the answer when its own arguments are bitwise the
++	// predicted ones and nothing was drained since the launch (and draws the
++	// synced tempNum the search would have), else it searches itself.
++	void LaunchFighters(const std::vector<CUnit*>& units, size_t beg, size_t end);
++	CUnit* FighterQuery(const CUnit* owner, const float3& pos, float radius, int allyTeam);
++
+ 	// a write the searches may read is about to happen: finish and apply all
+ 	void DrainSlow(int reason);
+ 	inline void Drain(int reason) {
+-- 
+2.53.0
+

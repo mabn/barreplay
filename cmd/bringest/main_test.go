@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,7 +31,8 @@ type mockWorker struct {
 	job     ingestJob
 	resim   []ingestJob // queued re-sim jobs, served under ?kind=resim
 	stream  []byte
-	drained bool // the upload queue empties after the first list
+	archive string // the one archived file name served (default 1700000000000-a0.brepstream)
+	drained bool   // the upload queue empties after the first list
 
 	mu           sync.Mutex
 	transitions  []string        // "<state>[:<error>]", or "claim"
@@ -121,7 +123,7 @@ func (m *mockWorker) handler(token string) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if !strings.HasSuffix(r.URL.Path, "/"+m.job.GameID+"/1700000000000-a0.brepstream") {
+		if !strings.HasSuffix(r.URL.Path, "/"+m.job.GameID+"/"+m.archive) {
 			http.NotFound(w, r)
 			return
 		}
@@ -140,6 +142,7 @@ func newMock(t *testing.T) *mockWorker {
 			Kind:      kindUpload,
 			State:     "pending",
 		},
+		archive: "1700000000000-a0.brepstream",
 		stream:  []byte("BREPSTREAM 1\nBRSNAP GID feed5eed00000000000000000000beef\nBRSNAP READY\n"),
 		claimed: map[string]bool{},
 	}
@@ -185,6 +188,29 @@ func TestRunOnceProcessesJob(t *testing.T) {
 	}
 }
 
+// An upload archived as a .brp downloads under its own extension, which is
+// what tells the pipeline it is already packed.
+func TestRunOnceKeepsBRPExtension(t *testing.T) {
+	m := newMock(t)
+	m.job.StreamKey = "streams/2026-10/" + m.job.GameID + "/1700000000000-0a1b2c3d-spec.brp"
+	m.archive = path.Base(m.job.StreamKey)
+	m.stream = []byte("BRP1\x06")
+	srv := httptest.NewServer(m.handler("s3cret"))
+	t.Cleanup(srv.Close)
+
+	var gotPath string
+	d := newDaemon(srv.URL, "s3cret", func(_ context.Context, streamPath string, _ *jobStats) error {
+		gotPath = streamPath
+		return nil
+	})
+	if _, err := d.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := m.job.GameID + ".brp"; !strings.HasSuffix(gotPath, want) {
+		t.Errorf("path %q, want basename %q", gotPath, want)
+	}
+}
+
 // The -resim worker's candidate selection and failure memory, driven through
 // a mock catalog. A game is re-simulated only while its current upload is
 // one-sided and no full-view (ally-null) revision exists; a failed game is
@@ -210,7 +236,9 @@ func TestResimDaemonDrainsQueue(t *testing.T) {
 			return nil
 		},
 	}
-	n, err := r.runOnce(context.Background())
+	// One job per poll (the worker orders the work and the next poll must see
+	// what changed), so draining the queue takes a poll per job.
+	n, err := drainResim(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +728,7 @@ func TestResimDaemonCarriesOnAfterOOM(t *testing.T) {
 			return nil
 		},
 	}
-	if _, err := r.runOnce(context.Background()); err != nil {
+	if _, err := drainResim(r); err != nil {
 		t.Fatal(err)
 	}
 	// The queue carried on: the game after the OOM'd one still ran.
@@ -728,5 +756,43 @@ func TestErrorKind(t *testing.T) {
 		if got := errorKind(err); got != "" {
 			t.Errorf("errorKind(%v) = %q, want none", err, got)
 		}
+	}
+}
+
+// drainResim polls until a round attempts nothing, the way the daemon's loop
+// does when there is work, and returns how many jobs ran in total.
+func drainResim(r *resimDaemon) (int, error) {
+	total := 0
+	for {
+		n, err := r.runOnce(context.Background())
+		total += n
+		if err != nil || n == 0 {
+			return total, err
+		}
+	}
+}
+
+// A round runs ONE job and stops, so that the next poll — which the worker
+// answers with the most recently ended lava game first — decides what runs
+// next, rather than the rest of a list read before the job started.
+func TestResimDaemonRunsOneJobPerPoll(t *testing.T) {
+	m := newMock(t)
+	m.resim = []ingestJob{
+		{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"},
+		{ID: "rj-2", GameID: "aaaa0000000000000000000000000002", Kind: kindResim, State: "pending"},
+	}
+	srv := httptest.NewServer(m.handler(""))
+	t.Cleanup(srv.Close)
+	var ran []string
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		resim: func(_ context.Context, gameID string, _ *jobStats, _ *resim.Progress) error {
+			ran = append(ran, gameID)
+			return nil
+		},
+	}
+	n, err := r.runOnce(context.Background())
+	if err != nil || n != 1 || len(ran) != 1 {
+		t.Fatalf("one round attempted %d (%v, err %v), want exactly the first job", n, ran, err)
 	}
 }

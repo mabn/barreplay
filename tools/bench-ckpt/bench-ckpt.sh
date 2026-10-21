@@ -44,7 +44,15 @@
 # TOGGLES=<hex> passes the experiment toggles of a build that has them (the
 # go file's "t=<hex>"; g_brToggles in the engine) to each trial, and `abt`
 # interleaves two toggle settings of ONE binary from the same checkpoint —
-# variants of an experiment need no second build or dump.
+# variants of an experiment need no second build or dump. TOGGLES2=<hex> is the
+# second word ("t2=<hex>"; g_brToggles2) once the first ran out of bits; in
+# `abt` a setting written <t>/<t2> sets both.
+# TOGGLES3=<hex> is the third word ("t3=<hex>"; g_brToggles3).
+# P12CHECK=1 adds "p12check": P12's check mode (every would-be skip runs the
+# ordinary code; the bench line counts the ones that acted as wrong=).
+# P4CHECK=1 adds "p4check": the engine's P4 (and P10) check mode for the
+# trial, which runs every pipelined search in order too and counts mismatches
+# (a correctness test; the timings mean nothing).
 #
 # BARREPLAY=<path> (dump only) names the barreplay binary to re-simulate with;
 # by default it is built from this checkout at each dump. Its id is kept in the
@@ -115,7 +123,11 @@ dump() {
 	[ -x "$br" ] || die "no barreplay binary $br"
 	echo "$(sha256sum "$br" | cut -c1-16) $(go version -m "$br" | awk '$2 ~ /^vcs\.(revision|modified)=/ {printf "%s ", $2}')" > "$dir/barreplay.id"
 	echo "== dump: $(basename "$bin") $2 ($id) up to frame $frame"
-	(cd "$BR" && BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
+	# H87 (toggle 0x80000) on while dumping, unless BARREPLAY_TOGGLES says
+	# otherwise: a dump otherwise runs with every toggle off, and then the
+	# draw-side height-map queue can run away (11 GB in 40 s; three dumps lost
+	# to it, 10-19 and 10-20). It is unsynced, so the checkpoint is the same.
+	(cd "$BR" && BARREPLAY_TOGGLES=${BARREPLAY_TOGGLES:-80000} BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
 		systemd-run --user --scope --quiet -p OOMPolicy=continue -p MemoryMax="$MEMMAX" -p MemorySwapMax="$SWAPMAX" \
 		"$br" -data "$DATA" -progress=true ${BARREPLAY_ARGS:-} -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
 	local brpid=$!
@@ -195,21 +207,39 @@ trial1() {
 		taskset -a -p -c "$CPUSET" "$(cat "$dir/park.ready")" > /dev/null || die "taskset failed"
 	fi
 	local perfpid=
-	if [ -n "${PERF:-}" ]; then
-		# Profile exactly the timed window: attach to the restored engine
-		# (CRIU restores its pid) before releasing it; stops when it exits.
+	# A profiler must see the timed window only. The engine waits for huge
+	# pages AFTER the go file (up to 120 s, the collapser busy meanwhile), so a
+	# build that knows the "sync" word reports <park>.window when the window is
+	# about to start and waits for <park>.go2; the profiler attaches in
+	# between. An older build gets the profiler before the release, as before
+	# (its profile then includes the huge-page wait).
+	local sync=
+	if [ -n "${PERF:-}${PERFSTAT:-}" ] && grep -qa '%s.window' "$bin"; then sync=1; fi
+	rm -f "$dir/park.window" "$dir/park.go2"
+	startprof() {
 		local pid=$(cat "$dir/park.ready")
-		perf record $PERF -p "$pid" -o "$dir/perf-$(date +%s).data" > "$dir/perf.log" 2>&1 &
-		perfpid=$!
+		if [ -n "${PERF:-}" ]; then
+			perf record $PERF -p "$pid" -o "$dir/perf-$(date +%s).data" > "$dir/perf.log" 2>&1 &
+			perfpid=$!
+		fi
+		if [ -n "${PERFSTAT:-}" ]; then
+			# hardware counters per thread
+			perf stat -p "$pid" --per-thread -e "$PERFSTAT" -o "$dir/perfstat.txt" &
+			perfpid=$!
+		fi
 		sleep 1
+	}
+	[ -n "${PERF:-}${PERFSTAT:-}" ] && [ -z "$sync" ] && startprof
+	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}${TOGGLES3:+ t3=$TOGGLES3}${P4CHECK:+ p4check}${P12CHECK:+ p12check}${sync:+ sync}" > "$dir/park.go"
+	if [ -n "$sync" ]; then
+		local w=0
+		while [ ! -e "$dir/park.window" ]; do
+			sleep 0.2; w=$((w + 1))
+			[ $w -gt 1500 ] && die "no window signal after 300 s"
+		done
+		startprof
+		touch "$dir/park.go2"
 	fi
-	if [ -n "${PERFSTAT:-}" ]; then
-		# hardware counters per thread over exactly the window
-		perf stat -p "$(cat "$dir/park.ready")" --per-thread -e "$PERFSTAT" -o "$dir/perfstat.txt" &
-		perfpid=$!
-		sleep 1
-	fi
-	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
 		sleep 0.5; t=$((t + 1))
@@ -247,7 +277,7 @@ case "${1:-}" in
 	flame) flame "$2" "$3" "$4" "$5" "$6" "${7:-}" ;;
 	abt)   for i in $(seq 1 "${8:-3}"); do
 	           if [ $((i % 2)) -eq 1 ]; then o="$6 $7"; else o="$7 $6"; fi
-	           for t in $o; do echo "pair $i t=$t $(TOGGLES=$t trial1 "$2" "$3" "$4" "$5")"; done
+	           for t in $o; do echo "pair $i t=$t $(TOGGLES=${t%%/*} TOGGLES2=$([ "${t#*/}" != "$t" ] && echo "${t#*/}") trial1 "$2" "$3" "$4" "$5")"; done
 	       done ;;
 	*) sed -n '2,40p' "$0"; exit 2 ;;
 esac

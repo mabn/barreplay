@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -50,5 +51,27 @@ func TestGateGames(t *testing.T) {
 	}
 	if _, err := gateGames("", "2099.01.01"); err == nil {
 		t.Error("a version with no default gate replay was accepted without -gate")
+	}
+}
+
+// The Wine wrapper must hand the engine Z: paths for absolute unix paths and
+// leave everything else alone.
+func TestWineWrapperTranslatesPaths(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake wine")
+	if err := os.WriteFile(fake, []byte("#!/bin/bash\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrap := filepath.Join(dir, "wrap")
+	if err := writeWineWrapper(wrap, fake, "/opt/e/spring-headless.exe"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(wrap, "--isolation", "--write-dir", "/tmp/my data", "script.txt").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/opt/e/spring-headless.exe\n--isolation\n--write-dir\nZ:\\tmp\\my data\nscript.txt\n"
+	if string(out) != want {
+		t.Errorf("wrapper passed\n%q\nwant\n%q", out, want)
 	}
 }

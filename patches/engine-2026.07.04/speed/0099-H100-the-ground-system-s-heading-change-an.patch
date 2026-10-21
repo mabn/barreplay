@@ -1,0 +1,172 @@
+From 1a8bf867ac02207d46b12f4610acb6ee17835cb9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 13:18:29 +0000
+Subject: [PATCH 099/108] [barreplay] H100: the ground system's heading-change
+ and final Update loops on all threads (toggle2 0x2000)
+
+Each unit's work in them reads and writes only that unit and its move type
+plus the height and normal maps. Kept serial while a Lua unit script defines
+ChangeHeading or anything listens to UnitMoved; below 512 entries.
+---
+ .../MoveTypes/Systems/GroundMoveSystem.cpp    | 50 +++++++++++++++++++
+ rts/Sim/Units/Scripts/LuaUnitScript.cpp       | 17 +++++++
+ rts/Sim/Units/Scripts/LuaUnitScript.h         |  9 ++++
+ 3 files changed, 76 insertions(+)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GroundMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GroundMoveSystem.cpp
+index 6784834..d534e84 100644
+--- a/rts/Sim/MoveTypes/Systems/GroundMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GroundMoveSystem.cpp
+@@ -10,6 +10,9 @@
+ #include "Sim/MoveTypes/Components/MoveTypesComponents.h"
+ #include "Sim/Units/Unit.h"
+ #include "Sim/Units/UnitHandler.h"
++#include "Sim/Units/Scripts/LuaUnitScript.h"
++#include "Sim/Misc/GlobalSynced.h"
++#include "System/Log/ILog.h"
+ 
+ #include "System/EventHandler.h"
+ #include "System/TimeProfiler.h"
+@@ -17,6 +20,22 @@
+ 
+ using namespace MoveTypes;
+ 
++extern unsigned g_brToggles2; // [barreplay] (defined in GeneralMoveSystem.cpp)
++
++// [barreplay] H100 (toggle2 0x2000): the two single-threaded loops of the
++// ground system, applying the heading changes and the final Update, run on
++// all threads. Upstream keeps them serial for its sync checker's synced
++// variables, which a build without SYNCCHECK does not have. What each unit
++// does in them reads and writes only that unit and its move type, plus the
++// height and normal maps, which nothing writes here; P4's drain hooks are
++// idle (its slice opens later in the frame). Two things reach beyond the
++// unit, and each keeps its loop serial when present: a Lua unit script that
++// defines ChangeHeading (COB's is empty), and a UnitMoved listener.
++static bool BrH100(size_t n)
++{
++	return (g_brToggles2 & 0x2000) != 0 && n >= 512 && ThreadPool::HasThreads();
++}
++
+ void GroundMoveSystem::Init() {}
+ 
+ template<typename T, typename F>
+@@ -30,6 +49,15 @@ void issue_events(F func)
+ }
+ 
+ void GroundMoveSystem::Update() {
++	if ((g_brToggles2 & 0x2000) != 0) {
++		static int brLogFrame = -1000000;
++		if ((gs->frameNum - brLogFrame) >= 9000) {
++			brLogFrame = gs->frameNum;
++			LOG("[BR_H100] f=%d changeHeadingScripts=%d unitMovedClients=%d groundUnits=%zu", gs->frameNum,
++				CLuaUnitScript::BrChangeHeadingScripts(), int(eventHandler.HasUnitMovedClients()),
++				size_t(Sim::registry.view<GroundMoveType>().size()));
++		}
++	}
+     // TODO: GroundMove could become a component (or series of components) and then the extra indirection wouldn't be
+     // needed. Though that will be a bigger change.
+ 	{
+@@ -56,6 +84,18 @@ void GroundMoveSystem::Update() {
+         // These two sections are ST due to the numerous synced vars being changed.
+         {
+             auto view = Sim::registry.view<ChangeHeadingEvent>();
++            if (BrH100(view.size()) && CLuaUnitScript::BrChangeHeadingScripts() == 0) {
++                for_mt(0, view.size(), [&view](const int i){
++                    auto entity = view.storage<ChangeHeadingEvent>()[i];
++                    ChangeHeadingEvent& event = view.get<ChangeHeadingEvent>(entity);
++                    if (event.changed) {
++                        CUnit* unit = unitHandler.GetUnit(event.unitId);
++                        CGroundMoveType* moveType = static_cast<CGroundMoveType*>(unit->moveType);
++                        moveType->ChangeHeading(event.deltaHeading);
++                        event.changed = false;
++                    }
++                });
++            } else
+             view.each([](ChangeHeadingEvent& event){
+                 if (event.changed) {
+                     CUnit* unit = unitHandler.GetUnit(event.unitId);
+@@ -150,6 +190,16 @@ void GroundMoveSystem::Update() {
+         // Same for change heading above as well.
+         SCOPED_TIMER("Sim::Unit::MoveType::5::Update");
+         auto view = Sim::registry.view<GroundMoveType>();
++        if (BrH100(view.size()) && !eventHandler.HasUnitMovedClients()) {
++            for_mt(0, view.size(), [&view](const int i){
++                auto entity = view.storage<GroundMoveType>()[i];
++                auto unitId = view.get<GroundMoveType>(entity);
++                CUnit* unit = unitHandler.GetUnit(unitId.value);
++                CGroundMoveType* moveType = static_cast<CGroundMoveType*>(unit->moveType);
++                assert(moveType != nullptr);
++                moveType->Update();
++            });
++        } else
+         view.each([&view](GroundMoveType& unitId){
+             CUnit* unit = unitHandler.GetUnit(unitId.value);
+             CGroundMoveType* moveType = static_cast<CGroundMoveType*>(unit->moveType);
+diff --git a/rts/Sim/Units/Scripts/LuaUnitScript.cpp b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+index a99cb75..eafebdd 100644
+--- a/rts/Sim/Units/Scripts/LuaUnitScript.cpp
++++ b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+@@ -60,6 +60,7 @@ void CLuaUnitScript::PostLoad()
+ 	hasSetSFXOccupy  = scriptIndex[LUAFN_SetSFXOccupy ] != LUA_NOREF;
+ 	hasRockUnit      = scriptIndex[LUAFN_RockUnit     ] != LUA_NOREF;
+ 	hasStartBuilding = scriptIndex[LUAFN_StartBuilding] != LUA_NOREF;
++	BrCountChangeHeading();
+ }
+ 
+ 
+@@ -279,9 +280,24 @@ CLuaUnitScript::CLuaUnitScript(lua_State* L, CUnit* unit)
+ }
+ 
+ 
++int CLuaUnitScript::brChangeHeadingScripts = 0;
++
++void CLuaUnitScript::BrCountChangeHeading()
++{
++	const bool has = (scriptIndex[LUAFN_ChangeHeading] != LUA_NOREF);
++	if (has == brCountsChangeHeading)
++		return;
++	brChangeHeadingScripts += (has ? 1 : -1);
++	brCountsChangeHeading = has;
++}
++
+ CLuaUnitScript::~CLuaUnitScript()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	if (brCountsChangeHeading) {
++		brChangeHeadingScripts -= 1;
++		brCountsChangeHeading = false;
++	}
+ 	// if L is NULL then the lua_State is closed/closing (see HandleFreed)
+ 	if (L == nullptr)
+ 		return;
+@@ -379,6 +395,7 @@ void CLuaUnitScript::UpdateCallIn(const std::string& fname, int ref)
+ 		case LUAFN_RockUnit:      hasRockUnit      = (ref != LUA_NOREF); break;
+ 		case LUAFN_StartBuilding: hasStartBuilding = (ref != LUA_NOREF); break;
+ 	}
++	BrCountChangeHeading();
+ 
+ 	//LUA_TRACE(fname.c_str());
+ }
+diff --git a/rts/Sim/Units/Scripts/LuaUnitScript.h b/rts/Sim/Units/Scripts/LuaUnitScript.h
+index d2dac2f..860db75 100644
+--- a/rts/Sim/Units/Scripts/LuaUnitScript.h
++++ b/rts/Sim/Units/Scripts/LuaUnitScript.h
+@@ -79,6 +79,15 @@ public:
+ 	// takes LUAFN_* constant as argument
+ 	bool HasFunction(int id) const { return scriptIndex[id] >= 0; }
+ 
++	// [barreplay] H100: how many live Lua unit scripts define ChangeHeading,
++	// the one way a ground unit's heading change reaches beyond the unit
++	static int BrChangeHeadingScripts() { return brChangeHeadingScripts; }
++private:
++	void BrCountChangeHeading();
++	static int brChangeHeadingScripts;
++	bool brCountsChangeHeading = false;
++public:
++
+ 	bool HasBlockShot(int weaponNum) const override;
+ 	bool HasTargetWeight(int weaponNum) const override;
+ 
+-- 
+2.53.0
+

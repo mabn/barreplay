@@ -1,0 +1,59 @@
+From f2950f905dcc30048cae862991805d7863648213 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 14:19:29 +0000
+Subject: [PATCH 104/108] [barreplay] H103: synced next calls lua_next directly
+ instead of the original next through lua_call (toggle2 0x20000)
+
+---
+ rts/Lua/LuaHandleSynced.cpp | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Lua/LuaHandleSynced.cpp b/rts/Lua/LuaHandleSynced.cpp
+index b4f5d79..722b459 100644
+--- a/rts/Lua/LuaHandleSynced.cpp
++++ b/rts/Lua/LuaHandleSynced.cpp
+@@ -2166,6 +2166,8 @@ int CSyncedLuaHandle::SyncedRandomSeed(lua_State* L)
+ }
+ 
+ 
++extern unsigned g_brToggles2; // [barreplay] (Sim/MoveTypes/Systems/GeneralMoveSystem.cpp)
++
+ int CSyncedLuaHandle::SyncedNext(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+@@ -2177,6 +2179,21 @@ int CSyncedLuaHandle::SyncedNext(lua_State* L)
+ 		LUA_TTHREAD //FIXME LUA_TTHREAD is normally _not_ synced safe but LUS handler needs it atm (and uses it in a safe way)
+ 	};
+ 
++	int retCount = 0;
++
++	// [barreplay] H103 (toggle2 0x20000): what the original next (Lua's
++	// luaB_next) does, without fetching it from the registry and entering it
++	// through lua_call: the same lua_next, so the same keys in the same order
++	if ((::g_brToggles2 & 0x20000) != 0) {
++		luaL_checktype(L, 1, LUA_TTABLE);
++		lua_settop(L, 2);
++		if (lua_next(L, 1)) {
++			retCount = 2;
++		} else {
++			lua_pushnil(L);
++			retCount = 1;
++		}
++	} else {
+ 	const CSyncedLuaHandle* slh = GetSyncedHandle(L);
+ 	assert(slh->origNextRef > 0);
+ 	const int oldTop = lua_gettop(L);
+@@ -2191,8 +2208,9 @@ int CSyncedLuaHandle::SyncedNext(lua_State* L)
+ 	}
+ 
+ 	lua_call(L, 2, LUA_MULTRET);
+-	const int retCount = lua_gettop(L) - oldTop;
++	retCount = lua_gettop(L) - oldTop;
+ 	assert(retCount == 1 || retCount == 2);
++	}
+ 
+ 	if (retCount >= 2) {
+ 		const int keyType = lua_type(L, -2);
+-- 
+2.53.0
+

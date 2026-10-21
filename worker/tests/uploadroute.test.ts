@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import app from "../src/worker/app";
+import { brp } from "./brpfixture";
 import { MAX_JOB_PROGRESS_BYTES, MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
 import type {
   IngestJob,
@@ -18,7 +19,7 @@ import type {
   JobStats,
   QueueJob,
 } from "../src/worker/jobs";
-import type { ReplayEntry } from "../src/worker/replayentry";
+import type { ReplayEntry, ReplayFilter } from "../src/worker/replayentry";
 import type { GameListRow, GamesCursor } from "../src/worker/games";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
@@ -179,13 +180,17 @@ class FakeIndex {
     return out;
   }
   lastGamesQuery: { limit: number; after: GamesCursor | null } | null = null;
-  gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
+  lastGamesFilter: ReplayFilter | null = null;
+  /** Answer like the DO before the filters existed: no `partial`, filter ignored. */
+  gamesPageUnfiltering = false;
+  gamesPage(limit: number, after: GamesCursor | null, filter?: ReplayFilter): { games: GameListRow[]; next: GamesCursor | null; partial?: boolean } {
     this.lastGamesQuery = { limit, after };
+    this.lastGamesFilter = filter ?? null;
     const from = after === null ? 0 : this.games.findIndex((g) => g.id === after.id) + 1;
     const games = this.games.slice(from, from + limit);
     const last = games[games.length - 1];
     const next = from + limit < this.games.length && last ? { endUnix: last.startUnix, id: last.id } : null;
-    return { games, next };
+    return this.gamesPageUnfiltering ? { games, next } : { games, next, partial: false };
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
   queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
@@ -336,6 +341,27 @@ test("upload archives the stream and records a pending job", async () => {
   assert.equal(job.state, "pending");
   assert.equal(job.streamKey, body.streamKey);
   assert.equal(job.gameId, GAME_ID);
+});
+
+// A capture uploaded already packed takes the same door: archived byte for
+// byte beside the streams, with its own extension (which is how the daemon
+// knows not to pack it), and an ordinary upload job.
+test("upload accepts a .brp and archives it as one", async () => {
+  const { env, index, bucket } = makeEnv();
+  const body = brp({ gameId: GAME_ID, recorder: { playerId: 1, allyTeam: 0, spectator: true } });
+  const res = await app.request("/api/upload", { method: "POST", body }, env);
+  assert.equal(res.status, 200);
+  const r = await asJson(res);
+  assert.equal(r.gameId, GAME_ID);
+  assert.match(r.streamKey, new RegExp(`^streams/\\d{4}-\\d{2}/${GAME_ID}/\\d+-[0-9a-f]{8}-spec\\.brp$`));
+  assert.deepEqual(bucket.objects.get(r.streamKey), body);
+  const job = index.jobs.get(r.job);
+  assert.equal(job?.kind, "upload");
+  assert.equal(job?.streamKey, r.streamKey);
+
+  const bad = await app.request("/api/upload", { method: "POST", body: brp({ gameId: GAME_ID }, 3) }, env);
+  assert.equal(bad.status, 400);
+  assert.match((await asJson(bad)).error, /unsupported \.brp version 3/);
 });
 
 // An uploaded stream is filed under the game's start month when the games
@@ -528,7 +554,7 @@ test("GET /api/games pages the mirror by cursor, and counts nothing", async () =
 
   const first = await asJson(await app.request("/api/games?limit=5", {}, env));
   assert.equal(first.games.length, 5);
-  assert.deepEqual(Object.keys(first).sort(), ["games", "next"], "no total, no page count, no offset");
+  assert.deepEqual(Object.keys(first).sort(), ["games", "next", "partial"], "no total, no page count, no offset");
   assert.equal(first.games[0].published, true);
   assert.equal(first.games[1].jobState, "pending");
   assert.equal(typeof first.next, "string", "a page with more behind it hands out the cursor of the next one");
@@ -555,6 +581,41 @@ test("GET /api/games pages the mirror by cursor, and counts nothing", async () =
   // A cursor into the undated tail (blank end) is a valid one.
   assert.equal((await app.request("/api/games?after=:game-9", {}, env)).status, 200);
   assert.deepEqual(index.lastGamesQuery?.after, { endUnix: null, id: "game-9" });
+});
+
+// The Games page's filter bar: the replay list's filters, minus the player
+// name, with the id PREFIX under ?idPrefix= since ?id= is the fetch-by-ids.
+test("GET /api/games filters like the replay list, minus the player name", async () => {
+  const { env, index } = makeEnv();
+  const q = "/api/games?from=2026-10-01&to=2026-10-02&map=Supreme%20Isthmus&minPlayers=10&maxPlayers=16"
+    + "&minDuration=600&maxDuration=1800&idPrefix=AB12&settings=lava,ranked&player=bob";
+  assert.equal((await app.request(q, {}, env)).status, 200);
+  const f = index.lastGamesFilter!;
+  assert.equal(f.map, "Supreme Isthmus");
+  assert.deepEqual([f.minPlayers, f.maxPlayers, f.minDuration, f.maxDuration], [10, 16, 600, 1800]);
+  assert.equal(f.id, "ab12", "the prefix is lower-cased like the replay list's");
+  assert.deepEqual(f.settings, ["lava", "ranked"]);
+  assert.equal(f.player, null, "a player name is not a filter the mirror offers");
+  assert.equal(f.from, Date.UTC(2026, 9, 1) / 1000);
+  // A malformed filter is a 400 naming the param the caller sent.
+  const bad = await app.request("/api/games?idPrefix=xyz", {}, env);
+  assert.equal(bad.status, 400);
+  assert.match((await asJson(bad)).error, /^idPrefix /);
+  assert.equal((await app.request("/api/games?minPlayers=lots", {}, env)).status, 400);
+});
+
+// During a deploy the new route can reach a ReplayIndex still running the
+// build before filters (it took two arguments and dropped the third): it
+// answered every filtered request with the UNFILTERED mirror. A filtered
+// request must never come back unfiltered.
+test("GET /api/games refuses to pass off an unfiltered page as a filtered one", async () => {
+  const { env, index } = makeEnv();
+  index.gamesPageUnfiltering = true;
+  const res = await app.request("/api/games?map=Supreme%20Isthmus", {}, env);
+  assert.equal(res.status, 503);
+  assert.match((await asJson(res)).error, /filter/);
+  // An unfiltered listing is the same either way, so it still answers.
+  assert.equal((await app.request("/api/games?limit=5", {}, env)).status, 200);
 });
 
 // Fetch-by-ids: ?id= answers the named games instead of a listing page.

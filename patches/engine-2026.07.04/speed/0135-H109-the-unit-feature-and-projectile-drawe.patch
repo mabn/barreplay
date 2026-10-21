@@ -1,0 +1,137 @@
+From 10f3ceff324f34671f7c420ef56c0ce590d1189e Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 19:00:51 +0000
+Subject: [PATCH 135/149] [barreplay] H109: the unit, feature and projectile
+ drawers take no events in a headless run (toggle3 0x4, from the environment
+ at engine start only); H110: builders' nano particles skipped after the piece
+ query (toggle3 0x8)
+
+Measured on speed59's main thread: adding and removing units and projectiles
+in the drawers' lists (linear searches over ~10k entries, two allocators) was
+~0.9%, the nano particles 0.68% (three quarters of it the nano piece's lazy
+matrix). Nothing synced reads either. The nano piece query runs the unit's
+script and stays; the particle's random numbers are the unsynced generator's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Rendering/Env/Particles/ProjectileDrawer.h  | 5 +++--
+ rts/Rendering/Features/FeatureDrawerData.h      | 5 +++--
+ rts/Rendering/Units/UnitDrawerData.h            | 5 +++--
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h       | 1 +
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp | 9 +++++++++
+ rts/Sim/Units/UnitTypes/Builder.cpp             | 6 ++++++
+ 6 files changed, 25 insertions(+), 6 deletions(-)
+
+diff --git a/rts/Rendering/Env/Particles/ProjectileDrawer.h b/rts/Rendering/Env/Particles/ProjectileDrawer.h
+index fb3fbe8..79e224d 100644
+--- a/rts/Rendering/Env/Particles/ProjectileDrawer.h
++++ b/rts/Rendering/Env/Particles/ProjectileDrawer.h
+@@ -51,9 +51,10 @@ public:
+ 
+ 
+ 	bool WantsEvent(const std::string& eventName) {
+-		return
++		extern bool g_brH109; // [barreplay] H109
++		return !g_brH109 && (
+ 			(eventName == "RenderProjectileCreated") ||
+-			(eventName == "RenderProjectileDestroyed");
++			(eventName == "RenderProjectileDestroyed"));
+ 	}
+ 	bool GetFullRead() const { return true; }
+ 	int GetReadAllyTeam() const { return AllAccessTeam; }
+diff --git a/rts/Rendering/Features/FeatureDrawerData.h b/rts/Rendering/Features/FeatureDrawerData.h
+index 5d08a34..daf57fe 100644
+--- a/rts/Rendering/Features/FeatureDrawerData.h
++++ b/rts/Rendering/Features/FeatureDrawerData.h
+@@ -10,10 +10,11 @@ class CFeatureDrawerData : public CFeatureDrawerDataBase {
+ public:
+ 	// CEventClient interface
+ 	bool WantsEvent(const std::string & eventName) override {
+-		return
++		extern bool g_brH109; // [barreplay] H109
++		return !g_brH109 && (
+ 			eventName == "RenderFeaturePreCreated" ||
+ 			eventName == "RenderFeatureCreated"    ||
+-			eventName == "RenderFeatureDestroyed";
++			eventName == "RenderFeatureDestroyed");
+ 	}
+ 	void RenderFeaturePreCreated(const CFeature* feature) override;
+ 	void RenderFeatureCreated(const CFeature* feature) override;
+diff --git a/rts/Rendering/Units/UnitDrawerData.h b/rts/Rendering/Units/UnitDrawerData.h
+index d5ae046..5277588 100644
+--- a/rts/Rendering/Units/UnitDrawerData.h
++++ b/rts/Rendering/Units/UnitDrawerData.h
+@@ -54,12 +54,13 @@ class CUnitDrawerData : public CUnitDrawerDataBase {
+ public:
+ 	// CEventClient interface
+ 	bool WantsEvent(const std::string& eventName) override {
+-		return
++		extern bool g_brH109; // [barreplay] H109
++		return !g_brH109 && (
+ 			eventName == "RenderUnitPreCreated" ||
+ 			eventName == "RenderUnitCreated" || eventName == "RenderUnitDestroyed" ||
+ 			eventName == "UnitEnteredRadar"  || eventName == "UnitEnteredLos"      ||
+ 			eventName == "UnitLeftRadar"     || eventName == "UnitLeftLos"         ||
+-			eventName == "PlayerChanged";
++			eventName == "PlayerChanged");
+ 	}
+ 
+ 	void RenderUnitPreCreated(const CUnit* unit) override;
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+index 1113163..3ab5deb 100644
+--- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -20,6 +20,7 @@ extern unsigned g_brToggles;
+ // BARREPLAY_TOGGLES2 / "t2=<hex>": the second word of switches
+ extern unsigned g_brToggles2;
+ extern unsigned g_brToggles3;
++extern bool g_brH109;
+ 
+ // [barreplay] H76 (toggle 0x200): the largest chunk a for_mt_chunk call of the
+ // unit loops hands one thread. for_mt_chunk cuts its range into one chunk per
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 2e4a04c..e23936b 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -60,6 +60,15 @@ static unsigned BrReadToggles3Env() {
+ }
+ unsigned g_brToggles3 = BrReadToggles3Env();
+ 
++// [barreplay] H109 (toggle3 0x4, from BARREPLAY_TOGGLES3 at engine start only,
++// never from park.go): the unit, feature and projectile drawers take no events
++// in a headless run, so they hold nothing and nothing is added to or removed
++// from them as units, features and projectiles come and go. Nothing synced
++// reads them; their own readers (drawing, Lua's unsynced render reads) then
++// see empty lists. Latched because the lists cannot be emptied in the middle
++// of a run without leaving dead objects in other drawing state.
++bool g_brH109 = (BrReadToggles3Env() & 0x4) != 0;
++
+ // [barreplay] P1: the general move-type loop, run on all threads with exactly
+ // the sequential result.
+ //
+diff --git a/rts/Sim/Units/UnitTypes/Builder.cpp b/rts/Sim/Units/UnitTypes/Builder.cpp
+index deb8c84..a9f0209 100644
+--- a/rts/Sim/Units/UnitTypes/Builder.cpp
++++ b/rts/Sim/Units/UnitTypes/Builder.cpp
+@@ -1,5 +1,6 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include <assert.h>
+ #include <algorithm>
+ #include "Builder.h"
+@@ -981,6 +982,11 @@ void CBuilder::CreateNanoParticle(const float3& goal, float radius, bool inverse
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	const int modelNanoPiece = nanoPieceCache.GetNanoPiece(script);
+ 
++	// [barreplay] H110 (toggle3 0x8) and H109: the particle is unsynced and only
++	// drawn; the piece query above runs the unit's script and stays
++	if (g_brH109 || (g_brToggles3 & 0x8) != 0)
++		return;
++
+ 	if (!localModel.Initialized() || !localModel.HasPiece(modelNanoPiece))
+ 		return;
+ 
+-- 
+2.53.0
+

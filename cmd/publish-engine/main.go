@@ -32,6 +32,11 @@
 //  6. Prints the line to add to patchedBuilds in internal/engine/patcheddl.go
 //     and the git tag to push once it is merged.
 //
+// -windows publishes the Windows build of the same series instead (from
+// patches/engine-<version>/windows/build.sh, for FogOfWar.exe), from this
+// same Linux host: it gates the exe under Wine against the stock LINUX engine
+// and uploads engines/<version>/windows-amd64/...exe.gz. See windows.go.
+//
 // Hosts start downloading the build only once the pin is merged: the pin in
 // the repo, not the presence of an object in the bucket, is what says a build
 // passed the gate. A failed gate keeps both captures and says where.
@@ -95,8 +100,11 @@ func run() error {
 	workerDir := flag.String("worker-dir", "./worker", "worker project dir, for the account id and bucket in wrangler.jsonc")
 	patchesDir := flag.String("patches", "./patches", "the repo's patches dir; the series in it names the build's revision")
 	dry := flag.Bool("dry", false, "strip and gate, but upload nothing")
+	windows := flag.Bool("windows", false, "publish a WINDOWS build (the named spring-headless.exe), gated under Wine against the stock Linux engine")
+	wine := flag.String("wine", "", "with -windows: the Wine loader to run it with (default: wine64, wine, or /usr/lib/wine/wine64)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: publish-engine -data <BARdata> [-version <ver>] [path to spring-headless-patched]")
+		fmt.Fprintln(os.Stderr, "       publish-engine -data <BARdata> -windows [-version <ver>] <path to spring-headless.exe>")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -104,8 +112,24 @@ func run() error {
 		flag.Usage()
 		os.Exit(2)
 	}
+	// The credentials are checked before any work: a missing key found after
+	// two re-simulations wastes the whole gate.
+	var r2 *packer.R2Client
+	if !*dry {
+		if r2 = packer.NewR2ClientFromEnv(*workerDir); r2 == nil {
+			return fmt.Errorf("no R2 credentials: set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY (or put them in ./.env), or pass -dry")
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if *windows {
+		if flag.NArg() != 1 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		return runWindows(ctx, windowsOptions{dataDir: *dataDir, version: *version, gate: *gate,
+			patchesDir: *patchesDir, wine: *wine, exe: flag.Arg(0), r2: r2})
+	}
 
 	// 1. Name it.
 	bin, err := pickBinary(*dataDir, *version, flag.Arg(0))
@@ -222,14 +246,10 @@ func run() error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "\n== %s: %d MB, %d MB gzipped, sha256 %s\n", name, len(raw)>>20, gz.Len()>>20, shaHex)
-	if *dry {
+	if r2 == nil {
 		fmt.Fprintf(os.Stderr, "-dry: not uploading %s\n", key)
 	} else {
-		c := packer.NewR2ClientFromEnv(*workerDir)
-		if c == nil {
-			return fmt.Errorf("no R2 credentials: set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY (or put them in ./.env)")
-		}
-		created, err := c.PutIfAbsent(ctx, key, gz.Bytes())
+		created, err := r2.PutIfAbsent(ctx, key, gz.Bytes())
 		if err != nil {
 			return err
 		}
