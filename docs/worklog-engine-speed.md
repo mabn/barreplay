@@ -6539,3 +6539,29 @@ frame (H108's single pass). `CheckOverlap` measures from the rectangle's
 radius, holds every centre any crater accepts; an instance outside it is
 rejected at once, and inside it the tests run as before. Joins `speed65`'s
 trials.
+
+### 2026-10-21 01:15 — speed64 at 63,780: H114+H119+H120 -3.2% cycles, H116 / H117 / P12 v2 about -1% each; one slow restore
+
+`speed64` (`d78eff2`, `pgo62`'s profile), base `t3=7b` (`speed63`'s setting
+without H109, which the dumps latch), 3 rounds. **The first base trial came
+back slow** (8,953 ms, 32.3e9 cycles against ~7,490 / 27.7e9 for the other
+two), so the base below is its other two rounds:
+
+| `t3` | adds | wall | cycles |
+|---|---|---|---|
+| `7b` | (base, rounds 2-3) | 7,492 ms | 27.70e9 |
+| `fb` | P11 v2 | -0.6% | -0.5% |
+| `47b` | H116 | -1.1% | -1.1% |
+| `87b` | H117 | -1.2% | -1.3% |
+| `1007b` | P12 v2 | -1.2% | -0.8% |
+| `2007b` | H122 | -0.3% | -0.4% |
+| `927b` | H115+H118+H121 (prefetches) | +0.1% | -0.1% |
+| `617b` | H114+H119+H120 | **-3.0%** | **-3.2%** |
+| `3fffb` | all eleven | -1.1% (rounds 2-3: **-3.6%**) | -1.3% |
+
+P12 v2's check trial: 97,515 would-be skips checked (88,047 under v1), 0 wrong.
+
+**Insight:** a restore can come back with its memory not yet in huge pages
+and run ~17% slower (the effect H105's wait is for), and a three-round MEAN
+then decides a pick on one bad trial. `pipe67`'s pick now takes each variant's
+median round.
