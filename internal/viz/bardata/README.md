@@ -19,5 +19,22 @@ that table into the worker's assets).
   1..8 exactly as the widget's `rankPics` table does.
 
 Source: https://github.com/beyond-all-reason/Beyond-All-Reason (also mirrored in
-https://github.com/mabn/claudebar under `optimizer/Beyond-All-Reason`). BAR
-content is distributed under its own licenses; see the upstream repository.
+https://github.com/mabn/claudebar under `optimizer/Beyond-All-Reason`).
+
+## Licences (NOT barreplay's own licence)
+
+These files keep their upstream licences, not the MIT License the rest of this
+repository carries. As stated by BAR itself (checked 2026-10-18):
+
+- `icons/` — BAR's `license_icons.txt`: "Icons made for Beyond All Reason. By
+  IceXuick/Floris/PtaQ, all rights reserved (CC BY NC ND)", i.e. CC BY-NC-ND 4.0.
+  That allows sharing them unmodified, non-commercially, with attribution. The
+  viewer only tints them at draw time; the files themselves are unmodified.
+- `ranks/` — BAR's `luaui/images/license.txt`, subfolder `advplayerlist/ranks`:
+  "All textures in this folder were made for Beyond All Reason by IceXuick, all
+  rights reserved." No licence grant: using them needs IceXuick's permission.
+- `icontypes.lua` — BAR game code, GPL v2 (BAR's `LICENSE.md`: "BAR game code
+  is released under the GPL v2 licence").
+
+The viewer credits them in its Credits dialog (worker/index.html
+`#creditsdialog`); keep that text in step with this list.

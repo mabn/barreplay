@@ -719,7 +719,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     // section to show. None of it touches the catalog, which is what this
     // test counts.
     const initHomeNav = () => {}, initQueue = () => {}, initResim = () => {}, applyHomeTab = () => {};
-    const initLavabalanceDialog = () => {};
+    const initLavabalanceDialog = () => {}, initCredits = () => {};
     // The admin probe (GET /api/admin/me) is one fetch of its own at boot;
     // stubbed here because this test counts only what the TABLE needs.
     const probeAdmin = async () => {};
