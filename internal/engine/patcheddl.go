@@ -69,7 +69,10 @@ var patchedBuilds = map[string]PatchedBuild{
 // windows-amd64/ prefix). Same rules: a pin only for a gated binary. Until a
 // version has one, a Windows host runs that version on the stock engine.
 var patchedBuildsWindows = map[string]PatchedBuild{
-	"2026.07.04": {Rev: 3, SHA256: "e1b0328e1bab7055727664db35e63a23e0c8f85a95d1db0ece0d6abec2305098"}, // 2026.7.4-barreplay.3 windows-amd64
+	"2026.07.04": {Rev: 5, SHA256: "9c33c520e34820f84426aa9bc5bee7460394107281dc5eb880c8661a1d2fb0cb", // 2026.7.4-barreplay.5 windows-amd64 (the speed work)
+		Superseded: []string{
+			"e1b0328e1bab7055727664db35e63a23e0c8f85a95d1db0ece0d6abec2305098", // .3
+		}},
 }
 
 // patchedBuildFor picks this platform's pin for version.
