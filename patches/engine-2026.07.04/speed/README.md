@@ -10,10 +10,10 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112, 0116-0127 and 0129-0156 here,
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112, 0116-0127 and 0129-0160 here,
 0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105, 0110, 0113-0115 and 0128 in
 `rejected/`, 0046-0051 in `tools/`. Change
-identifiers continue the work log's H-series (H1-H73), with H74-H127 for the
+identifiers continue the work log's H-series (H1-H73), with H74-H129 for the
 ones below.
 P1 (with its versions v2-v9), P2, P3, P4, P5, P7, N1, N2 and the widget-side
 W1-W7 are families of their own.
@@ -229,6 +229,9 @@ the harness's `TOGGLES3=`):
 | `0x200000` | H125 | 0153 | no smoke trails behind missiles, starbursts and debris; the trail's `useAirLos` computed without it | (`speed65`) | |
 | `0x400000` | H126 | 0154-0155 | the LOS update's map work as one set of tasks: per type the units and filtering, every type's raycasts at once, each (type, ally team, band of rows)'s removes and adds, per type the cache; full view only | (`speed65`) | |
 | `0x800000` | H127 | 0156 | H108's crater pass rejects instances outside every crater's reach (from the boxes `CheckOverlap` really tests) at once | (`speed65`) | |
+| `0x1000000` | N3 | 0157 | N2 for `UnitCreated`, `UnitDestroyed` and `UnitCommand`: the handlers' Meta calls, list walks, `_unitCommandIDs` filter and `markIdle` in C when their hashes are listed (learned in `speed66`) | (`speed66`) | |
+| `0x2000000` | H128 | 0158 | `TraceRay` skips a unit or feature whose collision volume its segment cannot reach (orthonormal axes, half-scale bound, margin) before building and inverting its transform | (`speed66`) | |
+| `0x4000000` | H129 | 0159-0160 | the weapon loop prefetches the lines `CWeapon::Update` reads (the owner's `curTarget`, four weapon lines H75's raw offsets no longer hit, the target's `isDead`) and `stunned`, now a line before the last | (`speed66`) | |
 
 Not toggled (always on in these builds):
 
