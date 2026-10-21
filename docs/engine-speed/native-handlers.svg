@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="356" viewBox="0 0 900 356" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="356" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">N2: BAR&#x27;s gadget callin loops done in C, only for bytecode whose source was read</text>
+  <rect x="20" y="46" width="170" height="40" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="105" y="71" text-anchor="middle" font-weight="bold">engine callin</text>
+  <text x="105" y="100" text-anchor="middle" font-size="11" fill="#5d6470">UnitDamaged, Explosion, ...</text>
+  <path d="M190 66 L250 66" stroke="#5d6470" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+  <rect x="252" y="40" width="210" height="52" rx="6" fill="#ffffff" stroke="#1d1f23"/>
+  <text x="357" y="62" text-anchor="middle" font-size="12">hash the wrapper and</text>
+  <text x="357" y="80" text-anchor="middle" font-size="12">the handler loop bytecode</text>
+  <path d="M462 56 L560 48" stroke="#0f8f86" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+  <text x="512" y="40" font-size="11" fill="#0f8f86" text-anchor="middle">on the list</text>
+  <path d="M462 78 L560 104" stroke="#5d6470" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+  <text x="512" y="112" font-size="11" fill="#5d6470" text-anchor="middle">anything else</text>
+  <rect x="562" y="30" width="318" height="40" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="721" y="55" text-anchor="middle" font-size="12">C loop calls each gadget&#x27;s own Lua function</text>
+  <rect x="562" y="86" width="318" height="40" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="721" y="111" text-anchor="middle" font-size="12">BAR&#x27;s Lua wrapper and loop, as before</text>
+  <text x="20" y="160" font-weight="bold">The built-in list</text>
+  <text x="20" y="180" font-size="12">Only the code is replaced that sits between the engine and the gadgets: the wrapper (which also opens a profiler zone) and</text>
+  <text x="20" y="198" font-size="12">the loop over registered gadgets. Each gadget&#x27;s handler still runs as Lua, so a mod or tweakdef that changes a gadget changes</text>
+  <text x="20" y="216" font-size="12">nothing here, and a mod that changes the loop itself fails the hash and runs interpreted.</text>
+  <text x="220" y="246" font-size="12" font-weight="bold" text-anchor="middle">BAR test-31620</text>
+  <text x="360" y="246" font-size="12" font-weight="bold" text-anchor="middle">BAR test-31030</text>
+  <text x="150" y="266" font-size="12" text-anchor="end">wrapper</text>
+  <text x="220" y="266" font-size="12" text-anchor="middle" fill="#0f8f86">01272659</text>
+  <text x="360" y="266" font-size="12" text-anchor="middle" fill="#0f8f86">01272659</text>
+  <text x="150" y="286" font-size="12" text-anchor="end">Explosion</text>
+  <text x="220" y="286" font-size="12" text-anchor="middle" fill="#0f8f86">66262d25</text>
+  <text x="360" y="286" font-size="12" text-anchor="middle" fill="#0f8f86">66262d25</text>
+  <text x="150" y="306" font-size="12" text-anchor="end">UnitPreDamaged</text>
+  <text x="220" y="306" font-size="12" text-anchor="middle" fill="#0f8f86">812ad0ef</text>
+  <text x="360" y="306" font-size="12" text-anchor="middle" fill="#b0602a">a40bbe22</text>
+  <text x="150" y="326" font-size="12" text-anchor="end">UnitDamaged</text>
+  <text x="220" y="326" font-size="12" text-anchor="middle" fill="#0f8f86">61eea1fd</text>
+  <text x="360" y="326" font-size="12" text-anchor="middle" fill="#b0602a">795c83f0</text>
+  <text x="150" y="346" font-size="12" text-anchor="end">ProjectileDestroyed</text>
+  <text x="220" y="346" font-size="12" text-anchor="middle" fill="#0f8f86">f4541253</text>
+  <text x="360" y="346" font-size="12" text-anchor="middle" fill="#b0602a">7365bbaa</text>
+  <text x="440" y="266" font-size="12">A run logs whatever hashes it meets. The older build&#x27;s loops</text>
+  <text x="440" y="284" font-size="12">use ipairs and look tracy up globally, so they are different</text>
+  <text x="440" y="302" font-size="12">code: their hashes had been added to the list and were taken</text>
+  <text x="440" y="320" font-size="12">off. A hash goes on the list only once its source is read</text>
+  <text x="440" y="338" font-size="12">against the C version. -2.2% on the late window.</text>
+</svg>

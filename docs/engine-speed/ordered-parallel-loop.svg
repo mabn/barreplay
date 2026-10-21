@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="270" viewBox="0 0 900 270" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1d1f23">
+  <defs><marker id="t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="270" fill="#ffffff"/>
+  <text x="20" y="22" font-size="13" fill="#5d6470">aircraft in loop order (#1, #2, ...) →</text>
+  <g fill="#5d6470"><text x="20" y="62">main</text><text x="20" y="112">worker 1</text><text x="20" y="162">worker 2</text><text x="20" y="212">worker 3</text></g>
+  <g fill="#d5efec" stroke="#0f8f86">
+    <rect x="90" y="46" width="70" height="26" rx="4"/><rect x="100" y="96" width="70" height="26" rx="4"/><rect x="110" y="146" width="70" height="26" rx="4"/><rect x="120" y="196" width="70" height="26" rx="4"/>
+    <rect x="170" y="46" width="70" height="26" rx="4"/><rect x="180" y="96" width="70" height="26" rx="4"/><rect x="200" y="196" width="70" height="26" rx="4"/>
+    <rect x="410" y="46" width="70" height="26" rx="4"/><rect x="420" y="96" width="70" height="26" rx="4"/><rect x="430" y="146" width="70" height="26" rx="4"/><rect x="440" y="196" width="70" height="26" rx="4"/>
+  </g>
+  <g text-anchor="middle"><text x="125" y="63">#1</text><text x="135" y="113">#2</text><text x="145" y="163">#3</text><text x="155" y="213">#4</text><text x="205" y="63">#5</text><text x="215" y="113">#6</text><text x="235" y="213">#7</text><text x="445" y="63">#9</text><text x="455" y="113">#10</text><text x="465" y="163">#11</text><text x="475" y="213">#12</text></g>
+  <path d="M160 64 C 175 90, 170 120, 162 144" stroke="#b0602a" stroke-width="1.5" fill="none" marker-end="url(#t)"/>
+  <text x="180" y="132" fill="#b0602a">#3 targets #1: waits for it</text>
+  <rect x="330" y="36" width="20" height="196" fill="#f6e3d4" stroke="#b0602a"/>
+  <rect x="290" y="46" width="100" height="26" rx="4" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="340" y="63" text-anchor="middle" font-weight="bold">#8 serial</text>
+  <text x="340" y="250" text-anchor="middle" fill="#b0602a">barrier: #8 may land, crash, collide or draw a random number,</text>
+  <text x="340" y="264" text-anchor="middle" fill="#b0602a">so it runs after #1-#7 and before #9</text>
+  <text x="560" y="40" font-weight="bold">Rules</text>
+  <text x="560" y="62">Items start in loop order.</text>
+  <text x="560" y="82">An item whose target comes earlier in the loop</text>
+  <text x="560" y="98">waits until that target's update has finished.</text>
+  <text x="560" y="118">Anything that may touch shared state (collision,</text>
+  <text x="560" y="134">landing, ground crash, scripts, random draws) runs</text>
+  <text x="560" y="150">alone on the main thread, between the items before</text>
+  <text x="560" y="166">it and the items after it.</text>
+  <text x="560" y="186">The result is what the serial loop would compute.</text>
+</svg>

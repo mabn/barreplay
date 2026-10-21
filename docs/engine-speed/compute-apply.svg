@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="200" viewBox="0 0 900 200" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="200" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">Compute in parallel, apply in order (unit LOS states)</text>
+  <text x="20" y="152" fill="#5d6470">apply</text>
+  <rect x="110" y="40" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="200" y="40" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="290" y="40" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="380" y="40" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="116" y="58" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="206" y="58" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="296" y="58" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="386" y="58" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="122" y="76" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="212" y="76" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="302" y="76" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="392" y="76" width="80" height="14" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="100" y="52" text-anchor="end" font-size="11" fill="#5d6470">main</text>
+  <text x="100" y="70" text-anchor="end" font-size="11" fill="#5d6470">worker 1</text>
+  <text x="100" y="88" text-anchor="end" font-size="11" fill="#5d6470">worker 2</text>
+  <text x="250" y="112" font-size="12" fill="#5d6470" text-anchor="start">every unit&#x27;s new LOS status, on all threads: a pure function of the unit and the LOS maps</text>
+  <path d="M120 100 L120 128" stroke="#5d6470" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="110" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="132" y="152" text-anchor="middle" font-size="12">#1</text>
+  <rect x="158" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="180" y="152" text-anchor="middle" font-size="12">#2</text>
+  <rect x="206" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="228" y="152" text-anchor="middle" font-size="12">#3</text>
+  <rect x="254" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="276" y="152" text-anchor="middle" font-size="12">#4</text>
+  <rect x="302" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="324" y="152" text-anchor="middle" font-size="12">#5</text>
+  <rect x="350" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="372" y="152" text-anchor="middle" font-size="12">#6</text>
+  <rect x="398" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="420" y="152" text-anchor="middle" font-size="12">#7</text>
+  <rect x="446" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="468" y="152" text-anchor="middle" font-size="12">#8</text>
+  <rect x="494" y="136" width="44" height="24" rx="3" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="516" y="152" text-anchor="middle" font-size="12">#9</text>
+  <text x="100" y="152" text-anchor="end" font-size="11" fill="#5d6470">main</text>
+  <text x="110" y="182" font-size="12" fill="#5d6470">then the main thread, unit by unit in loop order: store the status and fire its events (enter/leave LOS, radar)</text>
+</svg>

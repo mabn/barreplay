@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="200" viewBox="0 0 900 200" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <rect width="900" height="200" fill="#ffffff"/>
+  <text x="20" y="22" font-size="15" font-weight="bold">Share of a whole re-simulation's wall time, by game minute (verylarge1)</text>
+  <text x="150" y="58" text-anchor="end">0-10 min</text><rect x="160" y="44" width="13" height="22" fill="#8a919c"/><text x="180" y="60">1.9% · 650 frames/s</text>
+  <text x="150" y="98" text-anchor="end">10-20 min</text><rect x="160" y="84" width="51" height="22" fill="#8a919c"/><text x="218" y="100">7.3% · 170 frames/s</text>
+  <text x="150" y="138" text-anchor="end">20-30 min</text><rect x="160" y="124" width="94" height="22" fill="#8a919c"/><text x="261" y="140">13.4% · 94 frames/s</text>
+  <text x="150" y="178" text-anchor="end">30-51 min</text><rect x="160" y="164" width="542" height="22" fill="#0f8f86"/><text x="710" y="180" font-weight="bold">77.4% · 27-48 frames/s</text>
+</svg>

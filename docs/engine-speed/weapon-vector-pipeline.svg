@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="380" viewBox="0 0 900 380" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="380" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">P8: the weapon-vector section folded into the weapon loop as a pipeline</text>
+  <text x="20" y="56" font-weight="bold">before</text>
+  <text x="130" y="83" text-anchor="end" font-size="12" fill="#5d6470">main</text>
+  <rect x="140" y="66" width="150" height="22" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="215" y="81" text-anchor="middle" font-size="11">vectors: its third</text>
+  <rect x="294" y="66" width="40" height="22" rx="4" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="314" y="81" text-anchor="middle" font-size="11">wait</text>
+  <rect x="338" y="66" width="540" height="22" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="608" y="81" text-anchor="middle" font-size="12">weapon loop, unit by unit</text>
+  <text x="130" y="109" text-anchor="end" font-size="12" fill="#5d6470">workers</text>
+  <rect x="140" y="92" width="190" height="18" rx="2" fill="#d5efec"/>
+  <text x="235" y="105" text-anchor="middle" font-size="11">vectors: the rest</text>
+  <text x="20" y="142" font-weight="bold">with P8</text>
+  <text x="130" y="167" text-anchor="end" font-size="12" fill="#5d6470">units</text>
+  <rect x="140" y="152" width="30" height="22" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="155.0" y="167" text-anchor="middle" font-size="11">1</text>
+  <rect x="173" y="152" width="30" height="22" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="188.0" y="167" text-anchor="middle" font-size="11">2</text>
+  <rect x="206" y="152" width="30" height="22" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="221.0" y="167" text-anchor="middle" font-size="11">3</text>
+  <rect x="239" y="152" width="30" height="22" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="254.0" y="167" text-anchor="middle" font-size="11">4</text>
+  <rect x="272" y="152" width="30" height="22" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="287.0" y="167" text-anchor="middle" font-size="11">5</text>
+  <rect x="305" y="152" width="30" height="22" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="320.0" y="167" text-anchor="middle" font-size="11">6</text>
+  <rect x="338" y="152" width="30" height="22" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="353.0" y="167" text-anchor="middle" font-size="11">7</text>
+  <rect x="371" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="386.0" y="167" text-anchor="middle" font-size="11">8</text>
+  <rect x="404" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="419.0" y="167" text-anchor="middle" font-size="11">9</text>
+  <rect x="437" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="452.0" y="167" text-anchor="middle" font-size="11">10</text>
+  <rect x="470" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="485.0" y="167" text-anchor="middle" font-size="11">11</text>
+  <rect x="503" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="518.0" y="167" text-anchor="middle" font-size="11">12</text>
+  <rect x="536" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="551.0" y="167" text-anchor="middle" font-size="11">13</text>
+  <rect x="569" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="584.0" y="167" text-anchor="middle" font-size="11">14</text>
+  <rect x="602" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="617.0" y="167" text-anchor="middle" font-size="11">15</text>
+  <rect x="635" y="152" width="30" height="22" rx="2" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="650.0" y="167" text-anchor="middle" font-size="11">16</text>
+  <rect x="668" y="152" width="30" height="22" rx="2" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="683.0" y="167" text-anchor="middle" font-size="11">17</text>
+  <rect x="701" y="152" width="30" height="22" rx="2" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="716.0" y="167" text-anchor="middle" font-size="11">18</text>
+  <rect x="734" y="152" width="30" height="22" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="749.0" y="167" text-anchor="middle" font-size="11">19</text>
+  <rect x="767" y="152" width="30" height="22" rx="2" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="782.0" y="167" text-anchor="middle" font-size="11">20</text>
+  <rect x="800" y="152" width="30" height="22" rx="2" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="815.0" y="167" text-anchor="middle" font-size="11">21</text>
+  <rect x="833" y="152" width="30" height="22" rx="2" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="848.0" y="167" text-anchor="middle" font-size="11">22</text>
+  <path d="M369 140 L369 184" stroke="#1d1f23" stroke-width="2" fill="none"/>
+  <text x="369" y="136" text-anchor="middle" font-size="11">weapon loop (main)</text>
+  <path d="M633 140 L633 184" stroke="#0f8f86" stroke-width="2" fill="none"/>
+  <text x="675" y="136" text-anchor="middle" font-size="11" fill="#0f8f86">workers&#x27; frontier</text>
+  <path d="M352 178 C 437 214, 668 214, 748 178" stroke="#b0602a" stroke-width="1.5" fill="none" marker-end="url(#o)"/>
+  <text x="536" y="226" font-size="12" fill="#b0602a" text-anchor="middle">unit 7&#x27;s shot hits unit 19 ahead of the frontier: unit 19 is made ready (its vectors computed) before the damage</text>
+  <rect x="140" y="250" width="12" height="12" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="158" y="261" font-size="12">updated</text>
+  <rect x="240" y="250" width="12" height="12" rx="2" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="258" y="261" font-size="12">vectors ready</text>
+  <rect x="370" y="250" width="12" height="12" rx="2" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="388" y="261" font-size="12">not yet computed</text>
+  <text x="140" y="292" font-size="12">A unit is made ready (computed by whoever claims it, else waited for) before its own weapons update, and before anything</text>
+  <text x="140" y="310" font-size="12">that changes or reads its vector inputs: damage, a kill or stun, a move or turn, a team or hold-fire change, a transport change,</text>
+  <text x="140" y="328" font-size="12">a collision test against its pieces, the shield query, a Lua unit read. A Lua write or an interceptable projectile makes every unit</text>
+  <text x="140" y="346" font-size="12">ready. The old section had an unwritten second job: it left every aim and muzzle piece matrix clean, so later readers in the</text>
+  <text x="140" y="364" font-size="12">loop never wrote them. The pipeline had to take that over too. -2.7% / -2.9%.</text>
+</svg>

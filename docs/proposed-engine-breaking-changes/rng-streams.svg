@@ -19,8 +19,8 @@
     <text x="30" y="208">earlier unit made this frame (weapon aim error, maneuvers,</text>
     <text x="30" y="226">hover wind, COB rand, Lua math.random…). So the unit loops</text>
     <text x="30" y="244">must run strictly in order: a draw is a global barrier.</text>
-    <text x="30" y="276" fill="#c0392b">P1 here: every draw = wait for all earlier items</text>
-    <text x="30" y="294" fill="#c0392b">(SerialPoint); weapons: 4 draws per SlowUpdate</text>
+    <text x="30" y="276" fill="#c0392b">Exact parallel loops: every draw waits for all earlier units;</text>
+    <text x="30" y="294" fill="#c0392b">each weapon draws ~7 times per slow update</text>
   </g>
   <!-- right: keyed -->
   <g>

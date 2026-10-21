@@ -9,7 +9,7 @@
       <rect x="395" y="45" width="10" height="28"/><rect x="430" y="45" width="10" height="28"/><rect x="505" y="45" width="10" height="28"/><rect x="560" y="45" width="10" height="28"/>
       <rect x="600" y="45" width="10" height="28"/><rect x="660" y="45" width="10" height="28"/><rect x="720" y="45" width="10" height="28"/><rect x="790" y="45" width="10" height="28"/>
     </g>
-    <text x="150" y="92" font-size="12">unit loop (C++)</text><text x="440" y="92" font-size="12" fill="#c55a11">AllowWeaponTarget ~3100/frame, UnitPreDamaged, UnitIdle, AllowCommand, LUS calls…</text>
+    <text x="150" y="92" font-size="12">unit loop (C++)</text><text x="440" y="92" font-size="12" fill="#c55a11">AllowWeaponTarget ~3100/frame, UnitPreDamaged, UnitIdle, AllowCommand, Lua unit scripts…</text>
     <text x="150" y="110" font-size="12">each orange slice may read or write ANY synced state, so nothing around it can be reordered or run beside it</text>
   </g>
   <text x="20" y="160">proposed:</text>

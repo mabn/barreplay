@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="394" viewBox="0 0 900 394" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="394" fill="#ffffff"/>
+  <text x="20" y="22" font-size="15" font-weight="bold">verylarge1, whole game (90,900 frames), active simulation time</text>
+  <path d="M260 48 L260 342" stroke="#d9d6cf" stroke-width="1" fill="none"/>
+  <text x="260" y="360" font-size="12" fill="#5d6470" text-anchor="middle">0</text>
+  <path d="M410 48 L410 342" stroke="#d9d6cf" stroke-width="1" fill="none"/>
+  <text x="410" y="360" font-size="12" fill="#5d6470" text-anchor="middle">10 min</text>
+  <path d="M560 48 L560 342" stroke="#d9d6cf" stroke-width="1" fill="none"/>
+  <text x="560" y="360" font-size="12" fill="#5d6470" text-anchor="middle">20 min</text>
+  <path d="M710 48 L710 342" stroke="#d9d6cf" stroke-width="1" fill="none"/>
+  <text x="710" y="360" font-size="12" fill="#5d6470" text-anchor="middle">30 min</text>
+  <path d="M410 48 L410 342" stroke="#b0602a" stroke-width="1.5" fill="none" stroke-dasharray="4 3"/>
+  <text x="414" y="42" font-size="11" fill="#b0602a">goal: 10 min</text>
+  <text x="250" y="73" text-anchor="end" font-size="12">stock 2026.07.04</text>
+  <rect x="260" y="58" width="574.25" height="20" rx="2" fill="#8a919c"/>
+  <text x="840.25" y="73" font-size="12" font-weight="normal">38m17s</text>
+  <text x="250" y="101" text-anchor="end" font-size="12">revision 3 (barreplay.3)</text>
+  <rect x="260" y="86" width="408.0" height="20" rx="2" fill="#8a919c"/>
+  <rect x="668.0" y="86" width="38.5" height="20" rx="2" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="712.5" y="101" font-size="12" font-weight="normal">27m12s-29m46s</text>
+  <text x="250" y="129" text-anchor="end" font-size="12">first exact batch, 4 threads</text>
+  <rect x="260" y="114" width="219.75" height="20" rx="2" fill="#7cc4bd"/>
+  <text x="485.75" y="129" font-size="12" font-weight="normal">14m39s (2.61x)</text>
+  <text x="250" y="157" text-anchor="end" font-size="12">+ 7 threads, pinned</text>
+  <rect x="260" y="142" width="200.25" height="20" rx="2" fill="#7cc4bd"/>
+  <text x="466.25" y="157" font-size="12" font-weight="normal">13m21s (2.87x)</text>
+  <text x="250" y="185" text-anchor="end" font-size="12">+ P4 fix, P5, P7, N2, P1 trio</text>
+  <rect x="260" y="170" width="184.5" height="20" rx="2" fill="#0f8f86"/>
+  <text x="450.5" y="185" font-size="12" font-weight="normal">12m18s (3.11x)</text>
+  <text x="250" y="213" text-anchor="end" font-size="12">+ H98-H104, P7 v4</text>
+  <rect x="260" y="198" width="174.75" height="20" rx="2" fill="#0f8f86"/>
+  <text x="440.75" y="213" font-size="12" font-weight="normal">11m39s (3.29x)</text>
+  <text x="250" y="241" text-anchor="end" font-size="12">+ P8, P10</text>
+  <rect x="260" y="226" width="166.0" height="20" rx="2" fill="#0f8f86"/>
+  <text x="432.0" y="241" font-size="12" font-weight="normal">11m04s (3.46x)</text>
+  <text x="250" y="269" text-anchor="end" font-size="12">+ P4 v2, retrained profile</text>
+  <rect x="260" y="254" width="160.25" height="20" rx="2" fill="#0f8f86"/>
+  <text x="426.25" y="269" font-size="12" font-weight="normal">10m41s (3.58x)</text>
+  <text x="250" y="297" text-anchor="end" font-size="12">+ P11, P12, H108-H127, W8</text>
+  <rect x="260" y="282" width="149.75" height="20" rx="2" fill="#0f8f86"/>
+  <text x="415.75" y="297" font-size="12" font-weight="normal">9m59s (3.83x)</text>
+  <text x="250" y="325" text-anchor="end" font-size="12">revision 5 (barreplay.5)</text>
+  <rect x="260" y="310" width="149.0" height="20" rx="2" fill="#b0602a"/>
+  <text x="415.0" y="325" font-size="12" font-weight="bold">9m56s (3.85x)</text>
+  <text x="20" y="382" font-size="12" fill="#5d6470">Every build records the same file (md5 a26e920d...). Revision 3 was measured on a hotter host, hence the range.</text>
+</svg>
