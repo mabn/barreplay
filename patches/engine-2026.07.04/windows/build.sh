@@ -15,7 +15,9 @@
 # gcc, posix threads, and BAR's mingwlibs64), the image that builds the
 # official Windows release, with the official configure.sh. Differences from
 # that release: -O3 -DNDEBUG with no -g (the release keeps -g and splits the
-# debug info off), AI disabled, and only spring-headless is built.
+# debug info off), AI disabled, the sync checker compiled out (-DSYNCCHECK=OFF,
+# which the speed patches of revision 5 on need: see ../series), and only
+# spring-headless is built.
 #
 # NO PGO+LTO, unlike the Linux build of this revision: pgo/profile.tar.xz is
 # GCC profile data keyed to the Linux build's object paths and compiler, so it
@@ -35,7 +37,7 @@ mkdir -p "$WORK/out" "$WORK/cache"
 $DOCKER run --rm --user=0:0 -v "$SRC":/build/src:ro -v "$WORK/out":/build/out:rw \
 	-v "$WORK/cache":/build/cache:rw "$IMG" bash -c "
 git config --global safe.directory '*'
-cd /build/src/docker-build-v2/scripts && ./configure.sh -DAI_TYPES=NONE \
+cd /build/src/docker-build-v2/scripts && ./configure.sh -DAI_TYPES=NONE -DSYNCCHECK=OFF \
 	-DCMAKE_CXX_FLAGS_RELWITHDEBINFO='$F' -DCMAKE_C_FLAGS_RELWITHDEBINFO='$F'
 cd /build/out && ninja -j\$(nproc) spring-headless
 status=\$?

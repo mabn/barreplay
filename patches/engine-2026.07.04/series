@@ -1,5 +1,12 @@
 # The patch series the published patched engine is built from, in apply order:
 #   git am $(grep -v '^#' series)   (from a clean checkout of the 2026.07.04 tag)
+# From revision 5 the series goes on with the speed work (speed/, docs/worklog-
+# engine-speed.md): every patch of it from 0014 in number order, the rejected/
+# ones included where later patches were written on top of them (each sits
+# behind a switch bit that is off; 0044-0045, 0052-0062 and 0068 were never in
+# the line and are not listed), then 0161, which makes the switch words default
+# to the final setting. Build with -DSYNCCHECK=OFF (pgo/build.sh and
+# windows/build.sh pass it): P1 does not compile with the sync checker.
 # Any change here or to a listed patch is a new revision of the patched build:
 # append its digest to patchSeries in internal/engine/patchrev.go (the test there
 # fails until you do), and publish the build under the new version.
@@ -29,3 +36,131 @@ experiments/H49-headless-skip-smt-tiles.patch
 0011-prefetch-in-unit-loops.patch
 0012-background-huge-page-collapse.patch
 0013-event-log-unit-sample-and-reloads.patch
+speed/0014-Build-with-SYNCCHECK-OFF-float3-bitExactEquals-cstdi.patch
+speed/0015-SYNCCHECK-OFF-keep-the-in-synced-counter-sync-histor.patch
+speed/0016-SYNCCHECK-OFF-includes-that-came-through-the-sync-he.patch
+speed/0017-SYNCCHECK-OFF-the-sync-history-dump-needs-the-checke.patch
+speed/0018-P1-the-general-move-type-loop-on-all-threads-exactly.patch
+speed/0019-P2-unit-LOS-states-computed-on-all-threads-applied-i.patch
+speed/0020-P1-v2-non-colliding-aircraft-depend-only-on-their-ta.patch
+speed/0021-P1-nested-parallel-loops-inline-during-serial-items-.patch
+speed/0022-P1-frontier-store-buffer-race-fixed-seq_cst-fence-se.patch
+speed/0023-P1-v4-classification-pre-pass-on-all-threads-the-pla.patch
+speed/0024-H73-the-headless-demo-anim-walk-skip-and-unsynced-pr.patch
+speed/0025-H73-without-the-unsynced-projectile-expiry-a-missile.patch
+speed/0026-P1-only-with-256-parallel-items-serial-reason-counte.patch
+speed/0027-P1-v5-toggle-bit-5-hover-aircraft-flying-or-hovering.patch
+speed/0028-H74-toggle-bit-6-run-ahead-prefetch-helper-on-the-ma.patch
+speed/0029-H74-seq_cst-phase-store-busy-load-Dekker-with-the-he.patch
+speed/0030-H74-fix-Load-T-return-type.patch
+speed/0031-H74-use-the-weapon-s-public-target-accessor.patch
+speed/0032-W6-Spring.GetUnitSampleDelta-the-capture-widget-s-bu.patch
+speed/0033-Clamp-unsynced-heightmap-update-rects-to-the-map-hea.patch
+speed/0034-P1-v6-landed-aircraft-not-stopping-not-crashing-run-.patch
+speed/0035-P1-v6-aircraft-taking-off-too.patch
+speed/0036-H75-prefetch-every-weapon-4-units-ahead-and-the-weap.patch
+speed/0037-H76-the-unit-loop-for_mt_chunk-calls-hand-out-chunks.patch
+speed/0038-H77-prefetch-the-candidate-6-ahead-in-GenerateWeapon.patch
+speed/0039-RectangleOverlapHandler-StageSplitTooLarge-no-refere.patch
+speed/0040-H78-MovedUnit-copies-the-quad-list-into-the-unit-s-b.patch
+speed/0041-H79-GetQuads-finds-each-row-s-run-of-quads-by-its-tw.patch
+speed/0042-P1-v7-release-the-in-order-start-before-waiting-for-.patch
+speed/0043-H80-FindAnim-s-binary-search-on-one-packed-64-bit-ke.patch
+speed/0063-H87-a-headless-demo-replay-queues-no-unsynced-height.patch
+speed/0064-H89-the-Lua-VM-s-table-gets-GETTABLE-GETGLOBAL-SELF-.patch
+speed/0065-H89-table-sets-SETTABLE-SETGLOBAL-do-luaV_settable-s.patch
+speed/0066-H88-UpdatePhysicalState-reuses-the-ground-height-whi.patch
+speed/0067-H91-UpdateUnits-does-UpdateCollisionMap-s-rate-test-.patch
+speed/0069-P4-weapon-target-searches-of-the-slow-upda.patch
+speed/0070-P4-v2-Lua-waits-only-at-the-functions-that.patch
+speed/rejected/0071-H92-UpdateWeaponVectors-keeps-its-outputs-.patch
+speed/rejected/0072-H93-the-LOS-types-per-unit-tests-in-one-pa.patch
+speed/0073-P5-the-COB-engine-s-thread-ticks-on-severa.patch
+speed/0074-P5-BARREPLAY_P5_MINSEG-and-BARREPLAY_P5_PH.patch
+speed/0075-P5-v2-visual-sfx-wakes-smoke-bubbles-CEGs-.patch
+speed/0076-P5-v3-the-safety-memo-in-the-COB-file-and-.patch
+speed/0077-P5-stats-ticks-run-by-the-main-thread-and-.patch
+speed/0078-P5-stats-interval-from-BARREPLAY_P5_STATS.patch
+speed/0079-measurement-P1-s-main-thread-waits-by-kind.patch
+speed/0080-H94-the-LOS-types-height-map-updates-a-sca.patch
+speed/0081-P1-v8-hover-aircraft-standing-still-in-the.patch
+speed/0082-N2-BAR-s-callin-wrapper-handler-loop-for-U.patch
+speed/0083-N2-the-depth-decrement-as-a-subtraction-of.patch
+speed/0084-P7-the-LOS-update-s-per-unit-loop-and-rayc.patch
+speed/0085-P7-v2-phase-A-only-tests-H93-s-read-only-p.patch
+speed/0086-N2-the-tracy-upvalues-may-be-the-engine-s-.patch
+speed/0087-P1-v9-items-claimed-in-batches-of-consecut.patch
+speed/0088-N2-the-verified-hashes-built-in-test-31620.patch
+speed/0089-P1-std-min-float-pos.y-is-a-SyncedFloat-wi.patch
+speed/0090-P4-wait-for-the-searches-whose-rays-can-se.patch
+speed/0091-P7-v3-no-window-in-a-frame-with-fewer-than.patch
+speed/rejected/0092-H96-thread-pool-workers-spin-2-ms-toggle2-.patch
+speed/rejected/0093-H96-g_brToggles2-declared-at-global-scope.patch
+speed/rejected/0094-H97-each-unit-s-slot-in-its-quad-lists-kep.patch
+speed/0095-H98-the-unit-loop-prefetches-the-quad-book.patch
+speed/0096-bench-harness-after-a-restore-wait-until-h.patch
+speed/0097-bench-harness-ILog-before-the-bench-code.patch
+speed/0098-H99-the-per-frame-Lua-GC-step-on-its-own-t.patch
+speed/0099-H100-the-ground-system-s-heading-change-an.patch
+speed/rejected/0100-H101-CUnit-Update-on-all-threads-then-even.patch
+speed/0101-H99-never-destroy-the-GC-thread-s-mutex-an.patch
+speed/rejected/0102-H102-the-push-wakes-any-sleeping-worker-to.patch
+speed/rejected/0103-H101-builders-factories-and-units-firing-a.patch
+speed/0104-H103-synced-next-calls-lua_next-directly-i.patch
+speed/rejected/0105-H101-idle-builders-and-factories-update-on.patch
+speed/0106-H104-in-a-demo-replay-the-unsynced-halves-.patch
+speed/0107-H104-the-flag-is-public.patch
+speed/0108-P7-v4-phase-A-runs-each-sensor-type-s-per-.patch
+speed/0109-P7-v4-the-LOS-handler-s-event-functions-ta.patch
+speed/rejected/0110-P7-v4.1-phase-A-in-two-stages-tests-in-chu.patch
+speed/0111-P8-measurement-Lua-writes-damage-and-kill-.patch
+speed/0112-P8-weapon-vectors-computed-by-the-workers-.patch
+speed/rejected/0113-P9-the-collision-map-update-s-check-on-all.patch
+speed/rejected/0114-P9-BrCollisionSync-in-the-.cpp-CUnit-is-in.patch
+speed/rejected/0115-P9-made-exact-by-construction-the-pre-chec.patch
+speed/0116-P8-hooks-for-every-cross-unit-reader-in-th.patch
+speed/0117-P8-P9-BARREPLAY_P8_MINUNITS-BARREPLAY_P9_M.patch
+speed/0118-P8-Lua-writes-in-the-loop-counted-by-name-.patch
+speed/0119-P10-the-fighters-enemy-aircraft-searches-l.patch
+speed/0120-P10-mismatches-check-mode-on-the-bench-lin.patch
+speed/0121-bench-harness-a-p4check-word-in-park.go-tu.patch
+speed/0122-P4-v2-the-enemy-drain-waits-only-for-searc.patch
+speed/0123-P4-the-first-slice-s-init-keeps-a-check-mo.patch
+speed/0124-H105-the-huge-page-collapser-backs-off-fro.patch
+speed/0125-H92b-H92-s-hit-path-compares-inline-and-ke.patch
+speed/0126-bench-harness-a-sync-word-in-park.go-makes.patch
+speed/0127-H106-a-unit-above-its-height-block-s-bound.patch
+speed/rejected/0128-H107-P7-s-phase-A-can-start-later-inside-t.patch
+speed/0129-P11-the-animation-tick-s-parallel-section-.patch
+speed/0130-H106-raise-the-height-block-bounds-only-on.patch
+speed/0131-a-third-toggle-word-BARREPLAY_TOGGLES3-t3-.patch
+speed/0132-P12-measurement-the-projectile-collision-p.patch
+speed/0133-P12-the-synced-projectile-collision-pass-w.patch
+speed/0134-P12-the-check-mode-also-from-park.go-p12ch.patch
+speed/0135-H109-the-unit-feature-and-projectile-drawe.patch
+speed/0136-H111-Lua-s-hashmod-remainder-by-Lemire-s-r.patch
+speed/0137-H112-prefetch-the-other-lines-CUnit-Update.patch
+speed/0138-H113-explosion-generators-give-their-answe.patch
+speed/0139-P11-v2-the-animation-workers-take-chunks-f.patch
+speed/0140-H114-the-unit-loop-s-collision-map-bookkee.patch
+speed/0141-H115-prefetches-for-P8-s-setup-and-the-wea.patch
+speed/0142-H116-CBuilder-Update-without-copying-the-f.patch
+speed/0143-H117-the-COB-thread-map-rebuilt-once-its-t.patch
+speed/0144-H118-prefetch-deathScriptFinished-16-units.patch
+speed/0145-H119-FindAnim-on-a-perturbed-list-binary-s.patch
+speed/0146-H120-a-synced-ray-above-its-blocks-height-.patch
+speed/0147-H121-prefetches-in-GetUnitsExact-and-the-b.patch
+speed/0148-P12-v2-a-Lua-write-to-one-unit-marks-that-.patch
+speed/0149-H122-the-ground-move-type-hands-its-ground.patch
+speed/0150-H123-the-capture-sample-s-per-unit-half-on.patch
+speed/0151-H124-P12-v3-calls-that-change-no-vector-or.patch
+speed/0152-W8-the-capture-widget-s-damage-drain-in-th.patch
+speed/0153-H125-no-smoke-trails-behind-missiles-starb.patch
+speed/0154-H126-the-LOS-update-s-map-work-as-one-set-.patch
+speed/0155-H126-the-map-work-also-in-four-bands-of-ma.patch
+speed/0156-H127-H108-s-crater-pass-rejects-instances-.patch
+speed/0157-N3-N2-for-UnitCreated-UnitDestroyed-and-Un.patch
+speed/0158-H128-TraceRay-skips-objects-its-segment-ca.patch
+speed/0159-H129-the-weapon-loop-prefetches-the-lines-.patch
+speed/0160-H129-also-stunned-a-line-before-the-last-o.patch
+speed/0161-barreplay-the-switch-words-default-to-the-final-sett.patch

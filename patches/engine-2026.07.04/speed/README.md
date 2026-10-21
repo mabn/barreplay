@@ -2,15 +2,16 @@
 
 The Recoil engine branches of the verylarge1 speed work
 ([docs/worklog-engine-speed.md](../../../docs/worklog-engine-speed.md)), as
-patch files. None of them is listed in `../series`, so they are not part of
-any published revision. `SeriesDigest` hashes only the files listed there
-plus `../pgo/`, so adding them changes no pinned digest. Making them a
-revision means listing them in `series`, which needs a new digest pinned,
-a gate and a publish.
+patch files. From revision 5 (`2026.7.4-barreplay.5`) they are in
+`../series`, listed exactly as "Applying" below applies them, with 0161
+making the switch words default to the final setting; until then none of
+them was part of a published revision (`SeriesDigest` hashes only the files
+`series` lists plus `../pgo/`, which is why a patch here changes no digest
+until it is listed).
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112, 0116-0127 and 0129-0160 here,
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112, 0116-0127 and 0129-0161 here,
 0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105, 0110, 0113-0115 and 0128 in
 `rejected/`, 0046-0051 in `tools/`. Change
 identifiers continue the work log's H-series (H1-H73), with H74-H129 for the

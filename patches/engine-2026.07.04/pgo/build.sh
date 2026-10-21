@@ -9,6 +9,9 @@
 #
 # use (default): unpack profile.tar.xz and build spring-headless with
 #   -O3 -flto=4 -fprofile-use -fprofile-partial-training   (no -g)
+#   and the sync checker compiled out (-DSYNCCHECK=OFF, which the speed
+#   patches of revision 5 on need: see ../series), for the stock target
+#   (generic x86-64, like the release)
 #   in the official pinned build image, with the LTO-aware gcc-ar/gcc-ranlib
 #   (plain `ar` writes no LTO symbol index and the link loses every symbol in
 #   a static library). Output: <work>/build-use/spring-headless.
@@ -23,9 +26,10 @@
 # CLEAN build dir: ninja does not track .gcda files, and under LTO the profile
 # is applied when each object is compiled, not at the link.
 #
-# Training of the current profile: the medium gate replay 4936896a…, the
+# Training of the current profile (revision 5: the speed work, the switch
+# words at their defaults): the medium gate replay 4936896a…, the
 # sandboxed-BAR game c04fd06a…, and verylarge1 6a37d06a… up to frame 65580
-# (docs/worklog-engine-speed.md).
+# (docs/worklog-engine-speed.md, speed/tools/scripts/pgotrain2.sh).
 set -euo pipefail
 SRC=$(cd "$1" && pwd); WORK=$(mkdir -p "$2" && cd "$2" && pwd); MODE=${3:-use}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -47,7 +51,7 @@ OUT=$WORK/build-$MODE; mkdir -p "$OUT" "$PROF"
 $DOCKER run --rm --user=0:0 -v "$SRC":/build/src:ro -v "$OUT":/build/out:rw -v "$PROF":"$PROF":rw "$IMG" bash -c "
 git config --global safe.directory '*'
 rm -rf /build/out/* /build/out/.[!.]*   # a clean build: the profile is not a ninja dependency
-cd /build/src/docker-build-v2/scripts && ./configure.sh -DAI_TYPES=NONE \
+cd /build/src/docker-build-v2/scripts && ./configure.sh -DAI_TYPES=NONE -DSYNCCHECK=OFF \
 	-DCMAKE_CXX_FLAGS_RELWITHDEBINFO='$F' -DCMAKE_C_FLAGS_RELWITHDEBINFO='$F' \
 	-DCMAKE_EXE_LINKER_FLAGS='$L' -DCMAKE_SHARED_LINKER_FLAGS='$L' $X
 cd /build/out && ninja -j\$(nproc) spring-headless

@@ -72,27 +72,30 @@ the in-order one (0 mismatches in every check trial).
 
 ## Next steps
 
-### 1. Make it usable: a published revision
+### 1. Make it usable: a published revision — done, revision 5
 
-The speed patches are not in `patches/engine-2026.07.04/series`, so no
-re-sim host gets them. To
-publish:
+Published 2026-10-21 as `2026.7.4-barreplay.5`, for Linux and Windows
+(docs/building-recoil.md, "Revision 5"). How the open questions were settled:
 
-1. List 0014-0160 in `series` exactly as "Applying" applies them (the
-   `rejected/` ones in the line stay, toggled off: later patches were written
-   on top of them),
-   move `speed/tools/pgo-profile-speed70.tar.xz` to `pgo/profile.tar.xz`,
-   and append the new series digest to `patchSeries` (the pin test fails until
-   then).
-2. Decide how the toggles reach the engine. Today they come from the
-   environment and the bench harness's `park.go`; a published build should
-   either compile the chosen words in as defaults or have `internal/resim`
-   set them for a patched engine. The words, not the code, are what a later
-   regression bisects, so keeping them switchable is worth it.
-3. Decide the target: the speed builds are Haswell-only (AVX2/BMI); a
-   published build either keeps a generic x86-64 target (and is re-measured)
-   or ships both.
-4. Gate on more than two replays first (below), then `cmd/publish-engine`.
+- **The series**: every patch from 0014, exactly as "Applying" applies them,
+  then 0161; applied to the tag it reproduces the final branch with no
+  difference.
+- **The toggles**: compiled in as defaults (0161) — a host needs no
+  configuration, and the environment still overrides each word, so a
+  regression can still be bisected by switching bits off.
+- **The target**: generic x86-64, as the stock release, on both platforms;
+  the Haswell builds measured here gained ~1% and would crash on older CPUs.
+  The profile was retrained for it.
+- **The sync checker** stays compiled out (P1 needs it so): a re-sim on the
+  published build reports no desyncs, whatever happens.
+
+Measured on the published builds: the medium replay in 1m11s against
+stock's 1m52s on Linux (78 s against 116 s of simulation for Windows under
+Wine), and verylarge1's whole game in **9m56.0s**, identical — the
+retrained profile more than made up for the generic target (`speed70` took
+10m01.6s, `speed65` 9m59.3s). Hosts pick it up once its pin
+(`patchedBuilds`, revision 5) is merged; FogOfWar.exe's Windows pin lives on
+its own branch.
 
 ### 2. Make the gates catch more
 

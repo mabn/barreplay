@@ -53,10 +53,11 @@ type PatchedBuild struct {
 // build that passed the byte-identity gate (docs/building-recoil.md, "The
 // PATCHED build"); cmd/publish-engine prints the line to paste here.
 var patchedBuilds = map[string]PatchedBuild{
-	"2026.07.04": {Rev: 3, SHA256: "2ea1aecf0528606631625c636fe3eb31905cab145371800ca1a42d8cdb4e9d74", // 2026.7.4-barreplay.3 (PGO+LTO)
+	"2026.07.04": {Rev: 5, SHA256: "2cdc0013a5142bc94fea6070938aa4264999f6bbf0d95fc7db648f7a1b3003e2", // 2026.7.4-barreplay.5 (the speed work, PGO+LTO)
 		Superseded: []string{
 			"eeb7625d02e251282aca4fea3162a21208ff0fcb468c83cf2d3bedc8b5070a27", // .1
 			"1e7b3c417aab1afe34878cad9a557368ee0c7132c72a52d84b71314437df9c01", // .2
+			"2ea1aecf0528606631625c636fe3eb31905cab145371800ca1a42d8cdb4e9d74", // .3 (PGO+LTO)
 		}},
 }
 
