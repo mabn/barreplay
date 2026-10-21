@@ -2,12 +2,15 @@ package viz
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/mabn/barreplay/internal/insights"
@@ -343,8 +346,53 @@ func fxJSON(t *testing.T, path string) []byte {
 	return append(b, '\n')
 }
 
-// The committed viewer fixture must be what the writer produces today (the
-// writer is deterministic), so the JS tests always exercise the current format.
+// brpContent is what a .brp holds apart from how it happens to be compressed:
+// the decoded meta and chunk index without the compressed byte ranges, then
+// every section but the meta gunzipped. The writer is deterministic for one
+// Go toolchain, but compress/flate's output is not stable across releases
+// (Go 1.27 writes other streams than the 1.24 that wrote the fixture), and
+// two files with the same content decode the same everywhere, app.js too.
+func brpContent(t *testing.T, b []byte) []byte {
+	t.Helper()
+	f, err := snapshot.ParseBRP(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := append([]snapshot.BRPChunk(nil), f.Chunks...)
+	for i := range chunks {
+		chunks[i].FOff, chunks[i].FLen, chunks[i].XOff, chunks[i].XKeyLen, chunks[i].XLen = 0, 0, 0, 0, 0
+	}
+	head, err := json.Marshal([]any{f.Version, f.Meta, f.Bounds, f.FrameTeams, f.FrameCount, f.EventCount,
+		f.CommCount, f.UnitRecords, f.ChunkFrames, chunks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := bytes.NewBuffer(head)
+	var tags []int
+	for tag := range f.Sections {
+		if tag != 'M' { // its JSON is the decoded meta above plus the compressed lengths
+			tags = append(tags, int(tag))
+		}
+	}
+	sort.Ints(tags)
+	for _, tag := range tags {
+		zr, err := gzip.NewReader(bytes.NewReader(f.Sections[byte(tag)])) // every member of the section
+		if err != nil {
+			t.Fatalf("section %c: %v", tag, err)
+		}
+		raw, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatalf("section %c: %v", tag, err)
+		}
+		fmt.Fprintf(out, "\n%c %d\n", tag, len(raw))
+		out.Write(raw)
+	}
+	return out.Bytes()
+}
+
+// The committed viewer fixture must be what the writer produces today, so the
+// JS tests always exercise the current format. The .brp counts as current
+// when its content matches (brpContent), whatever compressed it.
 func TestViewerFixtureUpToDate(t *testing.T) {
 	path := writeViewerFixture(t, t.TempDir())
 	brp, _ := os.ReadFile(path)
@@ -364,8 +412,13 @@ func TestViewerFixtureUpToDate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("%s is stale: regenerate with go test ./internal/viz -run ViewerFixture -update", dst)
+		if bytes.Equal(got, want) {
+			continue
 		}
+		if name == "viewer.brp" && bytes.Equal(brpContent(t, got), brpContent(t, want)) {
+			t.Logf("%s: the same content compressed differently (another Go toolchain); current", dst)
+			continue
+		}
+		t.Errorf("%s is stale: regenerate with go test ./internal/viz -run ViewerFixture -update", dst)
 	}
 }

@@ -3363,7 +3363,9 @@ run dev` in `worker/` plus `pack -upload local`.)
   frame from chunk.frame + k*sampleEvery is wrong wherever a capture skipped a
   sample (the harness fixture does). The lockstep is pinned by
   worker/tests/fixtures/viewer.brp + viewer.economy.json, written by internal/viz's
-  `TestViewerFixtureUpToDate` (regenerate with `-update`) and decoded by app.js's
+  `TestViewerFixtureUpToDate` (regenerate with `-update`; when the bytes differ it
+  compares CONTENT — decoded meta and gunzipped sections — because compress/flate's
+  output changes between Go releases while the format does not) and decoded by app.js's
   own functions in worker/tests/appjs.test.ts. OLDER replays (no `.brp` — the first
   read 404s) are read as they always were: `/replays/<id>.brw` is a small binary
   **"BRW1" container** of a gzipped `J` head JSON (exactly what `headFromBrp`
