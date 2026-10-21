@@ -6620,3 +6620,26 @@ start wakes them through the kernel. At ~17-26 calls a frame this is a few
 percent of a medium frame (2.7 ms) and probably under 1% of a 16 ms late
 frame, and the obvious cures were measured before: H96 (workers spinning 2 or
 20 ms) +7% / +28%, H102 (forced wakes, worker 1 spinning 1 ms) noise.
+
+### 2026-10-21 02:40 — N3: N2 for UnitCreated, UnitDestroyed, UnitCommand (queued as speed66)
+
+luaprof63's handler-own time: `AllowCommand` 0.38%, `UnitCommand` 0.35%,
+`UnitDestroyed` 0.29%, `UnitCreated` 0.18%, the installed wrapper 0.16%,
+`GameFrame` 0.15%. **N3** (`t3` `0x1000000`, `be764ff`) does for the middle
+three what N2 does for the damage callins: when the global is BAR's wrapper
+over a handler whose bytecode hash is listed, the C dispatcher runs the same
+steps. Read against this build's `luarules/gadgets.lua`: `UnitCreated` and
+`UnitDestroyed` call `self:MetaUnitAdded/MetaUnitRemoved` and only then read
+their list (N2's dispatcher read the list first, so they get their own
+bodies), `UnitDestroyed` and `UnitCommand` call the upvalue `markIdle` after
+the loop, and `UnitCommand` is a `for i = 1, #list` loop filtered by
+`g._unitCommandIDs` (`not ids or ids[cmdId] or (cmdId < 0 and
+ids[CMD_BUILD])`, read through the same gets and `lua_lessthan`). The handlers'
+upvalues are checked by name and order. `AllowCommand` (insert unpacking, the
+per-command lists) and `GameFrame` are left as Lua.
+
+The three handler hashes are not on the list yet. `pipe68` (`speed66`, after
+`pipe67`) learns them from a gate's infolog (N2's per-callin log line, only for
+BAR's known wrapper), enables them through `BARREPLAY_N2_HASHES` for a second
+gate (which must say "native" for the three and be identical), the dumps and
+trials of +N3, and its whole game; they go into the list once that holds.
