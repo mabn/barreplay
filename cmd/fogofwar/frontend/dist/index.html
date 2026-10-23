@@ -176,6 +176,11 @@
       <p>The run stops before Windows has less than this much memory left, instead of freezing the computer.</p>
     </div>
     <div class="set">
+      <label>Disk space for downloads <b id="sDiskVal"></b></label>
+      <input type="range" id="sDisk" min="5" max="200" step="5">
+      <p>Before each run, the game builds, maps and engines used longest ago are deleted until the data folder fits. They download again if a game needs them.</p>
+    </div>
+    <div class="set">
       <label>Downloads</label>
       <div class="path-row"><span id="sSetup" class="muted"></span><button class="btn ghost small" id="sRecheck">Check again</button></div>
     </div>

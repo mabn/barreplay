@@ -398,6 +398,14 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           the engine release; wired in through engine.Extract7z). app.go's
                           exported methods are the page's whole API, kept narrow (no paths or
                           commands from the page; OpenReplay only opens the site's /replays/<gameId> for a valid game id).
+                          DISK LIMIT (config diskLimitGB, default 10, a settings slider): before each
+                          run engine.PruneDataDir (internal/engine/prune.go) deletes leftovers (unfinished
+                          packages, abandoned widget streams, pool files no package lists) and then the
+                          least recently USED demos, game packages (+ their now-unreferenced pool files),
+                          maps and engine versions until the data dir fits, always keeping the newest of
+                          each kind and the setup's engine. EnsureContent/EnsureEngine touch what a run
+                          uses, so mtime is last use. Nothing bounded it before: a volunteer's folder
+                          reached 45 GB and pr-downloader then refused the next game for want of 1 GiB.
                           No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
                           (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
                           memory floor, history), data\ (engine, game, maps; the engine's write

@@ -363,6 +363,9 @@ func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string)
 	if m == "" {
 		m = mapName
 	}
+	if gameMD5 != "" {
+		touch(filepath.Join(e.cfg.DataDir, "packages", gameMD5+".sdp")) // for PruneDataDir
+	}
 	if m != "" {
 		if !e.cfg.ForceProvision && e.cfg.MapOverride == "" && e.mapInstalled(mapName) {
 			fmt.Fprintf(os.Stderr, "engine: map %q already installed; skipping download\n", mapName)
@@ -403,6 +406,7 @@ func (e *Engine) mapInstalled(springname string) bool {
 			continue
 		}
 		if strings.ToLower(name[:len(name)-len(ext)]) == want {
+			touch(filepath.Join(e.cfg.DataDir, "maps", name)) // in use; see PruneDataDir
 			return true
 		}
 	}

@@ -431,10 +431,11 @@ async function startResim(input) {
 
 // ---------- running ----------
 const PHASE_STEP = {
-  'fetching demo': 0, 'provisioning content': 1, 'starting engine': 2, 'loading': 2,
+  'freeing disk space': 0, 'fetching demo': 0, 'provisioning content': 1, 'starting engine': 2, 'loading': 2,
   'simulating': 3, 'reading capture': 4, 'saving': 4, 'uploading': 5,
 };
 const PHASE_WORDS = {
+  'freeing disk space': 'Freeing disk space',
   'fetching demo': 'Downloading the demo',
   'provisioning content': 'Checking engine and game files',
   'starting engine': 'Starting the engine',
@@ -561,6 +562,8 @@ function renderSettings(st) {
   renderPatchedBuild(s.patchedEngine, st.patchedBuilds || []);
   if (document.activeElement !== $('sMin')) $('sMin').value = s.minFreeMB;
   $('sMinVal').textContent = s.minFreeMB >= 1024 ? (s.minFreeMB / 1024).toFixed(1) + ' GB' : s.minFreeMB + ' MB';
+  if (document.activeElement !== $('sDisk')) $('sDisk').value = s.diskLimitGB;
+  $('sDiskVal').textContent = s.diskLimitGB + ' GB';
   $('sSetup').textContent = st.setup && st.setup.engineVersion
     ? `Engine ${st.setup.engineVersion} · ${(st.setup.gameVersion || '').replace('Beyond All Reason ', '')}`
     : 'Not downloaded yet';
@@ -684,6 +687,8 @@ function wire() {
   $('sPatched').onclick = () => saveSettings({ patchedEngine: $('sPatched').getAttribute('aria-checked') !== 'true' });
   $('sMin').oninput = () => { const v = +$('sMin').value; $('sMinVal').textContent = v >= 1024 ? (v / 1024).toFixed(1) + ' GB' : v + ' MB'; };
   $('sMin').onchange = () => saveSettings({ minFreeMB: +$('sMin').value });
+  $('sDisk').oninput = () => { $('sDiskVal').textContent = $('sDisk').value + ' GB'; };
+  $('sDisk').onchange = () => saveSettings({ diskLimitGB: +$('sDisk').value });
   for (const b of document.querySelectorAll('[data-open]')) b.onclick = () => api.OpenFolder(b.dataset.open).catch(toastErr);
   for (const b of document.querySelectorAll('[data-pick]')) b.onclick = async () => {
     const out = b.dataset.pick === 'out';
@@ -746,7 +751,7 @@ function makeMock(scene) {
   ];
   const st = {
     mode: 'ready', steps: steps(), setup: { engineVersion: '2026.07.04', gameVersion: 'Beyond All Reason test-31620-b0a3bbf', doneAt: new Date().toISOString() },
-    history: hist, settings: { dataDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\data', outputDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays', patchedEngine: true, minFreeMB: 512 }, patchedBuilds: [{ engine: '2026.07.04', build: '2026.7.4-barreplay.5', stale: true }],
+    history: hist, settings: { dataDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\data', outputDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays', patchedEngine: true, minFreeMB: 512, diskLimitGB: 10 }, patchedBuilds: [{ engine: '2026.07.04', build: '2026.7.4-barreplay.5', stale: true }],
     hostRam: 16 * GB, cores: 8, version: '0.1.0', installId: '0192f3a1-7c2e-7d41-9b0e-5a3c8e21f4d7',
   };
   let timer = 0;
