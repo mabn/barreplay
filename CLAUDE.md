@@ -406,6 +406,8 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           each kind and the setup's engine. EnsureContent/EnsureEngine touch what a run
                           uses, so mtime is last use. Nothing bounded it before: a volunteer's folder
                           reached 45 GB and pr-downloader then refused the next game for want of 1 GiB.
+                          The replays folder keeps only the newest 50 <gameId>.brp files (replays.go
+                          pruneReplays, after each run; nothing else in a user-picked folder is touched).
                           No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
                           (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
                           memory floor, history), data\ (engine, game, maps; the engine's write

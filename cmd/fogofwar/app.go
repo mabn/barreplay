@@ -504,6 +504,9 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 		}
 		st.recordBRP(dst)
 		a.upload(ctx, run, &item, cfg.InstallID, q.jobID(), st)
+		if removed := pruneReplays(cfg.OutputDir, maxReplays); len(removed) > 0 {
+			a.logf("Deleted %d old replays (the newest %d are kept)", len(removed), maxReplays)
+		}
 		return nil
 	}()
 	s := run.stats
