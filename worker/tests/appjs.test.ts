@@ -2626,8 +2626,14 @@ test('a job\'s details name the bringest build, widget and .brp format', () => {
 // image size, which is computed from the map record loadMap already fetched.
 // These are real keys from maps/highres/ beside the API's width/height.
 test('highResMapFile names the uploaded high-res map image', () => {
+  // Matched by braces, not by a '\n}\n' search: a checkout with CRLF line
+  // endings has none, which sliced nothing and failed as a ReferenceError.
   const start = APP.indexOf('function highResMapFile(');
-  const src = APP.slice(start, APP.indexOf('\n}\n', start) + 2);
+  let src = '';
+  for (let j = APP.indexOf('{', start), depth = 0; j < APP.length; j++) {
+    if (APP[j] === '{') depth++;
+    else if (APP[j] === '}' && --depth === 0) { src = APP.slice(start, j + 1); break; }
+  }
   const highResMapFile = new Function(`${src}; return highResMapFile;`)();
   const cases: [string, number, number, string][] = [
     ['Supreme Isthmus v2.1', 24, 24, 'Supreme_Isthmus_v2.1_4096x4096.png'],
