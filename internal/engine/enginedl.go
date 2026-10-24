@@ -71,6 +71,7 @@ func EnsureEngine(ctx context.Context, cfg Config, version string) error {
 	}
 	dir := filepath.Join(cfg.DataDir, "engine", version)
 	if fileExists(filepath.Join(dir, headlessName())) {
+		touch(dir) // in use; see PruneDataDir
 		return nil
 	}
 	asset, err := engineAsset(version)

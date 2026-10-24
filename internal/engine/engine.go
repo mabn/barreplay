@@ -7,6 +7,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -346,6 +347,13 @@ func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string)
 		} else {
 			fmt.Fprintf(os.Stderr, "engine: ensuring game %q via pr-downloader...\n", game)
 			if err := e.runPRD(ctx, "--download-game", game); err != nil {
+				// With the package md5 known the check is exact, so a game that
+				// is still absent ends the run here: the engine would start
+				// without it, load nothing, and the failure would surface only
+				// as a missing widget output (seen on a full disk).
+				if gameMD5 != "" && !e.gameInstalled(gameMD5) {
+					return fmt.Errorf("game %q is not installed and could not be downloaded: %w", gameVersion, err)
+				}
 				fmt.Fprintf(os.Stderr, "engine: warning: could not fetch game %q: %v (continuing; it may already be installed)\n", game, err)
 			}
 		}
@@ -354,6 +362,9 @@ func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string)
 	m := e.cfg.MapOverride
 	if m == "" {
 		m = mapName
+	}
+	if gameMD5 != "" {
+		touch(filepath.Join(e.cfg.DataDir, "packages", gameMD5+".sdp")) // for PruneDataDir
 	}
 	if m != "" {
 		if !e.cfg.ForceProvision && e.cfg.MapOverride == "" && e.mapInstalled(mapName) {
@@ -395,6 +406,7 @@ func (e *Engine) mapInstalled(springname string) bool {
 			continue
 		}
 		if strings.ToLower(name[:len(name)-len(ext)]) == want {
+			touch(filepath.Join(e.cfg.DataDir, "maps", name)) // in use; see PruneDataDir
 			return true
 		}
 	}
@@ -406,8 +418,59 @@ func (e *Engine) runPRD(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, e.prdPath, full...)
 	hideChild(cmd, false)
 	cmd.Env = e.prdEnv()
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	return cmd.Run()
+	reason := &prdErrors{}
+	cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stderr, reason), io.MultiWriter(os.Stderr, reason)
+	err := cmd.Run()
+	if err != nil && reason.first != "" {
+		return fmt.Errorf("%s (pr-downloader %w)", reason.first, err)
+	}
+	return err
+}
+
+// prdErrors remembers the first "[Error]" line pr-downloader prints — the
+// reason a download failed ("Insufficient free disk space ..."), which its
+// exit status alone does not say.
+type prdErrors struct {
+	partial []byte
+	first   string
+}
+
+func (p *prdErrors) Write(b []byte) (int, error) {
+	if p.first != "" {
+		return len(b), nil
+	}
+	p.partial = append(p.partial, b...)
+	for {
+		i := bytes.IndexByte(p.partial, '\n')
+		if i < 0 {
+			break
+		}
+		line := strings.TrimRight(string(p.partial[:i]), "\r")
+		p.partial = p.partial[i+1:]
+		if r := prdReason(line); r != "" {
+			p.first, p.partial = r, nil
+			break
+		}
+	}
+	if len(p.partial) > 64*1024 {
+		p.partial = nil // a runaway progress line; nothing to find in it
+	}
+	return len(b), nil
+}
+
+// prdReason is the message of one pr-downloader "[Error]" line without its
+// source location ("/build/src/.../pr-downloader.cpp:305:DownloadStart():"),
+// or "" for any other line.
+func prdReason(line string) string {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "[Error]")
+	if !ok {
+		return ""
+	}
+	rest = strings.TrimSpace(rest)
+	if i := strings.Index(rest, "():"); i >= 0 && !strings.Contains(rest[:i], " ") {
+		rest = rest[i+3:]
+	}
+	return strings.TrimSpace(rest)
 }
 
 // prdEnv returns the environment for pr-downloader, ensuring BAR's rapid repo
@@ -662,7 +725,9 @@ func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() 
 	// written against the child's pid. The window before it lands is the
 	// engine's first milliseconds, when it has allocated nothing worth killing
 	// for. See oom.go for what this does NOT fix.
-	if err := SetOOMScoreAdj(e.pid, EngineOOMScoreAdj); err != nil {
+	if runtime.GOOS != "linux" {
+		// /proc and the OOM killer are Linux's; nothing to mark elsewhere.
+	} else if err := SetOOMScoreAdj(e.pid, EngineOOMScoreAdj); err != nil {
 		fmt.Fprintf(os.Stderr, "engine: warning: could not mark the engine for the OOM killer: %v\n", err)
 	}
 

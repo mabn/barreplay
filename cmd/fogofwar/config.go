@@ -25,6 +25,9 @@ type Config struct {
 	PatchedEngine bool `json:"patchedEngine"`
 	// MinFreeMB stops a run before Windows runs out of memory.
 	MinFreeMB int `json:"minFreeMB"`
+	// DiskLimitGB bounds DataDir: before each run the least recently used
+	// game builds, maps, demos and engines go until it fits.
+	DiskLimitGB int `json:"diskLimitGB"`
 	// AutoReplay re-simulates the site's newest unreplayed games one after
 	// another while the app is idle.
 	AutoReplay bool `json:"autoReplay"`
@@ -93,6 +96,7 @@ func defaultConfig(root string) Config {
 		OutputDir:     filepath.Join(root, "replays"),
 		PatchedEngine: true,
 		MinFreeMB:     512,
+		DiskLimitGB:   10,
 	}
 }
 
@@ -119,6 +123,9 @@ func loadConfig(root string) (Config, error) {
 	}
 	if c.MinFreeMB <= 0 {
 		c.MinFreeMB = d.MinFreeMB
+	}
+	if c.DiskLimitGB <= 0 {
+		c.DiskLimitGB = d.DiskLimitGB
 	}
 	return c, nil
 }

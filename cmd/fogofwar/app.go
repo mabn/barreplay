@@ -149,6 +149,7 @@ type Settings struct {
 	OutputDir     string `json:"outputDir"`
 	PatchedEngine bool   `json:"patchedEngine"`
 	MinFreeMB     int    `json:"minFreeMB"`
+	DiskLimitGB   int    `json:"diskLimitGB"`
 }
 
 var version = "dev"
@@ -364,6 +365,9 @@ func (a *App) SaveSettings(s Settings) (State, error) {
 	if s.MinFreeMB >= 128 && s.MinFreeMB <= 8192 {
 		a.cfg.MinFreeMB = s.MinFreeMB
 	}
+	if s.DiskLimitGB >= minDiskLimitGB && s.DiskLimitGB <= maxDiskLimitGB {
+		a.cfg.DiskLimitGB = s.DiskLimitGB
+	}
 	err := saveConfig(a.root, a.cfg)
 	a.dirty = true
 	a.mu.Unlock()
@@ -468,6 +472,9 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 		if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 			return err
 		}
+		a.setJobPhase(run, "freeing disk space")
+		a.pruneData(cfg)
+		a.setJobPhase(run, "")
 		a.logf("Re-simulating %s", run.gameID)
 		brp, _, err := resim.Run(ctx, a.client, run.gameID, resim.Options{
 			DataDir:       cfg.DataDir,
@@ -497,6 +504,9 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 		}
 		st.recordBRP(dst)
 		a.upload(ctx, run, &item, cfg.InstallID, q.jobID(), st)
+		if removed := pruneReplays(cfg.OutputDir, maxReplays); len(removed) > 0 {
+			a.logf("Deleted %d old replays (the newest %d are kept)", len(removed), maxReplays)
+		}
 		return nil
 	}()
 	s := run.stats
@@ -570,6 +580,28 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 		a.autoFinished(err == nil, ctx.Err() != nil)
 	}
 	a.pokeAuto()
+}
+
+// The disk limit's range in the settings. The floor still holds one game
+// build (~3.5 GB of pool), an engine and a few maps.
+const minDiskLimitGB, maxDiskLimitGB = 5, 200
+
+// pruneData keeps the data folder under the disk limit before a run, so the
+// run's own downloads find room. A failure only costs the cleanup.
+func (a *App) pruneData(cfg Config) {
+	limit := int64(cfg.DiskLimitGB) << 30
+	res, err := engine.PruneDataDir(cfg.DataDir, engine.PruneOptions{
+		Limit:       limit,
+		KeepEngines: []string{cfg.Setup.EngineVersion},
+	})
+	if err != nil {
+		a.logf("freeing disk space: %v", err)
+		return
+	}
+	if len(res.Removed) > 0 {
+		a.logf("Freed %s of downloads (%d removed); the data folder holds %s of %d GB",
+			engine.FormatBytes(res.Before-res.After), len(res.Removed), engine.FormatBytes(res.After), cfg.DiskLimitGB)
+	}
 }
 
 func (a *App) setJobPhase(run *jobRun, phase string) {
@@ -693,6 +725,7 @@ func (a *App) snapshot() State {
 			OutputDir:     a.cfg.OutputDir,
 			PatchedEngine: a.cfg.PatchedEngine,
 			MinFreeMB:     a.cfg.MinFreeMB,
+			DiskLimitGB:   a.cfg.DiskLimitGB,
 		},
 		PatchedBuilds: patched,
 		AutoReplay:    a.cfg.AutoReplay,
