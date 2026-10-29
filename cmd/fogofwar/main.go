@@ -16,7 +16,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
-	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/mabn/barreplay/internal/engine"
 )
@@ -88,8 +87,7 @@ func run() error {
 			UniqueId: "fogofwar.dev.resim",
 			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
 				if app.ctx != nil {
-					wruntime.WindowUnminimise(app.ctx)
-					wruntime.Show(app.ctx)
+					app.showWindow()
 				}
 			},
 		},

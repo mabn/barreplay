@@ -51,6 +51,7 @@ type App struct {
 	prd       transfer      // newest pr-downloader reading, from its output
 	dirty     bool
 	quitting  bool
+	hidden    bool // in the tray (tray.go)
 	startedAt time.Time
 
 	autoNote  string        // what auto-replay is doing, for the page
@@ -170,6 +171,7 @@ func NewApp(root string, cfg Config, log *logTee) *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.startTray()
 	go a.pump()
 	go a.autoLoop()
 	a.resumeUploadWatches()
@@ -178,28 +180,31 @@ func (a *App) startup(ctx context.Context) {
 	}
 }
 
-// beforeClose asks before abandoning a run; quitting mid-download is fine.
+// beforeClose asks before closing (Alt+F4; the page's close button asks with
+// its own dialog and then calls Quit, which does not ask again).
 func (a *App) beforeClose(ctx context.Context) bool {
 	a.mu.Lock()
-	running := a.mode == modeRunning && !a.quitting
+	quitting, running := a.quitting, a.mode == modeRunning
 	a.mu.Unlock()
-	if !running {
+	if quitting {
 		return false
 	}
+	title, text := quitQuestion(running)
 	ans, err := wruntime.MessageDialog(ctx, wruntime.MessageDialogOptions{
 		Type:          wruntime.QuestionDialog,
-		Title:         "Stop the re-simulation?",
-		Message:       "A game is being re-simulated. Quitting stops it, and the replay will not be saved.",
-		Buttons:       []string{"Quit", "Keep running"},
-		DefaultButton: "Keep running",
-		CancelButton:  "Keep running",
+		Title:         title,
+		Message:       text,
+		Buttons:       []string{"Close", "Cancel"},
+		DefaultButton: "Cancel",
+		CancelButton:  "Cancel",
 	})
-	return err == nil && ans != "Quit" && ans != "Yes"
+	return err == nil && ans != "Close" && ans != "Yes"
 }
 
 // shutdown stops whatever runs and waits for the engine to go, so the data
 // dir's lock and the engine process do not outlive the window.
 func (a *App) shutdown(context.Context) {
+	stopTray()
 	a.mu.Lock()
 	cancel, done := a.cancel, a.done
 	a.mu.Unlock()
@@ -789,8 +794,11 @@ func (a *App) pump() {
 		a.dirty = false
 		a.mu.Unlock()
 		if send {
-			wruntime.EventsEmit(a.ctx, "state", a.snapshot())
+			st := a.snapshot()
+			wruntime.EventsEmit(a.ctx, "state", st)
+			setTrayTooltip(trayTooltip(st.Mode, st.Job))
 		}
+		a.trayTick()
 	}
 }
 

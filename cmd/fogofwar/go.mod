@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/bodgit/sevenzip v1.6.5
+	github.com/energye/systray v1.0.3
 	github.com/mabn/barreplay v0.0.0
 	github.com/tc-hib/winres v0.3.1
 	github.com/wailsapp/wails/v2 v2.16.0
