@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,10 @@ type logTee struct {
 	onLine func(string)
 }
 
-const logKeep = 400
+const (
+	logKeep    = 400
+	logLineMax = 64 << 10
+)
 
 func startLogTee(path string, onLine func(string)) (*logTee, error) {
 	t := &logTee{onLine: onLine}
@@ -47,14 +51,14 @@ func startLogTee(path string, onLine func(string)) (*logTee, error) {
 // with carriage returns, and each redraw is a reading worth having.
 func (t *logTee) read(r io.Reader) {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	sc.Buffer(make([]byte, logLineMax), logLineMax)
 	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
 		for i, b := range data {
 			if b == '\n' || b == '\r' {
 				return i + 1, data[:i], nil
 			}
 		}
-		if atEOF && len(data) > 0 {
+		if len(data) >= logLineMax || atEOF && len(data) > 0 {
 			return len(data), data, nil
 		}
 		return 0, nil, nil
@@ -62,6 +66,9 @@ func (t *logTee) read(r io.Reader) {
 	for sc.Scan() {
 		t.add(sc.Text(), true)
 	}
+	// Scan stops only at EOF: a line too long to buffer is cut (below) rather
+	// than ending the scan, since once nothing reads the pipe every later write
+	// to stderr, the pipeline's and pr-downloader's, blocks and the app hangs.
 }
 
 func (t *logTee) add(line string, fromPipe bool) {
@@ -101,4 +108,17 @@ func (t *logTee) take() []string {
 	f := t.fresh
 	t.fresh = nil
 	return f
+}
+
+// crashToLog makes the runtime write a crash (an unrecovered panic in any
+// goroutine, a fatal error) and its stack into fogofwar.log. Only the
+// runtime's own writes go there directly; everything else keeps going
+// through the tee.
+func (t *logTee) crashToLog() {
+	if t.file == nil {
+		return
+	}
+	if err := debug.SetCrashOutput(t.file, debug.CrashOptions{}); err != nil {
+		t.add("could not send crash reports to the log: "+err.Error(), false)
+	}
 }
