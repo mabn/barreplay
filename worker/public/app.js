@@ -4688,26 +4688,18 @@ function showNotSimulated(id, row) {
   emptyEl.appendChild(box);
   if (!gameId) {
     h.textContent = 'No such replay';
-    p.textContent = `Nothing is published under “${id}”. Check the link, or find the game in the replay list.`;
+    p.textContent = 'Check the link.';
     return;
   }
-  h.textContent = 'This game has not been simulated yet';
-  p.textContent = 'A BAR replay file holds only the players’ orders, so before it can be watched here '
-    + 'it has to be played through once in the game engine. That runs on a volunteer’s machine '
-    + 'and takes from a few minutes to an hour, depending on how long and how big the game was.';
+  const busy = row && row.placeholder && row.processing;
+  h.textContent = 'Not simulated yet';
+  p.textContent = busy ? 'It is being simulated right now.' : 'Request it and it joins the replay queue.';
   const btn = document.createElement('button');
   btn.className = 'notsim-go';
   const status = document.createElement('p');
   status.className = 'notsim-status';
-  const busy = row && row.placeholder && row.processing;
-  btn.textContent = busy ? 'Follow its progress' : 'Request a replay';
-  const note = document.createElement('p');
-  note.className = 'notsim-note';
-  note.textContent = busy
-    ? 'It is being simulated right now. This page will open the replay when it is ready.'
-    : 'The game is added to the replay queue and simulated when a machine is free. '
-      + 'You can keep this page open: the replay opens here when it is ready, or come back to this link later.';
-  box.append(btn, note, status);
+  btn.textContent = busy ? 'Follow progress' : 'Request replay';
+  box.append(btn, status);
   const say = (text, cls) => { status.textContent = text || ''; status.className = 'notsim-status' + (cls ? ' ' + cls : ''); };
   btn.addEventListener('click', async () => {
     btn.disabled = true;
@@ -4742,13 +4734,13 @@ function showNotSimulated(id, row) {
       return;
     }
     btn.style.display = 'none';
-    say(resp.status === 'duplicate' ? 'Already in the queue — following it.' : 'Added to the queue.', 'ok');
-    note.textContent = 'The replay opens here when it is ready. You can also close this page and come back to this link later.';
+    p.style.display = 'none';
+    say(resp.status === 'duplicate' ? 'Already queued. It opens here when ready.' : 'Queued. It opens here when ready.', 'ok');
     const gen = loadGen;
     pollJob(resp.job, gameId, (text, cls) => { if (gen === loadGen) say(text, cls); }, {
       slowIntervalMs: 30_000,
       stop: () => gen !== loadGen,
-      waiting: 'In the queue — waiting for a machine to pick it up…',
+      waiting: 'Queued. It opens here when ready.',
       processing: (j) => 'Simulating' + (j.progress ? ': ' + progressText(j.progress) : '…'),
       onDone: () => { if (gen === loadGen) loadReplay(id); },
     });

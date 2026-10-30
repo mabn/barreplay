@@ -1252,20 +1252,19 @@ body.admin-mode #filters .admin { display: inline-block; }
 /* "Not simulated yet": what a /replays/<gameId> link to an unpublished game
    shows instead of the bucket's 404 page (app.js showNotSimulated). */
 #empty .notsim {
-  max-width: 480px; padding: 24px 28px; text-align: left;
+  padding: 28px 40px; text-align: center;
   border: 1px solid var(--line); border-radius: 10px; background: var(--float);
-  color: var(--muted); font-size: 14px; line-height: 1.5;
+  color: var(--muted); font-size: 14px;
 }
-#empty .notsim h2 { margin: 0 0 10px; color: var(--text); font-size: 19px; font-weight: 600; }
-#empty .notsim p { margin: 0 0 14px; }
+#empty .notsim h2 { margin: 0 0 8px; color: var(--text); font-size: 19px; font-weight: 600; }
+#empty .notsim p { margin: 0; }
 #empty .notsim-go {
-  font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 6px; cursor: pointer;
+  margin-top: 22px; font: inherit; font-weight: 600; padding: 10px 22px; border-radius: 6px; cursor: pointer;
   border: 0; background: var(--accent); color: var(--accent-ink);
 }
 #empty .notsim-go:hover { background: var(--accent-hi); }
 #empty .notsim-go:disabled { opacity: .55; cursor: default; }
-#empty .notsim-note { margin: 12px 0 0; font-size: 13px; color: var(--faint); }
-#empty .notsim-status { margin: 12px 0 0; color: var(--lilac); }
+#empty .notsim .notsim-status { margin-top: 16px; color: var(--lilac); }
 #empty .notsim-status:empty { display: none; }
 #empty .notsim-status.ok { color: var(--accent); }
 #empty .notsim-status.error { color: #ff8a80; }
