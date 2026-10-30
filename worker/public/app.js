@@ -7261,9 +7261,14 @@ function renderQueue(errMsg) {
       // FILTERED page of the catalog, so most published games fell through
       // to an outside link to bar-rts.com. Until then the id is plain text;
       // the gex column is the way out to the game elsewhere.
-      const a = document.createElement(j.published ? 'a' : 'span');
+      // A backend from before the flag (the deployed worker behind
+      // `npm run dev:prod`) sends none: there a finished job is the best
+      // reading of "published", and a wrong guess lands on the replay
+      // page's own "not simulated yet" card rather than nowhere.
+      const published = j.published ?? j.state === 'done';
+      const a = document.createElement(published ? 'a' : 'span');
       a.textContent = j.gameId;
-      if (j.published) {
+      if (published) {
         a.href = replayHref(j.gameId);
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
