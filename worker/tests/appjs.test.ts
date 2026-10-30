@@ -1469,6 +1469,12 @@ test('a running job shows its live progress instead of an empty row', () => {
       game: { durationSec: 217, gameSize: '1v1', startUnix: null, map: null, mapFile: null, settings: null },
       createdUnix: 1787349000, updatedUnix: 1787349900,
     },
+    // Published: the one row whose game links to its replay.
+    {
+      id: 'finished', gameId: 'ddd', kind: 'resim', state: 'done', error: null, errorKind: null,
+      stats: null, progress: null, disabled: false, published: true, game: null,
+      createdUnix: 1787349000, updatedUnix: 1787349900,
+    },
   ];
 
   const render = eval(`(function(){
@@ -1508,7 +1514,7 @@ test('a running job shows its live progress instead of an empty row', () => {
   render();
 
   const trs = dom.tbody.children;
-  assert.equal(trs.length, 3);
+  assert.equal(trs.length, 4);
   const detailOf = (tr: any) => tr.children.find((td: any) => td.className.includes('detail'));
 
   const running = detailOf(trs[0]);
@@ -1574,11 +1580,12 @@ test('a running job shows its live progress instead of an empty row', () => {
   assert.deepEqual(walk(cellOf(trs[0], 'settings')).filter((n: any) => n.className.includes('badge')).map((n: any) => n.textContent), ['lava']);
   assert.equal(cellOf(trs[2], 'map').textContent, '—');
   assert.equal(cellOf(trs[2], 'when').textContent, '—');
-  // A game still being simulated (a placeholder catalog row) is text, not a
-  // link to a page with nothing to play; one the catalog lacks links out.
+  // The game is a link ONLY when the worker says it is published — never out
+  // to another site, and never read off the (filtered) replay list.
   assert.equal(walk(cellOf(trs[0], 'game')).find((n: any) => n.tag === 'a'), undefined);
   assert.equal(walk(cellOf(trs[0], 'game')).find((n: any) => n.tag === 'span').textContent, 'aaa');
-  assert.match(walk(cellOf(trs[2], 'game')).find((n: any) => n.tag === 'a').href, /bar-rts\.com\/replays\/ccc/);
+  assert.equal(walk(cellOf(trs[2], 'game')).find((n: any) => n.tag === 'a'), undefined, 'unpublished: plain text');
+  assert.match(walk(cellOf(trs[3], 'game')).find((n: any) => n.tag === 'a').href, /replay=ddd/);
   // The game id carries a copy button.
   assert.ok(walk(cellOf(trs[0], 'game')).find((n: any) => n.className === 'copyid'));
   assert.equal(cellOf(trs[0], 'dur').textContent, '40m');
@@ -1940,6 +1947,7 @@ test('a bare game id resolves to the served revision before anything is fetched'
   let catalogOk = true;
   const boot = (list: unknown[]) => eval(`(function(){
     const replayList = list;
+    let resolvedRow = null;
     const fetch = async (url) => {
       fetches.push(String(url));
       if (!catalogOk) throw new Error('no catalog');

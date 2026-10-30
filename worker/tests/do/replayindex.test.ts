@@ -1297,6 +1297,37 @@ test("a game being worked on is not 'already published' to a re-sim request", as
   });
 });
 
+test("a public re-sim request dedupes, refuses published games and caps waiting requests", async () => {
+  await inIndex((index) => {
+    const note = "Requested from the replay page";
+    index.upsert(replay("pub", { uploaderAlly: null, view: "full" }));
+    expect(index.resimRequest("x", "pub", note, 2)).toEqual({ status: "published", job: null });
+
+    expect(index.resimRequest("a", "g1", note, 2)).toMatchObject({ status: "queued", job: { id: "a", note } });
+    expect(index.resimRequest("b", "g1", note, 2)).toMatchObject({ status: "duplicate", job: { id: "a" } });
+    expect(index.resimRequest("c", "g2", note, 2).status).toBe("queued");
+    // The cap counts only PUBLIC requests still waiting.
+    expect(index.resimRequest("d", "g3", note, 2)).toEqual({ status: "full", job: null });
+    index.jobInsert("other", "", "g4", "resim"); // an admin's or the backfill's
+    index.jobClaim("a", "resim"); // running, no longer waiting
+    expect(index.resimRequest("e", "g3", note, 2).status).toBe("queued");
+    expect(index.jobGet("x")).toBeNull();
+    expect(index.jobGet("d")).toBeNull();
+  });
+});
+
+test("the queue says which jobs have a replay to open", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("pub", { uploaderAlly: null, view: "full" }));
+    index.jobInsert("j1", "", "pub", "resim");
+    index.jobInsert("j2", "", "busy", "resim");
+    index.jobClaim("j2", "resim"); // makes a placeholder catalog row
+    index.jobInsert("j3", "", "none", "resim");
+    const byId = Object.fromEntries(index.queuePage(10, 0).jobs.map((j) => [j.id, j.published]));
+    expect(byId).toEqual({ j1: true, j2: false, j3: false });
+  });
+});
+
 // --- paging and the duration filter ----------------------------------------
 
 test("list pages with limit/offset over the ordered listing", async () => {

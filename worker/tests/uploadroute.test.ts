@@ -107,6 +107,18 @@ class FakeIndex {
     res.job.note = "Already simulated";
     return { status: "in-catalog", job: res.job, rid: this.entries.get(gameId)?.rid ?? gameId };
   }
+  // The public request's dedupe and cap; the SQL is tested against the real DO.
+  resimRequest(id: string, gameId: string, note: string, maxPending: number): { status: string; job: IngestJob | null } {
+    if (this.entries.has(gameId)) return { status: "published", job: null };
+    const active = [...this.jobs.values()].find(
+      (j) => j.gameId === gameId && j.kind === "resim" && (j.state === "pending" || j.state === "processing"),
+    );
+    if (active) return { status: active.disabled ? "disabled" : "duplicate", job: active };
+    const waiting = [...this.jobs.values()].filter((j) => j.state === "pending" && j.note === note).length;
+    if (waiting >= maxPending) return { status: "full", job: null };
+    this.jobInsert(id, "", gameId, "resim", null, note);
+    return { status: "queued", job: this.jobs.get(id) ?? null };
+  }
   jobSetNote(id: string, note: string | null): void {
     const j = this.jobs.get(id);
     if (j) j.note = note;
@@ -224,6 +236,8 @@ class FakeIndex {
               settings: e.settings ?? null,
             }
           : null,
+        publish: null,
+        published: e !== undefined && !e.placeholder,
       };
     };
     return {
@@ -2141,4 +2155,55 @@ test("an upload names the app install it came from, and the queue filters by it"
   assert.deepEqual(page.jobs.map((j: { id: string }) => j.id), [job]);
   assert.equal(page.jobs[0].installId, INSTALL);
   assert.equal((await app.request("/api/admin/queue?install=nope", {}, env)).status, 400);
+});
+
+// POST /api/resim/request is the PUBLIC door behind the viewer's "not
+// simulated yet" page: anyone may ask, so what bounds it is the cap on waiting
+// public requests, not a sign-in.
+test("POST /api/resim/request queues a game nobody published, open to anyone", async (t) => {
+  const { env, index } = makeEnv(undefined, {}); // no ADMIN_OPEN: a plain visitor
+  stubBarApi(t, new Set([RESIM_ID]));
+  const res = await app.request("/api/resim/request", { method: "POST", body: JSON.stringify({ gameId: RESIM_ID }) }, env);
+  assert.equal(res.status, 200);
+  const body = await asJson(res);
+  assert.equal(body.status, "queued");
+  assert.equal(body.state, "pending");
+  const job = index.jobs.get(body.job);
+  assert.equal(job?.kind, "resim");
+  assert.equal(job?.note, "Requested from the replay page");
+
+  // Asking again follows the same job.
+  const again = await asJson(await app.request("/api/resim/request", { method: "POST", body: JSON.stringify({ gameId: RESIM_ID }) }, env));
+  assert.equal(again.status, "duplicate");
+  assert.equal(again.job, body.job);
+  assert.equal(index.jobs.size, 1);
+});
+
+test("POST /api/resim/request refuses junk, unknown games and published ones", async (t) => {
+  const { env, index } = makeEnv(undefined, {});
+  stubBarApi(t, new Set([RESIM_ID]));
+  const junk = await app.request("/api/resim/request", { method: "POST", body: JSON.stringify({ gameId: "nope" }) }, env);
+  assert.equal(junk.status, 400);
+  const unknown = "0000000000000000000000000000dead";
+  const miss = await app.request("/api/resim/request", { method: "POST", body: JSON.stringify({ gameId: unknown }) }, env);
+  assert.equal(miss.status, 404);
+  assert.equal((await asJson(miss)).status, "unknown");
+
+  index.entries.set(RESIM_ID, { id: RESIM_ID } as ReplayEntry);
+  const pub = await asJson(await app.request("/api/resim/request", { method: "POST", body: JSON.stringify({ gameId: RESIM_ID }) }, env));
+  assert.equal(pub.status, "published");
+  assert.equal(index.jobs.size, 0, "no refusal may leave a job behind");
+});
+
+test("POST /api/resim/request stops at the cap of waiting public requests", async (t) => {
+  const { env, index } = makeEnv(undefined, {});
+  const ids = Array.from({ length: 11 }, (_, i) => i.toString(16).padStart(32, "a"));
+  stubBarApi(t, new Set(ids));
+  for (const id of ids.slice(0, 10)) {
+    const r = await app.request("/api/resim/request", { method: "POST", body: JSON.stringify({ gameId: id }) }, env);
+    assert.equal(r.status, 200);
+  }
+  const over = await app.request("/api/resim/request", { method: "POST", body: JSON.stringify({ gameId: ids[10] }) }, env);
+  assert.equal(over.status, 429);
+  assert.equal(index.jobs.size, 10);
 });

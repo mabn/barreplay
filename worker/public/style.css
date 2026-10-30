@@ -1248,3 +1248,28 @@ body.admin-mode #filters .admin { display: inline-block; }
   padding: 4px 12px; font-size: 12px; cursor: pointer;
 }
 #sqlstatsbar button:hover { color: var(--text); border-color: var(--line-hi); }
+
+/* "Not simulated yet": what a /replays/<gameId> link to an unpublished game
+   shows instead of the bucket's 404 page (app.js showNotSimulated). */
+#empty .notsim {
+  padding: 28px 40px; text-align: center;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--float);
+  color: var(--muted); font-size: 14px;
+}
+#empty .notsim h2 { margin: 0 0 8px; color: var(--text); font-size: 19px; font-weight: 600; }
+#empty .notsim p { margin: 0; }
+#empty .notsim-go {
+  margin-top: 22px; font: inherit; font-weight: 600; padding: 10px 22px; border-radius: 6px; cursor: pointer;
+  border: 0; background: var(--accent); color: var(--accent-ink);
+}
+#empty .notsim-go:hover { background: var(--accent-hi); }
+#empty .notsim-go:disabled { opacity: .55; cursor: default; }
+#empty .notsim .notsim-status { margin-top: 16px; color: var(--lilac); }
+#empty .notsim-status:empty { display: none; }
+#empty .notsim-status.ok { color: var(--accent); }
+#empty .notsim-status.error { color: #ff8a80; }
+
+/* ...and with nothing to play, none of the playback chrome around it. */
+body.no-replay #bottombar, body.no-replay #side, body.no-replay #replaytabs,
+body.no-replay #layers, body.no-replay #zoomlabel { display: none !important; }
+body.replay-page.no-replay #wrap { grid-column: 2 / -1; grid-row: 2 / -1; }

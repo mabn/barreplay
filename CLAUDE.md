@@ -2001,6 +2001,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           insert are ONE DO call (resimEnqueue) — the DO is single-threaded, so
                           that is atomic for free, where three round trips would let two pastes
                           of the same link both insert.
+                          THE PUBLIC REQUEST (POST /api/resim/request {gameId}, OPEN): what the
+                          viewer shows for a /replays/<gameId> link with nothing published (no
+                          .brp, no .brw: app.js showNotSimulated, in place of the bucket's 404
+                          page) — "not simulated yet" and a Request button. ReplayIndex.
+                          resimRequest dedupes like jobAnnounce (a queued game hands back its
+                          job, which the page follows and then loads the replay in place),
+                          answers "published" for a playable game, and is CAPPED: at most
+                          PUBLIC_RESIM_MAX_PENDING = 10 public requests (note "Requested from
+                          the replay page") may wait at once, 429 past it — the open door's
+                          bound, since the admin paste box's gate is what it lacks.
                           ANNOUNCED WORK (ReplayIndex.jobAnnounce, and POST /api/jobs on top
                           of it): a job row for a game the OPEN door refuses because it is
                           already in the catalog. That is resimEnqueue minus the catalog check,
@@ -2684,10 +2694,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           shows those jobs — one row per job with its game (plus a copy-id
                           button), MAP, START time (the header toggles it to the END time,
                           kept in localStorage), SIZE, DURATION, SETTINGS pills, a gex link, the KIND, state, what the
-                          work TOOK, age and failure detail, a link to the replay once the
-                          catalog has it (and out to bar-rts.com until then; PLAIN TEXT while the
-                          catalog row is a placeholder — a re-sim still running, which would
-                          open a broken page), and a count of the jobs in flight on the menu entry
+                          work TOOK, age and failure detail, a link to the replay ONLY once it
+                          is published (the row's `published`, joined by QUEUE_SELECT: a catalog
+                          row that is not a placeholder; plain text until then — it used to be
+                          read off replayList, a filtered page, and linked out to bar-rts.com),
+                          and a count of the jobs in flight on the menu entry
                           itself. The table spans the full width (no 1650px cap). Size, duration,
                           map, start and settings are JOINED ON by the worker
                           (ReplayIndex.queuePage), not stored on the job: the jobs table knows a

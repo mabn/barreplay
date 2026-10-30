@@ -4668,8 +4668,92 @@ function setEmpty(msg) {
   emptyEl.textContent = msg || '';
 }
 
+// ---- "not simulated yet" ---------------------------------------------------
+// A /replays/<gameId> link to a game nothing is published for — most often a
+// game that was played but never re-simulated. Instead of the bucket's 404
+// page, say so and offer to queue the re-simulation: the open POST
+// /api/resim/request (app.ts), capped server-side by how many such requests
+// may wait at once. A game already queued answers with that job, so the
+// button doubles as "follow the run". Once the job reports done, the replay
+// loads in place.
+function showNotSimulated(id, row) {
+  // Nothing to play: the playback strip, the game card, the Layers button
+  // and the Replay/Summary sub menu all describe a replay that is not there.
+  document.body.classList.add('no-replay');
+  document.body.classList.remove('summary-tab'); // a ?tab=summary link too
+  const gameId = /^[0-9a-f]{32}$/.test(id) ? id : null;
+  emptyEl.textContent = '';
+  emptyEl.style.display = 'flex';
+  const box = document.createElement('div');
+  box.className = 'notsim';
+  const h = document.createElement('h2');
+  const p = document.createElement('p');
+  box.append(h, p);
+  emptyEl.appendChild(box);
+  if (!gameId) {
+    h.textContent = 'No such replay';
+    p.textContent = 'Check the link.';
+    return;
+  }
+  const busy = row && row.placeholder && row.processing;
+  h.textContent = 'Not simulated yet';
+  p.textContent = busy ? 'It is being simulated right now.' : 'Request it and it joins the replay queue.';
+  const btn = document.createElement('button');
+  btn.className = 'notsim-go';
+  const status = document.createElement('p');
+  status.className = 'notsim-status';
+  btn.textContent = busy ? 'Follow progress' : 'Request replay';
+  box.append(btn, status);
+  const say = (text, cls) => { status.textContent = text || ''; status.className = 'notsim-status' + (cls ? ' ' + cls : ''); };
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    say('requesting…');
+    let r, resp;
+    try {
+      r = await fetch('/api/resim/request', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gameId }),
+      });
+      resp = await r.json().catch(() => ({}));
+    } catch (err) {
+      btn.disabled = false;
+      say('The request did not go through: ' + (err.message || err), 'error');
+      return;
+    }
+    if (r.status === 404 && resp.status !== 'unknown') {
+      say('This site does not take re-simulation requests.', 'error');
+      return;
+    }
+    if (!r.ok) {
+      if (r.status === 429 || r.status >= 500) btn.disabled = false;
+      say(resp.status === 'unknown'
+        ? 'BAR has no record of this game, so there is nothing to simulate.'
+        : (resp.error ? resp.error[0].toUpperCase() + resp.error.slice(1) + '.' : `The request was refused (HTTP ${r.status}).`), 'error');
+      return;
+    }
+    if (resp.status === 'published') { loadReplay(id); return; }
+    if (resp.status === 'disabled') {
+      say('This game’s simulation has been put on hold by an admin.', 'error');
+      return;
+    }
+    btn.style.display = 'none';
+    p.style.display = 'none';
+    say(resp.status === 'duplicate' ? 'Already queued. It opens here when ready.' : 'Queued. It opens here when ready.', 'ok');
+    const gen = loadGen;
+    pollJob(resp.job, gameId, (text, cls) => { if (gen === loadGen) say(text, cls); }, {
+      slowIntervalMs: 30_000,
+      stop: () => gen !== loadGen,
+      waiting: 'Queued. It opens here when ready.',
+      processing: (j) => 'Simulating' + (j.progress ? ': ' + progressText(j.progress) : '…'),
+      onDone: () => { if (gen === loadGen) loadReplay(id); },
+    });
+  });
+}
+
 async function loadReplay(id) {
   stopPlay();
+  document.body.classList.remove('no-replay');
   setEmpty('Loading…');
   // Invalidate any in-flight chunk fetches from the previous replay.
   loadGen++;
@@ -4704,13 +4788,18 @@ async function loadReplay(id) {
     head = await loadBrpHead(file);
     if (!head && gen === loadGen) {
       const r = await fetch(dataURL('/replays/' + ridPath(file) + '.brw'));
+      // Neither a .brp nor an older bundle: nothing is published under this
+      // id. Not an error to print — the bucket's 404 page is a whole HTML
+      // document — but the usual case of a game nobody has simulated yet.
+      if (r.status === 404) throw Object.assign(new Error('not published'), { notPublished: true });
       if (!r.ok) throw new Error(await r.text());
       head = await decodeHead(await r.arrayBuffer());
     }
   } catch (err) {
     if (gen !== loadGen) return;
-    setEmpty('Failed to load ' + file + ': ' + err.message);
     data = null;
+    if (err.notPublished) { showNotSimulated(id, resolvedRow); return; }
+    setEmpty('Failed to load ' + file + ': ' + err.message);
     return;
   }
   if (gen !== loadGen) return;
@@ -5441,7 +5530,12 @@ function knownReplayURL(wanted) {
 // Everything else — an explicit revision id (an alt-upload link, an old
 // shared URL), an unrevisioned file, a catalog miss — comes
 // back unchanged and the head fetch is the arbiter, exactly as before.
+// The catalog row resolveReplayFile last fetched for a bare id, or null: the
+// "not simulated yet" page reads a placeholder's processing state off it.
+let resolvedRow = null;
+
 async function resolveReplayFile(id) {
+  resolvedRow = null;
   const hit = replayList.find(e => e.id === id);
   if (hit) return urlId(hit);
   // A revision id names its file directly; a non-hex value cannot be a game
@@ -5453,6 +5547,7 @@ async function resolveReplayFile(id) {
       const rows = await r.json();
       // ?id= matches by PREFIX; only the row whose id IS this id answers.
       const e = Array.isArray(rows) ? rows.find(x => x && x.id === id) : null;
+      resolvedRow = e || null; // a placeholder says the game is being worked on
       if (e && e.rid) return e.rid;
     }
   } catch (_) { /* no catalog (static host): the direct fetch decides */ }
@@ -7155,35 +7250,28 @@ function renderQueue(errMsg) {
       return td;
     };
     cell(j.createdUnix ? fmtDate(j.createdUnix) : null);
-    // The game: a link once its replay is in the catalog (the bare id — the
-    // shareable form; loadReplay resolves it to the served revision). Until
-    // then, out to BAR's own page for it — which for a queued re-sim is the
-    // whole point of the row and is where the link was pasted from.
+    // The game: a link once its replay is published (the bare id — the
+    // shareable form; loadReplay resolves it to the served revision).
     {
       const td = document.createElement('td');
       td.className = 'game';
-      // A placeholder row (a re-sim still running, nothing published yet)
-      // would open a broken page, so its id is plain text. A published game
-      // links to its replay; one this site does not have yet links out to
-      // BAR's own page — which for a queued re-sim is where it came from.
-      const e = replayList.find(x => x.id === j.gameId);
-      const simulating = e && e.placeholder;
-      const a = document.createElement(simulating ? 'span' : 'a');
+      // A link ONLY once the game has a replay here to open — the worker
+      // says so per row (`published`: a catalog row that is not a
+      // placeholder). It used to be read off replayList, which is one
+      // FILTERED page of the catalog, so most published games fell through
+      // to an outside link to bar-rts.com. Until then the id is plain text;
+      // the gex column is the way out to the game elsewhere.
+      const a = document.createElement(j.published ? 'a' : 'span');
       a.textContent = j.gameId;
-      if (simulating) {
-        a.title = 'Still being simulated — nothing to play yet';
-      } else if (e) {
-        a.href = replayHref(e.id);
+      if (j.published) {
+        a.href = replayHref(j.gameId);
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
           ev.preventDefault();
-          openReplay(e.id);
+          openReplay(j.gameId);
         });
       } else {
-        a.href = 'https://bar-rts.com/replays/' + encodeURIComponent(j.gameId);
-        a.target = '_blank';
-        a.rel = 'noopener';
-        a.title = 'Not published here (yet) — open it on bar-rts.com';
+        a.title = 'Not published yet — nothing to play';
       }
       td.appendChild(a);
       td.appendChild(copyIdButton(j.gameId));
@@ -8081,6 +8169,7 @@ async function pollJob(job, gameId, status, opts) {
   const started = Date.now();
   for (;;) {
     await new Promise((r) => setTimeout(r, Date.now() - started > 60_000 ? slow : fast));
+    if (o.stop && o.stop()) return; // the page moved on
     let j;
     try {
       const r = await fetch('/api/jobs/' + encodeURIComponent(job));
@@ -8092,6 +8181,11 @@ async function pollJob(job, gameId, status, opts) {
     if (j.state === 'error') {
       status('processing failed: ' + (j.error || 'unknown error'), 'error');
       refreshQueue(); // the failure is now on the row too
+      return;
+    }
+    if (j.state === 'done' && o.onDone) {
+      status(o.published || 'published', 'ok');
+      o.onDone();
       return;
     }
     if (j.state === 'done') {
@@ -8107,7 +8201,7 @@ async function pollJob(job, gameId, status, opts) {
       return;
     }
     if (j.state === 'processing') {
-      status(o.processing || 'processing…');
+      status(typeof o.processing === 'function' ? o.processing(j) : (o.processing || 'processing…'));
     } else if (Date.now() - started > 60_000) {
       status(o.waiting || 'queued — waiting for a daemon…');
     }
@@ -8287,7 +8381,7 @@ function applyReplayTab() {
 // below the list, since its pane is shown by a body class, not by the page.
 function leaveReplayTabs() {
   if (clip) closeClip(false);
-  document.body.classList.remove('summary-tab', 'replay-page');
+  document.body.classList.remove('summary-tab', 'replay-page', 'no-replay');
 }
 
 function resetSummary() {

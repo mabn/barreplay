@@ -231,6 +231,11 @@ const QUEUE_SELECT = `
              COALESCE(r.map, g.map)                   AS game_map,
              g.map_file                               AS game_map_file,
              COALESCE(r.settings, g.settings)         AS game_settings,
+             -- Whether there is a replay to OPEN: a catalog row that is not a
+             -- placeholder for work in flight. The queue's Game cell links
+             -- only then (the page's own replay list is a filtered page and
+             -- cannot answer this for an arbitrary job).
+             (r.id IS NOT NULL AND r.placeholder = 0) AS game_published,
              -- The publish of an app run's .brp (the upload job naming this
              -- one as its parent), shown INSIDE the app's row rather than as
              -- a row of its own. A seek on jobs_parent; the newest if the app
@@ -252,6 +257,12 @@ export type JobEnqueue = {
   /** "in-catalog" only: the revision holding the game's full view, so the
    * caller can read which .brp format version it was simulated at. */
   rid?: string | null;
+};
+
+/** What came of a public re-sim request (resimRequest). */
+export type ResimRequest = {
+  status: "queued" | "duplicate" | "disabled" | "published" | "full";
+  job: IngestJob | null;
 };
 
 /** How long a MATCHED lobby observation is kept before pruning. Its payload
@@ -1975,6 +1986,49 @@ export class ReplayIndex extends DurableObject<Env> {
     return { status: "in-catalog", job: this.jobGet(id), rid: full?.rid ?? (known[0].rid as string | null) ?? gameId };
   }
 
+  /** resimRequest is the PUBLIC door: the "not simulated yet" page's request
+   * button, open to anyone who lands on a game nobody has published. It is
+   * resimEnqueue's dedupe with two stricter refusals, because the admin
+   * paste box's gate is what it lacks:
+   *
+   * - "published": a playable replay exists, so there is nothing to request
+   *   (no disabled job is recorded either — that note is for an admin).
+   * - "full": at most `maxPending` public requests wait at once. This is what
+   *   bounds what the open route can cost: a script asking for every game
+   *   fills the cap and is refused past it, instead of queueing hours of
+   *   engine time per minute (it happened to /api/admin/resim when that was
+   *   open). Counted over the pending rows of jobs_state, so the read is the
+   *   size of the waiting queue, never of the table.
+   *
+   * A game already queued or running hands back that job ("duplicate"), so
+   * the button can follow it instead of adding another. */
+  resimRequest(id: string, gameId: string, note: string, maxPending: number): ResimRequest {
+    const known = this.ctx.storage.sql
+      .exec(`SELECT 1 FROM replays WHERE id = ? AND placeholder = 0`, gameId)
+      .toArray();
+    if (known.length > 0) return { status: "published", job: null };
+    const active = this.ctx.storage.sql
+      .exec(
+        `SELECT ${JOB_COLS} FROM jobs
+         WHERE game_id = ? AND kind = 'resim' AND state IN ('pending', 'processing')
+         ORDER BY created_unix, id LIMIT 1`,
+        gameId,
+      )
+      .toArray();
+    if (active.length > 0) {
+      const job = jobRow(active[0]);
+      return { status: job.disabled ? "disabled" : "duplicate", job };
+    }
+    const waiting = Number(
+      this.ctx.storage.sql
+        .exec(`SELECT COUNT(*) AS n FROM jobs WHERE state = 'pending' AND note = ?`, note)
+        .toArray()[0].n,
+    );
+    if (waiting >= maxPending) return { status: "full", job: null };
+    this.jobInsert(id, "", gameId, "resim", null, note);
+    return { status: "queued", job: this.jobGet(id) };
+  }
+
   /** jobSetNote replaces one job's note (null clears it). */
   jobSetNote(id: string, note: string | null): void {
     this.ctx.storage.sql.exec(`UPDATE jobs SET note = ? WHERE id = ?`, note, id);
@@ -2912,7 +2966,12 @@ function queueJobRow(r: Record<string, unknown>): QueueJob {
   };
   // Null when neither table knows the game (an upload from a private lobby).
   const known = Object.values(game).some((v) => v !== null);
-  return { ...jobRow(r), game: known ? game : null, publish: parsePublish(r.publish as string | null) };
+  return {
+    ...jobRow(r),
+    game: known ? game : null,
+    publish: parsePublish(r.publish as string | null),
+    published: Number(r.game_published) === 1,
+  };
 }
 
 /** parsePublish reads QUEUE_SELECT's publish column: the upload job that
