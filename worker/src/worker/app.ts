@@ -514,6 +514,42 @@ app.post("/api/admin/resim", async (c) => {
   return c.json({ job: res.job?.id, gameId, status: res.status });
 });
 
+// The PUBLIC re-sim request: the viewer's "not simulated yet" page, shown when
+// a /replays/<gameId> link names a game nobody has published, offers a button
+// that lands here. OPEN, unlike /api/admin/resim, which a script once fed
+// every ranked game; what keeps this one cheap is ReplayIndex.resimRequest's
+// cap on how many public requests may WAIT at once (PUBLIC_RESIM_MAX_PENDING)
+// — a flood fills it and is refused past it, and an admin sees each one on
+// the queue page by its note, where it can be disabled. The other refusals
+// are the admin route's: the id must parse, and the BAR API must know the
+// game (the demo IS the simulation input). A game already queued hands back
+// that job, so the page can follow it.
+export const PUBLIC_RESIM_MAX_PENDING = 10;
+export const PUBLIC_RESIM_NOTE = "Requested from the replay page";
+app.post("/api/resim/request", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const raw = (body as { gameId?: unknown })?.gameId;
+  const gameId = typeof raw === "string" && raw.length <= 2048 ? parseGameId(raw) : null;
+  if (!gameId) return c.json({ error: "gameId must be a BAR game id" }, 400);
+  try {
+    const r = await fetch(`https://api.bar-rts.com/replays/${encodeURIComponent(gameId)}`);
+    if (r.status === 404) return c.json({ error: "BAR has no record of this game", gameId, status: "unknown" }, 404);
+    if (!r.ok) return c.json({ error: `BAR API: ${r.status}`, gameId }, 502);
+  } catch (e) {
+    return c.json({ error: `fetching the BAR API: ${e}`, gameId }, 502);
+  }
+  const res = await indexStub(c.env).resimRequest(crypto.randomUUID(), gameId, PUBLIC_RESIM_NOTE, PUBLIC_RESIM_MAX_PENDING);
+  if (res.status === "full") {
+    return c.json({ error: "too many requests are waiting already; try again later", gameId, status: res.status }, 429);
+  }
+  return c.json({ job: res.job?.id ?? null, gameId, status: res.status, state: res.job?.state ?? null });
+});
+
 // ON-DEMAND SUMMARIES: the viewer asks for a revision's newest game summary
 // when the one it found is older than the version it reads (or there is
 // none), and WAITS here while it is computed. Body {rid, version}: the

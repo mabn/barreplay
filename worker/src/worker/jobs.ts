@@ -216,7 +216,13 @@ export interface JobPublish {
 
 /** One row of the queue page: the job, plus what is known about its game,
  * plus — for an "app" job — the publish of the .brp it made. */
-export type QueueJob = IngestJob & { game: QueueGame | null; publish: JobPublish | null };
+export type QueueJob = IngestJob & {
+  game: QueueGame | null;
+  publish: JobPublish | null;
+  /** The game has a playable replay here (a catalog row that is not a
+   * placeholder) — the only case the queue's Game cell links. */
+  published: boolean;
+};
 
 /** JobSample is one healthcheck kept as HISTORY — the same reading JobProgress
  * carries, plus the moment the worker recorded it, stored as its own row in
