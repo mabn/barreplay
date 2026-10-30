@@ -408,6 +408,12 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           reached 45 GB and pr-downloader then refused the next game for want of 1 GiB.
                           The replays folder keeps only the newest 50 <gameId>.brp files (replays.go
                           pruneReplays, after each run; nothing else in a user-picked folder is touched).
+                          TRAY (tray.go, tray_windows.go over energye/systray on its own locked thread):
+                          an icon in the notification area; minimising (the page's button, or any other way,
+                          caught by the pump polling WindowIsMinimised) HIDES the window and its taskbar
+                          button, a click on the icon (or its menu's Open) brings it back, and closing
+                          always asks (the page's dialog, the tray menu's Quit, beforeClose for Alt+F4).
+                          With no icon up nothing is ever hidden, so the window cannot become unreachable.
                           No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
                           (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
                           memory floor, history), data\ (engine, game, maps; the engine's write

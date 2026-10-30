@@ -70,7 +70,7 @@ function waitForWails(ms) {
 }
 
 const win = {
-  min: () => window.runtime ? window.runtime.WindowMinimise() : null,
+  min: () => api.HideToTray(),
   max: () => window.runtime ? window.runtime.WindowToggleMaximise() : null,
   quit: () => api.Quit(),
 };
@@ -633,14 +633,21 @@ function toast(text) {
 }
 const toastErr = (e) => toast(String(e && e.message || e));
 
+// askQuit is the close button and the tray menu's Quit. The words are
+// tray.go quitQuestion's, which the native Alt+F4 dialog shows.
+async function askQuit() {
+  const running = S && S.mode === 'running';
+  const ok = running
+    ? await confirmBox('Stop the re-simulation?', 'Closing FogOfWar stops the game being re-simulated, and its replay will not be saved. Minimise it instead to keep it running in the tray.', 'Close', 'Cancel')
+    : await confirmBox('Close FogOfWar?', 'FogOfWar stops re-simulating games while it is closed. Minimise it instead to keep it running in the tray.', 'Close', 'Cancel');
+  if (ok) win.quit();
+}
+
 // ---------- wiring ----------
 function wire() {
   $('btnMin').onclick = win.min;
   $('btnMax').onclick = win.max;
-  $('btnClose').onclick = async () => {
-    if (S && S.mode === 'running' && !(await confirmBox('Stop the re-simulation?', 'Quitting stops the game being re-simulated, and its replay will not be saved.', 'Quit', 'Keep running'))) return;
-    win.quit();
-  };
+  $('btnClose').onclick = askQuit;
   document.querySelector('.titlebar').addEventListener('dblclick', (e) => { if (!e.target.closest('button')) win.max(); });
   $('btnSettings').onclick = () => openPanel(panelOpen('settings') ? null : 'settings');
   $('btnLog').onclick = () => openPanel(panelOpen('logpanel') ? null : 'logpanel');
@@ -714,6 +721,7 @@ async function boot() {
   }
   onEvent('state', setState);
   onEvent('log', addLog);
+  onEvent('askQuit', askQuit);
   addLog(await api.GetLog());
   setState(await api.GetState());
   if (currentView === 'viewReady') $('gameInput').focus();
@@ -829,6 +837,7 @@ function makeMock(scene) {
       OpenLog: () => later(null),
       PasteText: () => later('https://www.bar-rts.com/replays/6a37d06acbb455b1d19179d8ec965f10'),
       Quit: () => toast('Would quit'),
+      HideToTray: () => toast('Would hide to the tray'),
     },
   };
 }
