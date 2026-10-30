@@ -50,6 +50,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// A panic or fatal error is written by the runtime straight to the
+	// process's own stderr, which a windowed program does not have, so a crash
+	// left the log ending mid-sentence with no reason. Send it to the log.
+	log.crashToLog()
 	cfg, cerr := loadConfig(root)
 	fresh := cfg.InstallID == ""
 	if fresh {
@@ -95,6 +99,9 @@ func run() error {
 			Theme:               windows.Dark,
 			WebviewUserDataPath: filepath.Join(root, "webview"),
 			DisablePinchZoom:    true,
+			// A gap in the log is often the PC asleep; say so.
+			OnSuspend: func() { app.logf("Windows is going to sleep") },
+			OnResume:  func() { app.logf("Windows woke up") },
 		},
 	})
 }

@@ -58,6 +58,10 @@ type App struct {
 	autoNext  time.Time     // auto-replay looks no sooner than this
 	autoFails int           // auto-picked runs failed in a row
 	autoPoke  chan struct{} // wakes the auto-replay loop
+
+	sessMu     sync.Mutex
+	sess       sessionRecord // this run's session.json (session.go)
+	sessWarned bool
 }
 
 const (
@@ -171,6 +175,8 @@ func NewApp(root string, cfg Config, log *logTee) *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.trackSession()
+	a.watchEndSession()
 	a.startTray()
 	go a.pump()
 	go a.autoLoop()
@@ -204,6 +210,8 @@ func (a *App) beforeClose(ctx context.Context) bool {
 // shutdown stops whatever runs and waits for the engine to go, so the data
 // dir's lock and the engine process do not outlive the window.
 func (a *App) shutdown(context.Context) {
+	a.logf("FogOfWar closing")
+	a.endSession("closed")
 	stopTray()
 	a.mu.Lock()
 	cancel, done := a.cancel, a.done
