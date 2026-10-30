@@ -414,6 +414,13 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           button, a click on the icon (or its menu's Open) brings it back, and closing
                           always asks (the page's dialog, the tray menu's Quit, beforeClose for Alt+F4).
                           With no icon up nothing is ever hidden, so the window cannot become unreachable.
+                          HOW A RUN ENDED (session.go): a Go crash goes into fogofwar.log with its stack
+                          (logtee.go crashToLog, debug.SetCrashOutput; a windowed app has no stderr), a
+                          hidden top-level window (session_windows.go) logs WM_QUERYENDSESSION/
+                          WM_ENDSESSION (shutdown, sign-out, Restart Manager), Wails's OnSuspend/OnResume
+                          log sleep, and session.json is rewritten every minute with what the app is doing,
+                          plus the close reason; at the next start an unclosed record is logged with whether
+                          Windows booted since (restart/power loss) or not (killed from outside).
                           No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
                           (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
                           memory floor, history), data\ (engine, game, maps; the engine's write

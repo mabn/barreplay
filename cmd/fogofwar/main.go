@@ -99,6 +99,9 @@ func run() error {
 			Theme:               windows.Dark,
 			WebviewUserDataPath: filepath.Join(root, "webview"),
 			DisablePinchZoom:    true,
+			// A gap in the log is often the PC asleep; say so.
+			OnSuspend: func() { app.logf("Windows is going to sleep") },
+			OnResume:  func() { app.logf("Windows woke up") },
 		},
 	})
 }
