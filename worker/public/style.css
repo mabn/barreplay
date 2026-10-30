@@ -1268,3 +1268,8 @@ body.admin-mode #filters .admin { display: inline-block; }
 #empty .notsim-status:empty { display: none; }
 #empty .notsim-status.ok { color: var(--accent); }
 #empty .notsim-status.error { color: #ff8a80; }
+
+/* ...and with nothing to play, none of the playback chrome around it. */
+body.no-replay #bottombar, body.no-replay #side, body.no-replay #replaytabs,
+body.no-replay #layers, body.no-replay #zoomlabel { display: none !important; }
+body.replay-page.no-replay #wrap { grid-column: 2 / -1; grid-row: 2 / -1; }

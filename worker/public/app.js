@@ -4677,6 +4677,10 @@ function setEmpty(msg) {
 // button doubles as "follow the run". Once the job reports done, the replay
 // loads in place.
 function showNotSimulated(id, row) {
+  // Nothing to play: the playback strip, the game card, the Layers button
+  // and the Replay/Summary sub menu all describe a replay that is not there.
+  document.body.classList.add('no-replay');
+  document.body.classList.remove('summary-tab'); // a ?tab=summary link too
   const gameId = /^[0-9a-f]{32}$/.test(id) ? id : null;
   emptyEl.textContent = '';
   emptyEl.style.display = 'flex';
@@ -4749,6 +4753,7 @@ function showNotSimulated(id, row) {
 
 async function loadReplay(id) {
   stopPlay();
+  document.body.classList.remove('no-replay');
   setEmpty('Loading…');
   // Invalidate any in-flight chunk fetches from the previous replay.
   loadGen++;
@@ -8376,7 +8381,7 @@ function applyReplayTab() {
 // below the list, since its pane is shown by a body class, not by the page.
 function leaveReplayTabs() {
   if (clip) closeClip(false);
-  document.body.classList.remove('summary-tab', 'replay-page');
+  document.body.classList.remove('summary-tab', 'replay-page', 'no-replay');
 }
 
 function resetSummary() {
