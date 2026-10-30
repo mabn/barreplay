@@ -1475,6 +1475,12 @@ test('a running job shows its live progress instead of an empty row', () => {
       stats: null, progress: null, disabled: false, published: true, game: null,
       createdUnix: 1787349000, updatedUnix: 1787349900,
     },
+    // A worker from before the flag sends none: a finished job links.
+    {
+      id: 'olddone', gameId: 'eee', kind: 'resim', state: 'done', error: null, errorKind: null,
+      stats: null, progress: null, disabled: false, game: null,
+      createdUnix: 1787349000, updatedUnix: 1787349900,
+    },
   ];
 
   const render = eval(`(function(){
@@ -1514,7 +1520,7 @@ test('a running job shows its live progress instead of an empty row', () => {
   render();
 
   const trs = dom.tbody.children;
-  assert.equal(trs.length, 4);
+  assert.equal(trs.length, 5);
   const detailOf = (tr: any) => tr.children.find((td: any) => td.className.includes('detail'));
 
   const running = detailOf(trs[0]);
@@ -1586,6 +1592,9 @@ test('a running job shows its live progress instead of an empty row', () => {
   assert.equal(walk(cellOf(trs[0], 'game')).find((n: any) => n.tag === 'span').textContent, 'aaa');
   assert.equal(walk(cellOf(trs[2], 'game')).find((n: any) => n.tag === 'a'), undefined, 'unpublished: plain text');
   assert.match(walk(cellOf(trs[3], 'game')).find((n: any) => n.tag === 'a').href, /replay=ddd/);
+  // No flag at all (an older worker, e.g. behind dev:prod): a finished job
+  // links, an unfinished one (rows 0-2 carry no flag either) does not.
+  assert.match(walk(cellOf(trs[4], 'game')).find((n: any) => n.tag === 'a').href, /replay=eee/);
   // The game id carries a copy button.
   assert.ok(walk(cellOf(trs[0], 'game')).find((n: any) => n.className === 'copyid'));
   assert.equal(cellOf(trs[0], 'dur').textContent, '40m');
