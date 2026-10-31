@@ -529,6 +529,36 @@ function renderRun(st) {
     : 'No patched build for this engine version (or Faster engine is off in Settings)';
   $('runEyebrow').textContent = (j.auto ? 'Auto-replay · ' : '') + (j.phase === 'simulating' ? 'Simulating' : j.phase === 'uploading' ? 'Uploading' : 'Re-simulating');
   $('runAuto').hidden = !st.autoReplay;
+  renderDone(st.history);
+}
+
+// Tiles of the replays already finished, under the running game: auto-replay
+// keeps this screen up for hours, and it is the only view of what it has done.
+let doneKey = '';
+function renderDone(hist) {
+  const done = (hist || []).filter((h) => !h.error).slice(0, 12);
+  const key = done.map((h) => h.gameId + h.finishedAt + (h.upload || '')).join() + '|' + Math.floor(Date.now() / 60e3);
+  if (key === doneKey) return;
+  doneKey = key;
+  $('doneList').hidden = !done.length;
+  $('doneHead').textContent = `Finished (${done.length}${done.length === 12 ? '+' : ''})`;
+  const box = $('doneTiles');
+  box.textContent = '';
+  done.forEach((h) => {
+    const t = el('button', 'done-tile');
+    const img = el('div', 'img');
+    if (h.mapFile) img.style.backgroundImage = `url("${thumbURL(h.mapFile)}")`;
+    if (h.size) img.append(el('span', 'size', h.size));
+    img.append(uploadChip(h));
+    const body = el('div', 'body');
+    body.append(el('div', 't', h.map || shortId(h.gameId)));
+    if (h.lobbyName) body.append(el('div', 'lob', h.lobbyName));
+    body.append(el('div', 's', [h.gameSec ? fmtClock(h.gameSec) : '', h.tookSec ? 'took ' + fmtDur(h.tookSec) : '', fmtAgo(h.finishedAt)].filter(Boolean).join(' · ')));
+    t.append(img, body);
+    t.title = ['Open the replay in the browser', uploadWords(h)].filter(Boolean).join('\n');
+    t.onclick = () => openReplay(h.gameId);
+    box.append(t);
+  });
 }
 
 // One point a second for all three charts, so they share a time axis.
@@ -682,6 +712,7 @@ function wire() {
     inputChanged();
   });
   $('btnOpenOut').onclick = () => api.OpenFolder('output').catch(toastErr);
+  $('btnOpenOut2').onclick = () => api.OpenFolder('output').catch(toastErr);
   $('autoSwitch').onclick = () => setAuto($('autoSwitch').getAttribute('aria-checked') !== 'true');
   $('runAuto').onclick = () => setAuto(false);
 
@@ -756,7 +787,11 @@ function makeMock(scene) {
     { gameId: 'c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70', map: 'Glitters 1.2', mapFile: 'glitters_1.2', size: '4v4', lobbyName: '[teh] Glitters 4v4 | all welcome', tags: [{ key: 'ranked', label: 'ranked' }, { key: 'quickStart', label: 'quick start' }], gameSec: 1520, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70.brp', bytes: 6.2e6, tookSec: 402, speedUp: 3.8, upload: 'published', auto: true, finishedAt: new Date(now - 3600e3 * 3).toISOString() },
     { gameId: '9b2d4e6f8a0c1e3f5a7b9c1d3e5f7a9b', map: 'All That Glitters v2.2', mapFile: 'all_that_glitters_v2.2', size: '8v8', lobbyName: 'LAVA SUPREME | 8v8 | OS 20+', tags: [{ key: 'unranked', label: 'unranked' }, { key: 'lava', label: 'lava' }], gameSec: 2410, error: 'This computer ran out of memory for this game. Close other programs, or try a smaller game.', finishedAt: new Date(now - 3600e3 * 26).toISOString() },
     { gameId: '4936896a8e1c2b3a4d5e6f7081928374', map: 'Red Comet Remake 1.8', mapFile: 'red_comet_remake_1.8', size: '1v1', lobbyName: 'practice 1v1s', tags: [{ key: 'ranked', label: 'ranked' }], gameSec: 812, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\4936896a8e1c2b3a4d5e6f7081928374.brp', bytes: 1.9e6, tookSec: 96, speedUp: 8.5, finishedAt: new Date(now - 3600e3 * 50).toISOString() },
+    { gameId: 'aa01e7a2b8d94f3a9e1c2b3a4d5e6f71', map: 'Supreme Isthmus v2.1', mapFile: 'supreme_isthmus_v2.1', size: '8v8', lobbyName: 'Low Tier Supreme | 8v8', tags: [{ key: 'ranked', label: 'ranked' }], gameSec: 2710, bytes: 9.1e6, tookSec: 1402, speedUp: 1.9, upload: 'queued', auto: true, finishedAt: new Date(now - 60e3 * 4).toISOString() },
+    { gameId: 'bb02e7a2b8d94f3a9e1c2b3a4d5e6f72', map: 'Throne v8', mapFile: 'throne_v8', size: '1v1', tags: [{ key: 'ranked', label: 'ranked' }], gameSec: 960, bytes: 1.4e6, tookSec: 88, speedUp: 10.9, upload: 'published', auto: true, finishedAt: new Date(now - 60e3 * 31).toISOString() },
+    { gameId: 'cc03e7a2b8d94f3a9e1c2b3a4d5e6f73', map: 'Eye Of Horus 1.6', mapFile: 'Eye Of Horus_1.6', size: '5v5', lobbyName: 'Noob friendly 5v5', tags: [{ key: 'unranked', label: 'unranked' }], gameSec: 1830, bytes: 5.3e6, tookSec: 610, speedUp: 3.0, upload: 'published', auto: true, finishedAt: new Date(now - 60e3 * 75).toISOString() },
   ];
+  hist.sort((a, b) => b.finishedAt.localeCompare(a.finishedAt));
   const st = {
     mode: 'ready', steps: steps(), setup: { engineVersion: '2026.07.04', gameVersion: 'Beyond All Reason test-31620-b0a3bbf', doneAt: new Date().toISOString() },
     history: hist, settings: { dataDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\data', outputDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays', patchedEngine: true, minFreeMB: 512, diskLimitGB: 10 }, patchedBuilds: [{ engine: '2026.07.04', build: '2026.7.4-barreplay.5', stale: true }],

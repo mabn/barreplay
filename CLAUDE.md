@@ -375,7 +375,7 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           Marcin's call), not published, has no pending/processing job and is not in the local
                           history (failed ones included), looking again a minute later when none
                           qualifies; Stop on an auto-picked run turns it off, three failures in a
-                          row pause it 10 min. History rows open /replays/<gameId> in the browser
+                          row pause it 10 min. The run screen lists the finished replays under the running game as tiles (app.js renderDone), so an auto-replay session shows what it has done. History rows and tiles open /replays/<gameId> in the browser
                           (FOGOFWAR_SITE overrides the site). Wherever a game is shown (preview,
                           run banner, result, history) it carries its LOBBY NAME (the site's GET
                           /api/games?id=, absent when the mirror never matched a lobby) and its
