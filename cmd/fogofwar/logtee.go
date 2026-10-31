@@ -110,15 +110,35 @@ func (t *logTee) take() []string {
 	return f
 }
 
+// moveTo continues the log in another file (the data folder moved).
+func (t *logTee) moveTo(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	old := t.file
+	t.file = f
+	t.mu.Unlock()
+	t.crashToLog()
+	if old != nil {
+		old.Close()
+	}
+	return nil
+}
+
 // crashToLog makes the runtime write a crash (an unrecovered panic in any
 // goroutine, a fatal error) and its stack into fogofwar.log. Only the
 // runtime's own writes go there directly; everything else keeps going
 // through the tee.
 func (t *logTee) crashToLog() {
-	if t.file == nil {
+	t.mu.Lock()
+	f := t.file
+	t.mu.Unlock()
+	if f == nil {
 		return
 	}
-	if err := debug.SetCrashOutput(t.file, debug.CrashOptions{}); err != nil {
+	if err := debug.SetCrashOutput(f, debug.CrashOptions{}); err != nil {
 		t.add("could not send crash reports to the log: "+err.Error(), false)
 	}
 }

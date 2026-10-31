@@ -712,7 +712,6 @@ function wire() {
     inputChanged();
   });
   $('btnOpenOut').onclick = () => api.OpenFolder('output').catch(toastErr);
-  $('btnOpenOut2').onclick = () => api.OpenFolder('output').catch(toastErr);
   $('autoSwitch').onclick = () => setAuto($('autoSwitch').getAttribute('aria-checked') !== 'true');
   $('runAuto').onclick = () => setAuto(false);
 

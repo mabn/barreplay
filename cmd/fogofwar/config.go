@@ -3,23 +3,40 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-// Config is FogOfWar's configuration file, config.json in the app's folder
-// (%LOCALAPPDATA%\FogOfWar on Windows). Everything the app downloads lives
-// under DataDir and every replay it makes under OutputDir; both default to
-// folders beside the config, so the app needs no admin rights and leaves
-// nothing anywhere else.
+// Config is FogOfWar's configuration, kept in two files so that the app's
+// own folder (%LOCALAPPDATA%\FogOfWar on Windows) holds nothing but where the
+// rest lives:
+//
+//   - <app folder>\config.json: Locations, the two folders and nothing else.
+//   - <DataDir>\fogofwar\settings.json: Stored, every other setting, the
+//     install's id and the history. The same folder (appDir) holds the log,
+//     session.json, the work folder and the window's WebView2 data.
+//
+// Both folders default to folders beside config.json, so the app needs no
+// admin rights and leaves nothing anywhere else.
 type Config struct {
-	// DataDir holds the engine, the BAR game content, maps and demos. It is
-	// also the engine's write dir.
+	Locations
+	Stored
+}
+
+// Locations is config.json.
+type Locations struct {
+	// DataDir holds the engine, the BAR game content, maps and demos (it is
+	// also the engine's write dir) and, in appDir, the app's own files.
 	DataDir string `json:"dataDir"`
 	// OutputDir is where finished .brp files go.
 	OutputDir string `json:"outputDir"`
+}
+
+// Stored is settings.json in appDir(DataDir).
+type Stored struct {
 	// PatchedEngine prefers the faster patched engine when one is published
 	// for the replay's engine version. Its output is byte-identical.
 	PatchedEngine bool `json:"patchedEngine"`
@@ -42,6 +59,11 @@ type Config struct {
 	// History is the replays made so far, newest first.
 	History []HistoryItem `json:"history"`
 }
+
+// appDir is where the app keeps its own files inside the data folder. The
+// disk-limit pruning only ever looks in the engine's own subfolders, so it
+// never touches this one.
+func appDir(dataDir string) string { return filepath.Join(dataDir, "fogofwar") }
 
 // SetupRecord is what the first-run download installed.
 type SetupRecord struct {
@@ -92,27 +114,39 @@ func appRoot() (string, error) {
 
 func defaultConfig(root string) Config {
 	return Config{
-		DataDir:       filepath.Join(root, "data"),
-		OutputDir:     filepath.Join(root, "replays"),
-		PatchedEngine: true,
-		MinFreeMB:     512,
-		DiskLimitGB:   10,
+		Locations: Locations{
+			DataDir:   filepath.Join(root, "data"),
+			OutputDir: filepath.Join(root, "replays"),
+		},
+		Stored: Stored{PatchedEngine: true, MinFreeMB: 512, DiskLimitGB: 10},
 	}
 }
 
-// loadConfig reads root/config.json, filling in defaults for anything it
-// leaves out. A missing file is a first launch, not an error.
-func loadConfig(root string) (Config, error) {
-	c := defaultConfig(root)
+// loadConfig reads root/config.json and then settings.json from the data
+// folder it names, filling in defaults for anything they leave out. A missing
+// file is a first launch, not an error.
+//
+// Before 0.2.19 config.json held everything. Such a file still loads whole;
+// legacy says so, and the caller's next saveConfig splits it in two.
+func loadConfig(root string) (c Config, legacy bool, err error) {
+	c = defaultConfig(root)
 	b, err := os.ReadFile(filepath.Join(root, "config.json"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return c, nil
-	}
-	if err != nil {
-		return c, err
-	}
-	if err := json.Unmarshal(b, &c); err != nil {
-		return defaultConfig(root), err
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		err = nil
+	case err != nil:
+		return c, false, err
+	default:
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(b, &keys); err != nil {
+			return defaultConfig(root), false, err
+		}
+		if err := json.Unmarshal(b, &c); err != nil {
+			return defaultConfig(root), false, err
+		}
+		delete(keys, "dataDir")
+		delete(keys, "outputDir")
+		legacy = len(keys) > 0
 	}
 	d := defaultConfig(root)
 	if c.DataDir == "" {
@@ -121,29 +155,50 @@ func loadConfig(root string) (Config, error) {
 	if c.OutputDir == "" {
 		c.OutputDir = d.OutputDir
 	}
+	b, serr := os.ReadFile(filepath.Join(appDir(c.DataDir), "settings.json"))
+	switch {
+	case serr == nil:
+		// The data folder's own settings win over a legacy config.json's: they
+		// are the newer ones.
+		st := d.Stored
+		if jerr := json.Unmarshal(b, &st); jerr != nil {
+			err = jerr
+		} else {
+			c.Stored = st
+		}
+	case !errors.Is(serr, fs.ErrNotExist):
+		err = serr
+	}
 	if c.MinFreeMB <= 0 {
 		c.MinFreeMB = d.MinFreeMB
 	}
 	if c.DiskLimitGB <= 0 {
 		c.DiskLimitGB = d.DiskLimitGB
 	}
-	return c, nil
+	return c, legacy, err
 }
 
-// saveConfig writes the file through a temp file and a rename, so a crash
-// mid-write never leaves a truncated config behind.
+// saveConfig writes config.json and settings.json, each through a temp file
+// and a rename, so a crash mid-write never leaves a truncated file behind.
 func saveConfig(root string, c Config) error {
 	if len(c.History) > maxHistory {
 		c.History = c.History[:maxHistory]
 	}
-	b, err := json.MarshalIndent(c, "", "  ")
+	if err := writeJSON(root, "config.json", c.Locations); err != nil {
+		return err
+	}
+	return writeJSON(appDir(c.DataDir), "settings.json", c.Stored)
+}
+
+func writeJSON(dir, name string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(root, ".config-*")
+	tmp, err := os.CreateTemp(dir, "."+name+"-*")
 	if err != nil {
 		return err
 	}
@@ -155,5 +210,30 @@ func saveConfig(root string, c Config) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), filepath.Join(root, "config.json"))
+	return os.Rename(tmp.Name(), filepath.Join(dir, name))
+}
+
+// moveAppFiles carries what earlier versions kept beside config.json into
+// the data folder's appDir: the log, session.json and the window's WebView2
+// data. A file already there is left alone (the older one stays where it
+// was), the work folder is only ever an intermediate and is deleted. The
+// returned lines say what happened, for the log, which cannot be written yet.
+func moveAppFiles(root, home string) []string {
+	var notes []string
+	for _, name := range []string{"fogofwar.log", "session.json", "webview"} {
+		src, dst := filepath.Join(root, name), filepath.Join(home, name)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			notes = append(notes, fmt.Sprintf("could not move %s to %s: %v", src, home, err))
+		} else {
+			notes = append(notes, fmt.Sprintf("moved %s to %s", name, home))
+		}
+	}
+	os.RemoveAll(filepath.Join(root, "work"))
+	return notes
 }

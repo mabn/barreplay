@@ -421,10 +421,16 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           log sleep, and session.json is rewritten every minute with what the app is doing,
                           plus the close reason; at the next start an unclosed record is logged with whether
                           Windows booted since (restart/power loss) or not (killed from outside).
-                          No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
-                          (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
-                          memory floor, history), data\ (engine, game, maps; the engine's write
-                          dir), replays\ (output), work\, webview\, fogofwar.log (every line the
+                          No admin rights: %LOCALAPPDATA%\FogOfWar (FOGOFWAR_HOME overrides)
+                          holds only config.json naming the two folders (Marcin's call), by
+                          default data\ (engine, game, maps; the engine's write dir) and
+                          replays\ (output) beside it. Everything else is in <data>\fogofwar\
+                          (config.go appDir; pruning never looks there): settings.json (faster-
+                          engine toggle, memory floor, disk limit, install id, history), session.json,
+                          work\, webview\ and fogofwar.log. A pre-0.2.19 config.json that held
+                          everything loads whole and is split on start (loadConfig's legacy,
+                          moveAppFiles); changing the data folder writes settings.json there and
+                          moves the log (App.moveHome). fogofwar.log (every line the
                           pipeline prints: logtee.go swaps os.Stderr for a pipe, which also feeds
                           pr-downloader's "[Progress] N%" into the download bars). FIRST LAUNCH
                           (setup.go) downloads the engine, the published patched build and the

@@ -32,8 +32,11 @@ import (
 // State flows the other way as events: "state" carries a full State whenever
 // anything changed (at most every 250 ms while busy), "log" new log lines.
 type App struct {
-	ctx    context.Context
-	root   string
+	ctx  context.Context
+	root string
+
+	homeMu sync.Mutex
+	home   string // appDir of the data folder: log, session.json, work
 	client *barapi.Client
 	log    *logTee
 	fc     *resim.Forecaster
@@ -162,6 +165,7 @@ var version = "dev"
 func NewApp(root string, cfg Config, log *logTee) *App {
 	return &App{
 		root:   root,
+		home:   appDir(cfg.DataDir),
 		cfg:    cfg,
 		client: barapi.New(),
 		log:    log,
@@ -385,6 +389,7 @@ func (a *App) SaveSettings(s Settings) (State, error) {
 	a.dirty = true
 	a.mu.Unlock()
 	if moved {
+		a.moveHome(appDir(a.config().DataDir))
 		a.beginSetup()
 	}
 	return a.snapshot(), err
@@ -429,7 +434,20 @@ func (a *App) OpenReplay(gameID string) error {
 
 // OpenLog opens fogofwar.log in the default text editor.
 func (a *App) OpenLog() error {
-	return openPath(filepath.Join(a.root, "fogofwar.log"), false)
+	return openPath(filepath.Join(a.appHome(), "fogofwar.log"), false)
+}
+
+// appHome is the folder of the app's own files (appDir of the data folder).
+func (a *App) appHome() string {
+	a.homeMu.Lock()
+	defer a.homeMu.Unlock()
+	return a.home
+}
+
+func (a *App) setHome(dir string) {
+	a.homeMu.Lock()
+	a.home = dir
+	a.homeMu.Unlock()
 }
 
 // ---- the work ----
@@ -472,7 +490,7 @@ func (a *App) beginSetup() {
 
 func (a *App) runJob(ctx context.Context, run *jobRun) {
 	cfg := a.config()
-	work := filepath.Join(a.root, "work")
+	work := filepath.Join(a.appHome(), "work")
 	item := HistoryItem{GameID: run.gameID, Auto: run.auto}
 	// The run is a job in the site's queue from its first moment: live
 	// progress while it works, its whole record when it ends.

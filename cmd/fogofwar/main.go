@@ -3,12 +3,14 @@
 //
 // It is a Wails app (a Go program whose window is a WebView2 page): the page
 // lives in frontend/dist and is embedded; app.go is everything it may call.
-// Everything it downloads and writes lives under %LOCALAPPDATA%\FogOfWar
+// %LOCALAPPDATA%\FogOfWar holds only config.json, naming the data and
+// replays folders; everything else, its own files included, lives in those
 // (config.go), so it needs no installer and no admin rights.
 package main
 
 import (
 	"embed"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -41,8 +43,22 @@ func run() error {
 	// is killed rather than closed.
 	killChildrenWithUs()
 
+	// The log lives in the data folder, which config.json names, so the
+	// config is read before anything can be logged; what it has to say waits.
+	cfg, legacy, cerr := loadConfig(root)
+	home := appDir(cfg.DataDir)
+	var notes []string
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		// A data folder on a drive that is gone: keep the app usable, its
+		// files beside config.json until the folder is back or changed.
+		notes = append(notes, fmt.Sprintf("data folder unavailable (%v); keeping the log in %s", err, root))
+		home = root
+	} else {
+		notes = append(notes, moveAppFiles(root, home)...)
+	}
+
 	var app *App
-	log, err := startLogTee(filepath.Join(root, "fogofwar.log"), func(line string) {
+	log, err := startLogTee(filepath.Join(home, "fogofwar.log"), func(line string) {
 		if app != nil {
 			app.onLogLine(line)
 		}
@@ -54,21 +70,26 @@ func run() error {
 	// process's own stderr, which a windowed program does not have, so a crash
 	// left the log ending mid-sentence with no reason. Send it to the log.
 	log.crashToLog()
-	cfg, cerr := loadConfig(root)
 	fresh := cfg.InstallID == ""
 	if fresh {
 		cfg.InstallID = newInstallID()
 	}
 	app = NewApp(root, cfg, log)
-	if cerr != nil {
-		app.logf("config.json could not be read (%v); using defaults", cerr)
+	app.setHome(home)
+	for _, n := range notes {
+		app.logf("%s", n)
 	}
-	if fresh && cerr == nil {
+	if cerr != nil {
+		app.logf("the config could not be read (%v); using defaults", cerr)
+	}
+	if (fresh || legacy) && cerr == nil {
 		if err := saveConfig(root, cfg); err != nil {
 			app.logf("save config: %v", err)
+		} else if legacy {
+			app.logf("settings and history moved to %s", filepath.Join(appDir(cfg.DataDir), "settings.json"))
 		}
 	}
-	app.logf("FogOfWar %s, folder %s, install %s", version, root, cfg.InstallID)
+	app.logf("FogOfWar %s, folder %s, data %s, install %s", version, root, cfg.DataDir, cfg.InstallID)
 
 	// The engine download is a 7z, which Windows cannot open by itself.
 	engine.Extract7z = extract7z
@@ -97,7 +118,7 @@ func run() error {
 		},
 		Windows: &windows.Options{
 			Theme:               windows.Dark,
-			WebviewUserDataPath: filepath.Join(root, "webview"),
+			WebviewUserDataPath: filepath.Join(home, "webview"),
 			DisablePinchZoom:    true,
 			// A gap in the log is often the PC asleep; say so.
 			OnSuspend: func() { app.logf("Windows is going to sleep") },

@@ -83,7 +83,7 @@ func stamp(t time.Time) string { return t.Local().Format("2006-01-02 15:04:05") 
 // trackSession reports how the previous run ended, then keeps this run's
 // record current until the app closes.
 func (a *App) trackSession() {
-	if prev, ok := readSession(a.root); ok {
+	if prev, ok := readSession(a.appHome()); ok {
 		if line := previousEnd(prev, bootTime()); line != "" {
 			a.logf("%s", line)
 		}
@@ -108,13 +108,14 @@ func (a *App) trackSession() {
 // the session has ended.
 func (a *App) touchSession() bool {
 	doing := a.activity()
+	home := a.appHome()
 	a.sessMu.Lock()
 	defer a.sessMu.Unlock()
 	if !a.sess.Ended.IsZero() {
 		return false
 	}
 	a.sess.Alive, a.sess.Doing = time.Now(), doing
-	if err := writeSession(a.root, a.sess); err != nil && !a.sessWarned {
+	if err := writeSession(home, a.sess); err != nil && !a.sessWarned {
 		a.sessWarned = true
 		a.logf("could not write session.json: %v", err)
 	}
@@ -123,13 +124,14 @@ func (a *App) touchSession() bool {
 
 // endSession records the close and its reason; the first one wins.
 func (a *App) endSession(reason string) {
+	home := a.appHome()
 	a.sessMu.Lock()
 	defer a.sessMu.Unlock()
 	if a.sess.Started.IsZero() || !a.sess.Ended.IsZero() {
 		return
 	}
 	a.sess.Ended, a.sess.Reason = time.Now(), reason
-	writeSession(a.root, a.sess)
+	writeSession(home, a.sess)
 }
 
 // activity is what the app is doing, in words, for the session record.
@@ -151,4 +153,31 @@ func (a *App) activity() string {
 		return s
 	}
 	return "idle"
+}
+
+// moveHome follows a change of the data folder: the log and the session
+// record continue in the new folder's appDir from now on. The window's
+// WebView2 data follows at the next start, since it is fixed while it runs.
+func (a *App) moveHome(home string) {
+	old := a.appHome()
+	if filepath.Clean(old) == filepath.Clean(home) {
+		return
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		a.logf("could not use %s for the log: %v", home, err)
+		return
+	}
+	a.logf("The log continues in %s", home)
+	if err := a.log.moveTo(filepath.Join(home, "fogofwar.log")); err != nil {
+		a.logf("could not open the log in %s: %v", home, err)
+	}
+	a.sessMu.Lock()
+	a.setHome(home)
+	if !a.sess.Started.IsZero() && a.sess.Ended.IsZero() {
+		writeSession(home, a.sess)
+	}
+	a.sessMu.Unlock()
+	// Left behind it would read, at some later start from that folder, as a
+	// run that never closed.
+	os.Remove(sessionPath(old))
 }
