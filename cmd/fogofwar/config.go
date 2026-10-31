@@ -4,38 +4,53 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// Config is FogOfWar's configuration, kept in two files so that the app's
-// own folder (%LOCALAPPDATA%\FogOfWar on Windows) holds nothing but where the
-// rest lives:
+// Config is FogOfWar's configuration. Everything the app keeps lives in ONE
+// folder, the FogOfWar folder (Home), by default the one FogOfWar.exe is in:
 //
-//   - <app folder>\config.json: Locations, the two folders and nothing else.
-//   - <DataDir>\fogofwar\settings.json: Stored, every other setting, the
-//     install's id and the history. The same folder (appDir) holds the log,
-//     session.json, the work folder and the window's WebView2 data.
+//	<Home>\settings.json   Stored: the settings, the install's id, the history
+//	<Home>\session.json    how the last run of the app ended (session.go)
+//	<Home>\fogofwar.log
+//	<Home>\webview\        the window's WebView2 data
+//	<Home>\work\           a run's scratch files
+//	<Home>\data\           engine, game, maps, demos (the engine's write dir)
+//	<Home>\replays\        the finished .brp files
 //
-// Both folders default to folders beside config.json, so the app needs no
-// admin rights and leaves nothing anywhere else.
+// The only thing kept anywhere else is the pointer to it, config.json in
+// %LOCALAPPDATA%\FogOfWar ({"home": ...}): the folder is a setting, so where
+// it is has to be written down outside it. No admin rights needed either way.
 type Config struct {
-	Locations
+	// Home is the FogOfWar folder; DataDir and OutputDir are its data and
+	// replays subfolders, set together with it by setHome.
+	Home      string
+	DataDir   string
+	OutputDir string
 	Stored
 }
 
-// Locations is config.json.
-type Locations struct {
-	// DataDir holds the engine, the BAR game content, maps and demos (it is
-	// also the engine's write dir) and, in appDir, the app's own files.
-	DataDir string `json:"dataDir"`
-	// OutputDir is where finished .brp files go.
-	OutputDir string `json:"outputDir"`
+func (c *Config) setHome(home string) {
+	c.Home = filepath.Clean(home)
+	c.DataDir = filepath.Join(c.Home, "data")
+	c.OutputDir = filepath.Join(c.Home, "replays")
 }
 
-// Stored is settings.json in appDir(DataDir).
+// pointer is config.json.
+type pointer struct {
+	Home string `json:"home"`
+	// Previous is the folder the app moved out of while it ran. What could not
+	// move then (the window's WebView2 data, held open) is deleted at the next
+	// start.
+	Previous string `json:"previous,omitempty"`
+}
+
+// Stored is settings.json in the FogOfWar folder.
 type Stored struct {
 	// PatchedEngine prefers the faster patched engine when one is published
 	// for the replay's engine version. Its output is byte-identical.
@@ -59,11 +74,6 @@ type Stored struct {
 	// History is the replays made so far, newest first.
 	History []HistoryItem `json:"history"`
 }
-
-// appDir is where the app keeps its own files inside the data folder. The
-// disk-limit pruning only ever looks in the engine's own subfolders, so it
-// never touches this one.
-func appDir(dataDir string) string { return filepath.Join(dataDir, "fogofwar") }
 
 // SetupRecord is what the first-run download installed.
 type SetupRecord struct {
@@ -99,8 +109,9 @@ type HistoryItem struct {
 
 const maxHistory = 50
 
-// appRoot is the app's own folder. os.UserCacheDir is %LOCALAPPDATA% on
-// Windows: per user, never roamed, writable without admin rights.
+// appRoot is where config.json, the pointer to the FogOfWar folder, lives.
+// os.UserCacheDir is %LOCALAPPDATA% on Windows: per user, never roamed,
+// writable without admin rights. FOGOFWAR_HOME overrides it.
 func appRoot() (string, error) {
 	if d := os.Getenv("FOGOFWAR_HOME"); d != "" {
 		return d, nil
@@ -112,84 +123,149 @@ func appRoot() (string, error) {
 	return filepath.Join(base, "FogOfWar"), nil
 }
 
-func defaultConfig(root string) Config {
-	return Config{
-		Locations: Locations{
-			DataDir:   filepath.Join(root, "data"),
-			OutputDir: filepath.Join(root, "replays"),
-		},
-		Stored: Stored{PatchedEngine: true, MinFreeMB: 512, DiskLimitGB: 10},
+// defaultHome is the FogOfWar folder of a first launch: the folder
+// FogOfWar.exe is in, when the app may write there, else root. Not a temp
+// folder: an exe started from inside a zip in Explorer runs out of one that
+// Windows empties.
+func defaultHome(root string) string {
+	exe, err := os.Executable()
+	if err != nil {
+		return root
 	}
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	dir := filepath.Dir(exe)
+	if tmp := os.TempDir(); tmp != "" && within(dir, tmp) {
+		return root
+	}
+	if !writable(dir) {
+		return root
+	}
+	return dir
 }
 
-// loadConfig reads root/config.json and then settings.json from the data
-// folder it names, filling in defaults for anything they leave out. A missing
-// file is a first launch, not an error.
+// within reports whether path is dir or inside it.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func writable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".fogofwar-*")
+	if err != nil {
+		return false
+	}
+	f.Close()
+	os.Remove(f.Name())
+	return true
+}
+
+func defaultStored() Stored {
+	return Stored{PatchedEngine: true, MinFreeMB: 512, DiskLimitGB: 10}
+}
+
+// layout is where an earlier version kept things, for relocate.
+type layout struct {
+	data, replays string
+	// appDirs hold the log, session.json and webview.
+	appDirs []string
+}
+
+// loadConfig reads root/config.json and the settings.json of the folder it
+// names, filling in defaults for anything they leave out. A missing
+// config.json is a first launch (home is defHome), not an error.
 //
-// Before 0.2.19 config.json held everything. Such a file still loads whole;
-// legacy says so, and the caller's next saveConfig splits it in two.
-func loadConfig(root string) (c Config, legacy bool, err error) {
-	c = defaultConfig(root)
+// Up to 0.2.19 config.json named a data and a replays folder instead (and
+// before 0.2.19 held every setting too, which 0.2.19 moved to
+// <data>\fogofwar\settings.json). Such a config still loads, its settings
+// from wherever they were, with home = defHome; old says where everything
+// was, for relocate, and is nil otherwise.
+func loadConfig(root, defHome string) (c Config, old *layout, prev string, err error) {
+	c.Stored = defaultStored()
+	c.setHome(defHome)
 	b, err := os.ReadFile(filepath.Join(root, "config.json"))
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		err = nil
-	case err != nil:
-		return c, false, err
-	default:
-		var keys map[string]json.RawMessage
-		if err := json.Unmarshal(b, &keys); err != nil {
-			return defaultConfig(root), false, err
-		}
-		if err := json.Unmarshal(b, &c); err != nil {
-			return defaultConfig(root), false, err
-		}
-		delete(keys, "dataDir")
-		delete(keys, "outputDir")
-		legacy = len(keys) > 0
+	if errors.Is(err, fs.ErrNotExist) {
+		return c, nil, "", nil
 	}
-	d := defaultConfig(root)
-	if c.DataDir == "" {
-		c.DataDir = d.DataDir
+	if err != nil {
+		return c, nil, "", err
 	}
-	if c.OutputDir == "" {
-		c.OutputDir = d.OutputDir
+	var p struct {
+		pointer
+		DataDir   string `json:"dataDir"`
+		OutputDir string `json:"outputDir"`
 	}
-	b, serr := os.ReadFile(filepath.Join(appDir(c.DataDir), "settings.json"))
-	switch {
-	case serr == nil:
-		// The data folder's own settings win over a legacy config.json's: they
-		// are the newer ones.
-		st := d.Stored
-		if jerr := json.Unmarshal(b, &st); jerr != nil {
-			err = jerr
-		} else {
-			c.Stored = st
-		}
-	case !errors.Is(serr, fs.ErrNotExist):
+	if err := json.Unmarshal(b, &p); err != nil {
+		return c, nil, "", err
+	}
+	if p.Home != "" {
+		c.setHome(p.Home)
+		err = readStored(filepath.Join(c.Home, "settings.json"), &c.Stored)
+		return c, nil, p.Previous, err
+	}
+	// The old layout.
+	if p.DataDir == "" {
+		p.DataDir = filepath.Join(root, "data")
+	}
+	if p.OutputDir == "" {
+		p.OutputDir = filepath.Join(root, "replays")
+	}
+	old = &layout{data: p.DataDir, replays: p.OutputDir, appDirs: []string{filepath.Join(p.DataDir, "fogofwar"), root}}
+	// Before 0.2.19 the settings were in config.json itself; 0.2.19's own
+	// settings.json, when there is one, is newer.
+	if jerr := json.Unmarshal(b, &c.Stored); jerr != nil {
+		err = jerr
+	}
+	if serr := readStored(filepath.Join(p.DataDir, "fogofwar", "settings.json"), &c.Stored); serr != nil {
 		err = serr
 	}
-	if c.MinFreeMB <= 0 {
-		c.MinFreeMB = d.MinFreeMB
+	fixStored(&c.Stored)
+	return c, old, "", err
+}
+
+func readStored(path string, st *Stored) error {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	if c.DiskLimitGB <= 0 {
-		c.DiskLimitGB = d.DiskLimitGB
+	if err != nil {
+		return err
 	}
-	return c, legacy, err
+	s := defaultStored()
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	fixStored(&s)
+	*st = s
+	return nil
+}
+
+func fixStored(s *Stored) {
+	d := defaultStored()
+	if s.MinFreeMB <= 0 {
+		s.MinFreeMB = d.MinFreeMB
+	}
+	if s.DiskLimitGB <= 0 {
+		s.DiskLimitGB = d.DiskLimitGB
+	}
 }
 
 // saveConfig writes config.json and settings.json, each through a temp file
 // and a rename, so a crash mid-write never leaves a truncated file behind.
 func saveConfig(root string, c Config) error {
+	return savePointer(root, c, "")
+}
+
+func savePointer(root string, c Config, previous string) error {
 	if len(c.History) > maxHistory {
 		c.History = c.History[:maxHistory]
 	}
-	if err := writeJSON(root, "config.json", c.Locations); err != nil {
+	if err := writeJSON(c.Home, "settings.json", c.Stored); err != nil {
 		return err
 	}
-	return writeJSON(appDir(c.DataDir), "settings.json", c.Stored)
+	return writeJSON(root, "config.json", pointer{Home: c.Home, Previous: previous})
 }
-
 func writeJSON(dir, name string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -213,27 +289,133 @@ func writeJSON(dir, name string, v any) error {
 	return os.Rename(tmp.Name(), filepath.Join(dir, name))
 }
 
-// moveAppFiles carries what earlier versions kept beside config.json into
-// the data folder's appDir: the log, session.json and the window's WebView2
-// data. A file already there is left alone (the older one stays where it
-// was), the work folder is only ever an intermediate and is deleted. The
-// returned lines say what happened, for the log, which cannot be written yet.
-func moveAppFiles(root, home string) []string {
-	var notes []string
+// relocate moves what lived in old into the FogOfWar folder home: the log,
+// session.json and webview from old.appDirs, the data folder to home\data and
+// the replays to home\replays, rewriting the history's paths to match. Every
+// move is a rename, so the gigabytes in the data folder move for free on one
+// drive; across drives the data stays where it was (dataMoved false: the
+// engine and game download again) while the replays, at most a few dozen
+// files, are copied. Nothing already in home is overwritten. The returned
+// lines say what happened, for the log.
+func relocate(home string, old layout, history []HistoryItem) (notes []string, dataMoved bool) {
+	note := func(f string, a ...any) { notes = append(notes, fmt.Sprintf(f, a...)) }
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		note("could not create %s: %v", home, err)
+		return notes, false
+	}
 	for _, name := range []string{"fogofwar.log", "session.json", "webview"} {
-		src, dst := filepath.Join(root, name), filepath.Join(home, name)
-		if _, err := os.Stat(src); err != nil {
-			continue
-		}
-		if _, err := os.Stat(dst); err == nil {
-			continue
-		}
-		if err := os.Rename(src, dst); err != nil {
-			notes = append(notes, fmt.Sprintf("could not move %s to %s: %v", src, home, err))
-		} else {
-			notes = append(notes, fmt.Sprintf("moved %s to %s", name, home))
+		dst := filepath.Join(home, name)
+		for _, dir := range old.appDirs {
+			src := filepath.Join(dir, name)
+			if samePath(src, dst) || !exists(src) || exists(dst) {
+				continue
+			}
+			if err := os.Rename(src, dst); err != nil {
+				note("could not move %s to %s: %v", src, home, err)
+			}
 		}
 	}
-	os.RemoveAll(filepath.Join(root, "work"))
-	return notes
+	data := filepath.Join(home, "data")
+	switch {
+	case samePath(old.data, data):
+		dataMoved = true
+	case !exists(old.data):
+	case exists(data):
+		note("%s already exists; %s was left where it is", data, old.data)
+	default:
+		if err := os.Rename(old.data, data); err != nil {
+			note("the data folder %s was not moved (%v); the engine and game download again into %s", old.data, err, data)
+		} else {
+			note("moved %s to %s", old.data, data)
+			dataMoved = true
+		}
+	}
+	replays := filepath.Join(home, "replays")
+	if !samePath(old.replays, replays) && exists(old.replays) {
+		if !exists(replays) && os.Rename(old.replays, replays) == nil {
+			note("moved %s to %s", old.replays, replays)
+		} else {
+			n := moveReplayFiles(old.replays, replays)
+			note("moved %d replays from %s to %s", n, old.replays, replays)
+			os.Remove(old.replays) // only when empty
+		}
+		for i, h := range history {
+			if h.Path != "" && samePath(filepath.Dir(h.Path), old.replays) {
+				if p := filepath.Join(replays, filepath.Base(h.Path)); exists(p) {
+					history[i].Path = p
+				}
+			}
+		}
+	}
+	return notes, dataMoved
+}
+
+// moveReplayFiles moves dir's .brp files into dst, renaming where it can and
+// copying where it cannot (another drive). A name already in dst is skipped.
+func moveReplayFiles(dir, dst string) int {
+	ents, err := os.ReadDir(dir)
+	if err != nil || os.MkdirAll(dst, 0o755) != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range ents {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".brp") {
+			continue
+		}
+		src, to := filepath.Join(dir, e.Name()), filepath.Join(dst, e.Name())
+		if exists(to) {
+			continue
+		}
+		if os.Rename(src, to) == nil || (copyFile(src, to) == nil && os.Remove(src) == nil) {
+			n++
+		}
+	}
+	return n
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".part"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+// tidyOldAppDir deletes what an earlier layout's app folder still holds once
+// its contents have moved: the stale settings.json, a session record, the
+// work folder and (at a start, when nothing holds it) the WebView2 data;
+// then the folder itself if that left it empty. A log that could not move
+// stays.
+func tidyOldAppDir(dir string, webview bool) {
+	for _, name := range []string{"settings.json", "session.json", "work"} {
+		os.RemoveAll(filepath.Join(dir, name))
+	}
+	if webview {
+		os.RemoveAll(filepath.Join(dir, "webview"))
+	}
+	os.Remove(dir)
+}
+
+func samePath(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+}
+
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

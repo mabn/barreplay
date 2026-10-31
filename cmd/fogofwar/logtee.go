@@ -20,6 +20,7 @@ type logTee struct {
 	lines  []string
 	fresh  []string
 	file   *os.File
+	path   string
 	onLine func(string)
 }
 
@@ -36,7 +37,7 @@ func startLogTee(path string, onLine func(string)) (*logTee, error) {
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err == nil {
-		t.file = f
+		t.file, t.path = f, path
 	}
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -112,18 +113,28 @@ func (t *logTee) take() []string {
 
 // moveTo continues the log in another file (the data folder moved).
 func (t *logTee) moveTo(path string) error {
+	t.mu.Lock()
+	defer func() {
+		t.mu.Unlock()
+		t.crashToLog()
+	}()
+	// The file carries over: closed, renamed (Windows will not rename an open
+	// file) and reopened. Should the rename fail, the log starts afresh there.
+	if t.file != nil {
+		t.file.Close()
+		t.file = nil
+		if _, err := os.Stat(path); err != nil {
+			os.Rename(t.path, path)
+		}
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
+		if old, oerr := os.OpenFile(t.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); oerr == nil {
+			t.file = old
+		}
 		return err
 	}
-	t.mu.Lock()
-	old := t.file
-	t.file = f
-	t.mu.Unlock()
-	t.crashToLog()
-	if old != nil {
-		old.Close()
-	}
+	t.file, t.path = f, path
 	return nil
 }
 

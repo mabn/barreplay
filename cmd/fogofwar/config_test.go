@@ -7,10 +7,11 @@ import (
 	"testing"
 )
 
-func TestConfigSplitsInTwo(t *testing.T) {
-	root, data := t.TempDir(), t.TempDir()
-	c := defaultConfig(root)
-	c.DataDir = data
+func TestConfigRoundTrip(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	var c Config
+	c.Stored = defaultStored()
+	c.setHome(home)
 	c.InstallID, c.Runs = "id-1", 3
 	c.History = []HistoryItem{{GameID: "abc"}}
 	if err := saveConfig(root, c); err != nil {
@@ -21,74 +22,124 @@ func TestConfigSplitsInTwo(t *testing.T) {
 	if err := json.Unmarshal(b, &keys); err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 2 || keys["dataDir"] != data {
-		t.Errorf("config.json holds more than the folders: %s", b)
+	if len(keys) != 1 || keys["home"] != home {
+		t.Errorf("config.json holds more than the folder: %s", b)
 	}
-	if !fileExists(filepath.Join(data, "fogofwar", "settings.json")) {
-		t.Fatal("no settings.json in the data folder")
+	if !fileExists(filepath.Join(home, "settings.json")) {
+		t.Fatal("no settings.json in the FogOfWar folder")
 	}
-	got, legacy, err := loadConfig(root)
-	if err != nil || legacy {
-		t.Fatalf("load: %v legacy=%v", err, legacy)
+	got, old, _, err := loadConfig(root, t.TempDir())
+	if err != nil || old != nil {
+		t.Fatalf("load: %v old=%v", err, old)
 	}
-	if got.InstallID != "id-1" || got.Runs != 3 || len(got.History) != 1 || got.DataDir != data {
+	if got.InstallID != "id-1" || got.Runs != 3 || len(got.History) != 1 || got.Home != home ||
+		got.DataDir != filepath.Join(home, "data") || got.OutputDir != filepath.Join(home, "replays") {
 		t.Errorf("round trip lost something: %+v", got)
 	}
 }
 
-func TestLegacyConfigLoadsWhole(t *testing.T) {
-	root, data := t.TempDir(), t.TempDir()
-	old := `{"dataDir":` + jsonStr(data) + `,"outputDir":"o","patchedEngine":false,"minFreeMB":1024,"installId":"id-2","history":[{"gameId":"x"}]}`
-	os.WriteFile(filepath.Join(root, "config.json"), []byte(old), 0o644)
-	c, legacy, err := loadConfig(root)
-	if err != nil || !legacy {
-		t.Fatalf("load: %v legacy=%v", err, legacy)
+func TestFirstLaunchDefaults(t *testing.T) {
+	root, def := t.TempDir(), t.TempDir()
+	c, old, _, err := loadConfig(root, def)
+	if err != nil || old != nil || !c.PatchedEngine || c.MinFreeMB != 512 || c.Home != def || c.DataDir != filepath.Join(def, "data") {
+		t.Errorf("defaults: %+v old=%v err=%v", c, old, err)
 	}
-	if c.InstallID != "id-2" || c.MinFreeMB != 1024 || c.PatchedEngine || len(c.History) != 1 || c.DiskLimitGB != 10 {
-		t.Errorf("legacy fields: %+v", c)
+}
+
+// A 0.2.19 install: config.json names the two folders, the settings and the
+// app's files are in <data>\fogofwar. Everything ends up in the new folder.
+func TestOldLayoutMovesIntoOneFolder(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	data, out := filepath.Join(root, "data"), filepath.Join(root, "replays")
+	app := filepath.Join(data, "fogofwar")
+	os.MkdirAll(filepath.Join(data, "engine", "v"), 0o755)
+	os.MkdirAll(filepath.Join(app, "webview", "x"), 0o755)
+	os.MkdirAll(filepath.Join(app, "work"), 0o755)
+	os.MkdirAll(out, 0o755)
+	os.WriteFile(filepath.Join(out, "g1.brp"), []byte("brp"), 0o644)
+	os.WriteFile(filepath.Join(app, "fogofwar.log"), []byte("log"), 0o644)
+	os.WriteFile(filepath.Join(app, "session.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(app, "settings.json"), []byte(`{"minFreeMB":1024,"installId":"id-3","history":[{"gameId":"g1","path":`+jsonStr(filepath.Join(out, "g1.brp"))+`}]}`), 0o644)
+	os.WriteFile(filepath.Join(root, "config.json"), []byte(`{"dataDir":`+jsonStr(data)+`,"outputDir":`+jsonStr(out)+`}`), 0o644)
+
+	c, old, _, err := loadConfig(root, home)
+	if err != nil || old == nil {
+		t.Fatalf("load: %v old=%v", err, old)
+	}
+	if c.InstallID != "id-3" || c.MinFreeMB != 1024 || c.Home != home {
+		t.Fatalf("settings: %+v", c)
+	}
+	notes, dataMoved := relocate(home, *old, c.History)
+	if !dataMoved {
+		t.Fatalf("data not moved: %v", notes)
 	}
 	if err := saveConfig(root, c); err != nil {
 		t.Fatal(err)
 	}
-	c2, legacy, _ := loadConfig(root)
-	if legacy || c2.InstallID != "id-2" || c2.MinFreeMB != 1024 {
-		t.Errorf("after the split: legacy=%v %+v", legacy, c2)
+	tidyOldAppDir(filepath.Join(home, "data", "fogofwar"), true)
+
+	for _, p := range []string{"settings.json", "session.json", "fogofwar.log", "webview/x", "data/engine/v", "replays/g1.brp"} {
+		if !exists(filepath.Join(home, p)) {
+			t.Errorf("%s missing from the FogOfWar folder", p)
+		}
+	}
+	if exists(filepath.Join(home, "data", "fogofwar")) || exists(data) || exists(out) {
+		t.Error("something left behind")
+	}
+	if c.History[0].Path != filepath.Join(home, "replays", "g1.brp") {
+		t.Errorf("history path: %s", c.History[0].Path)
+	}
+	ents, _ := os.ReadDir(root)
+	if len(ents) != 1 || ents[0].Name() != "config.json" {
+		t.Errorf("root holds more than config.json: %v", ents)
+	}
+	c2, old2, _, _ := loadConfig(root, t.TempDir())
+	if old2 != nil || c2.Home != home || c2.InstallID != "id-3" {
+		t.Errorf("after the move: %+v", c2)
 	}
 }
 
-func TestFirstLaunchDefaults(t *testing.T) {
-	root := t.TempDir()
-	c, legacy, err := loadConfig(root)
-	if err != nil || legacy || !c.PatchedEngine || c.MinFreeMB != 512 || c.DataDir != filepath.Join(root, "data") {
-		t.Errorf("defaults: %+v legacy=%v err=%v", c, legacy, err)
+// Before 0.2.19 config.json held the settings too, and the app's files were
+// beside it.
+func TestPre019ConfigLoadsWhole(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(root, "config.json"), []byte(`{"dataDir":"","outputDir":"","patchedEngine":false,"minFreeMB":1024,"installId":"id-2"}`), 0o644)
+	os.WriteFile(filepath.Join(root, "fogofwar.log"), []byte("log"), 0o644)
+	c, old, _, err := loadConfig(root, home)
+	if err != nil || old == nil || c.InstallID != "id-2" || c.PatchedEngine || c.DiskLimitGB != 10 {
+		t.Fatalf("load: %+v old=%v err=%v", c, old, err)
+	}
+	relocate(home, *old, nil)
+	if !exists(filepath.Join(home, "fogofwar.log")) {
+		t.Error("log not moved")
 	}
 }
 
-func TestMoveAppFiles(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, "data", "fogofwar")
-	os.MkdirAll(home, 0o755)
-	os.WriteFile(filepath.Join(root, "fogofwar.log"), []byte("old log"), 0o644)
-	os.MkdirAll(filepath.Join(root, "webview", "x"), 0o755)
-	os.MkdirAll(filepath.Join(root, "work"), 0o755)
-	os.WriteFile(filepath.Join(root, "session.json"), []byte("{}"), 0o644)
-	os.WriteFile(filepath.Join(home, "session.json"), []byte("newer"), 0o644)
+// Replays already in the new folder are kept; the rest join them.
+func TestReplaysMergeIntoExistingFolder(t *testing.T) {
+	src, home := t.TempDir(), t.TempDir()
+	os.MkdirAll(filepath.Join(home, "replays"), 0o755)
+	os.WriteFile(filepath.Join(home, "replays", "a.brp"), []byte("new"), 0o644)
+	os.WriteFile(filepath.Join(src, "a.brp"), []byte("old"), 0o644)
+	os.WriteFile(filepath.Join(src, "b.brp"), []byte("b"), 0o644)
+	relocate(home, layout{data: filepath.Join(src, "nodata"), replays: src}, nil)
+	if b, _ := os.ReadFile(filepath.Join(home, "replays", "a.brp")); string(b) != "new" {
+		t.Error("an existing replay was overwritten")
+	}
+	if !exists(filepath.Join(home, "replays", "b.brp")) {
+		t.Error("b.brp not moved")
+	}
+}
 
-	moveAppFiles(root, home)
-	if b, _ := os.ReadFile(filepath.Join(home, "fogofwar.log")); string(b) != "old log" {
-		t.Errorf("log not moved: %q", b)
-	}
-	if !exists(filepath.Join(home, "webview", "x")) || exists(filepath.Join(root, "webview")) {
-		t.Error("webview not moved")
-	}
-	if exists(filepath.Join(root, "work")) {
-		t.Error("work folder kept")
-	}
-	if b, _ := os.ReadFile(filepath.Join(home, "session.json")); string(b) != "newer" {
-		t.Error("an existing file was overwritten")
+func TestWithin(t *testing.T) {
+	for _, c := range []struct {
+		p, d string
+		want bool
+	}{{"/a/b", "/a", true}, {"/a", "/a", true}, {"/ab", "/a", false}, {"/a", "/a/b", false}} {
+		if got := within(c.p, c.d); got != c.want {
+			t.Errorf("within(%s, %s) = %v", c.p, c.d, got)
+		}
 	}
 }
 
 func jsonStr(s string) string { b, _ := json.Marshal(s); return string(b) }
-
-func exists(p string) bool { _, err := os.Stat(p); return err == nil }

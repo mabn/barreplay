@@ -421,16 +421,21 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           log sleep, and session.json is rewritten every minute with what the app is doing,
                           plus the close reason; at the next start an unclosed record is logged with whether
                           Windows booted since (restart/power loss) or not (killed from outside).
-                          No admin rights: %LOCALAPPDATA%\FogOfWar (FOGOFWAR_HOME overrides)
-                          holds only config.json naming the two folders (Marcin's call), by
-                          default data\ (engine, game, maps; the engine's write dir) and
-                          replays\ (output) beside it. Everything else is in <data>\fogofwar\
-                          (config.go appDir; pruning never looks there): settings.json (faster-
-                          engine toggle, memory floor, disk limit, install id, history), session.json,
-                          work\, webview\ and fogofwar.log. A pre-0.2.19 config.json that held
-                          everything loads whole and is split on start (loadConfig's legacy,
-                          moveAppFiles); changing the data folder writes settings.json there and
-                          moves the log (App.moveHome). fogofwar.log (every line the
+                          ONE FOLDER (Marcin's call, 0.2.20): the FogOfWar folder (Config.Home,
+                          the one setting for where things go; by default the folder FogOfWar.exe
+                          is in when writable and not a temp dir, else %LOCALAPPDATA%\FogOfWar)
+                          holds settings.json (faster-engine toggle, memory floor, disk limit,
+                          install id, history), session.json, fogofwar.log, webview\, work\,
+                          data\ (engine, game, maps; the engine's write dir) and replays\. No
+                          admin rights: %LOCALAPPDATA%\FogOfWar (FOGOFWAR_HOME overrides) holds
+                          only config.json, {"home": ...}. Older layouts (0.2.19's dataDir/
+                          outputDir with <data>\fogofwar\, and before it everything in
+                          config.json) load and are moved in on start (loadConfig's old layout,
+                          relocate: renames, so the data folder moves for free on one drive and
+                          downloads again across drives; replays are copied). Changing the
+                          folder in settings moves everything the same way (App.moveTo); the
+                          WebView2 data, held open, goes at the next start (config.json's
+                          "previous"). fogofwar.log (every line the
                           pipeline prints: logtee.go swaps os.Stderr for a pipe, which also feeds
                           pr-downloader's "[Progress] N%" into the download bars). FIRST LAUNCH
                           (setup.go) downloads the engine, the published patched build and the

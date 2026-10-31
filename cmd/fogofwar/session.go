@@ -155,9 +155,9 @@ func (a *App) activity() string {
 	return "idle"
 }
 
-// moveHome follows a change of the data folder: the log and the session
-// record continue in the new folder's appDir from now on. The window's
-// WebView2 data follows at the next start, since it is fixed while it runs.
+// moveHome follows a change of the FogOfWar folder: the log and the session
+// record continue in the new folder from now on. The window's WebView2 data
+// follows at the next start, since it is fixed while it runs.
 func (a *App) moveHome(home string) {
 	old := a.appHome()
 	if filepath.Clean(old) == filepath.Clean(home) {
@@ -167,7 +167,6 @@ func (a *App) moveHome(home string) {
 		a.logf("could not use %s for the log: %v", home, err)
 		return
 	}
-	a.logf("The log continues in %s", home)
 	if err := a.log.moveTo(filepath.Join(home, "fogofwar.log")); err != nil {
 		a.logf("could not open the log in %s: %v", home, err)
 	}

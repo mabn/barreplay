@@ -153,8 +153,8 @@ type State struct {
 
 // Settings is the part of the config the page may change.
 type Settings struct {
-	DataDir       string `json:"dataDir"`
-	OutputDir     string `json:"outputDir"`
+	// Home is the FogOfWar folder; everything the app keeps is in it.
+	Home          string `json:"home"`
 	PatchedEngine bool   `json:"patchedEngine"`
 	MinFreeMB     int    `json:"minFreeMB"`
 	DiskLimitGB   int    `json:"diskLimitGB"`
@@ -165,7 +165,7 @@ var version = "dev"
 func NewApp(root string, cfg Config, log *logTee) *App {
 	return &App{
 		root:   root,
-		home:   appDir(cfg.DataDir),
+		home:   cfg.Home,
 		cfg:    cfg,
 		client: barapi.New(),
 		log:    log,
@@ -361,22 +361,13 @@ func (a *App) DismissResult() {
 	a.mu.Unlock()
 }
 
-// SaveSettings stores the settings. Moving the data folder means the engine
-// and game have to be downloaded there again.
+// SaveSettings stores the settings. A new FogOfWar folder takes everything
+// with it (moveTo).
 func (a *App) SaveSettings(s Settings) (State, error) {
 	a.mu.Lock()
 	if a.mode == modeRunning || a.mode == modeSetup {
 		a.mu.Unlock()
 		return a.snapshot(), errors.New("Settings can be changed once the current work has finished.")
-	}
-	moved := false
-	if s.DataDir != "" && filepath.Clean(s.DataDir) != filepath.Clean(a.cfg.DataDir) {
-		a.cfg.DataDir = filepath.Clean(s.DataDir)
-		a.cfg.Setup = SetupRecord{}
-		moved = true
-	}
-	if s.OutputDir != "" {
-		a.cfg.OutputDir = filepath.Clean(s.OutputDir)
 	}
 	a.cfg.PatchedEngine = s.PatchedEngine
 	if s.MinFreeMB >= 128 && s.MinFreeMB <= 8192 {
@@ -385,14 +376,53 @@ func (a *App) SaveSettings(s Settings) (State, error) {
 	if s.DiskLimitGB >= minDiskLimitGB && s.DiskLimitGB <= maxDiskLimitGB {
 		a.cfg.DiskLimitGB = s.DiskLimitGB
 	}
+	if s.Home != "" && !samePath(s.Home, a.cfg.Home) {
+		a.mu.Unlock()
+		return a.moveTo(filepath.Clean(s.Home))
+	}
 	err := saveConfig(a.root, a.cfg)
 	a.dirty = true
 	a.mu.Unlock()
-	if moved {
-		a.moveHome(appDir(a.config().DataDir))
+	return a.snapshot(), err
+}
+
+// moveTo makes home the FogOfWar folder, moving the data folder, the replays,
+// the settings, the log and the session record there (relocate). The window's
+// WebView2 data is held open while the app runs, so it stays and is deleted
+// at the next start. The engine and game download again only when the data
+// folder could not move (another drive).
+func (a *App) moveTo(home string) (State, error) {
+	a.mu.Lock()
+	if a.mode == modeRunning || a.mode == modeSetup {
+		a.mu.Unlock()
+		return a.snapshot(), errors.New("Settings can be changed once the current work has finished.")
+	}
+	cur := a.cfg
+	if within(home, cur.DataDir) || within(home, cur.OutputDir) || within(home, filepath.Join(cur.Home, "webview")) {
+		a.mu.Unlock()
+		return a.snapshot(), errors.New("Pick a folder outside FogOfWar's data, replays and webview folders.")
+	}
+	notes, dataMoved := relocate(home, layout{data: cur.DataDir, replays: cur.OutputDir}, a.cfg.History)
+	a.cfg.setHome(home)
+	if !dataMoved {
+		a.cfg.Setup = SetupRecord{}
+	}
+	err := savePointer(a.root, a.cfg, cur.Home)
+	a.dirty = true
+	a.mu.Unlock()
+	for _, n := range notes {
+		a.logf("%s", n)
+	}
+	if err != nil {
+		return a.snapshot(), err
+	}
+	a.moveHome(home)
+	tidyOldAppDir(cur.Home, false)
+	a.logf("Everything now lives in %s", home)
+	if !dataMoved {
 		a.beginSetup()
 	}
-	return a.snapshot(), err
+	return a.snapshot(), nil
 }
 
 // ChooseFolder opens the system folder picker; "" when cancelled.
@@ -408,10 +438,10 @@ func (a *App) ChooseFolder(title, start string) string {
 	return dir
 }
 
-// OpenFolder opens one of the app's folders: "output", "data" or "app".
+// OpenFolder opens one of the app's folders: "output", "data" or "home".
 func (a *App) OpenFolder(which string) error {
 	c := a.config()
-	dir := map[string]string{"output": c.OutputDir, "data": c.DataDir, "app": a.root}[which]
+	dir := map[string]string{"output": c.OutputDir, "data": c.DataDir, "home": c.Home}[which]
 	if dir == "" {
 		return errors.New("no such folder")
 	}
@@ -437,7 +467,8 @@ func (a *App) OpenLog() error {
 	return openPath(filepath.Join(a.appHome(), "fogofwar.log"), false)
 }
 
-// appHome is the folder of the app's own files (appDir of the data folder).
+// appHome is the folder of the app's own files, the FogOfWar folder. It is
+// kept apart from cfg so the log and session code need not take a.mu.
 func (a *App) appHome() string {
 	a.homeMu.Lock()
 	defer a.homeMu.Unlock()
@@ -752,8 +783,7 @@ func (a *App) snapshot() State {
 		Last:       a.last,
 		History:    append([]HistoryItem(nil), a.cfg.History...),
 		Settings: Settings{
-			DataDir:       a.cfg.DataDir,
-			OutputDir:     a.cfg.OutputDir,
+			Home:          a.cfg.Home,
 			PatchedEngine: a.cfg.PatchedEngine,
 			MinFreeMB:     a.cfg.MinFreeMB,
 			DiskLimitGB:   a.cfg.DiskLimitGB,

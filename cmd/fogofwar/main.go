@@ -3,8 +3,8 @@
 //
 // It is a Wails app (a Go program whose window is a WebView2 page): the page
 // lives in frontend/dist and is embedded; app.go is everything it may call.
-// %LOCALAPPDATA%\FogOfWar holds only config.json, naming the data and
-// replays folders; everything else, its own files included, lives in those
+// Everything it keeps lives in one folder, by default the exe's own;
+// %LOCALAPPDATA%\FogOfWar holds only config.json, naming that folder
 // (config.go), so it needs no installer and no admin rights.
 package main
 
@@ -43,19 +43,28 @@ func run() error {
 	// is killed rather than closed.
 	killChildrenWithUs()
 
-	// The log lives in the data folder, which config.json names, so the
+	// The log lives in the FogOfWar folder, which config.json names, so the
 	// config is read before anything can be logged; what it has to say waits.
-	cfg, legacy, cerr := loadConfig(root)
-	home := appDir(cfg.DataDir)
+	cfg, old, prev, cerr := loadConfig(root, defaultHome(root))
 	var notes []string
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		// A data folder on a drive that is gone: keep the app usable, its
-		// files beside config.json until the folder is back or changed.
-		notes = append(notes, fmt.Sprintf("data folder unavailable (%v); keeping the log in %s", err, root))
-		home = root
-	} else {
-		notes = append(notes, moveAppFiles(root, home)...)
+	if err := os.MkdirAll(cfg.Home, 0o755); err != nil {
+		// A folder on a drive that is gone: keep the app usable beside
+		// config.json until the folder is back or changed.
+		notes = append(notes, fmt.Sprintf("FogOfWar folder %s unavailable (%v); using %s", cfg.Home, err, root))
+		cfg.setHome(root)
+		old = nil
 	}
+	dataMoved := true
+	if old != nil {
+		var n []string
+		n, dataMoved = relocate(cfg.Home, *old, cfg.History)
+		notes = append(notes, n...)
+	}
+	if prev != "" && !samePath(prev, cfg.Home) {
+		// Moved while running last time: what was held open then goes now.
+		tidyOldAppDir(prev, true)
+	}
+	home := cfg.Home
 
 	var app *App
 	log, err := startLogTee(filepath.Join(home, "fogofwar.log"), func(line string) {
@@ -82,14 +91,25 @@ func run() error {
 	if cerr != nil {
 		app.logf("the config could not be read (%v); using defaults", cerr)
 	}
-	if (fresh || legacy) && cerr == nil {
-		if err := saveConfig(root, cfg); err != nil {
+	if old != nil && !dataMoved {
+		cfg.Setup = SetupRecord{}
+		app.cfg.Setup = SetupRecord{}
+	}
+	if (fresh || old != nil || prev != "") && cerr == nil {
+		if err := saveConfig(root, app.config()); err != nil {
 			app.logf("save config: %v", err)
-		} else if legacy {
-			app.logf("settings and history moved to %s", filepath.Join(appDir(cfg.DataDir), "settings.json"))
+		} else if old != nil {
+			app.logf("everything now lives in %s", cfg.Home)
+			for _, d := range old.appDirs {
+				if !samePath(d, cfg.Home) {
+					tidyOldAppDir(d, true)
+				}
+			}
+			tidyOldAppDir(filepath.Join(cfg.Home, "data", "fogofwar"), true)
+			os.RemoveAll(filepath.Join(root, "work"))
 		}
 	}
-	app.logf("FogOfWar %s, folder %s, data %s, install %s", version, root, cfg.DataDir, cfg.InstallID)
+	app.logf("FogOfWar %s, folder %s, data %s, install %s", version, cfg.Home, cfg.DataDir, cfg.InstallID)
 
 	// The engine download is a 7z, which Windows cannot open by itself.
 	engine.Extract7z = extract7z

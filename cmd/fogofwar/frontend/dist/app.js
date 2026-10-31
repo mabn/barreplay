@@ -586,8 +586,7 @@ function spark(svg, arr, top) {
 // ---------- settings + log ----------
 function renderSettings(st) {
   const s = st.settings;
-  $('sOut').textContent = s.outputDir; $('sOut').title = s.outputDir;
-  $('sData').textContent = s.dataDir; $('sData').title = s.dataDir;
+  $('sHome').textContent = s.home; $('sHome').title = s.home;
   $('sPatched').setAttribute('aria-checked', String(!!s.patchedEngine));
   renderPatchedBuild(s.patchedEngine, st.patchedBuilds || []);
   if (document.activeElement !== $('sMin')) $('sMin').value = s.minFreeMB;
@@ -728,12 +727,10 @@ function wire() {
   $('sDisk').onchange = () => saveSettings({ diskLimitGB: +$('sDisk').value });
   for (const b of document.querySelectorAll('[data-open]')) b.onclick = () => api.OpenFolder(b.dataset.open).catch(toastErr);
   for (const b of document.querySelectorAll('[data-pick]')) b.onclick = async () => {
-    const out = b.dataset.pick === 'out';
-    const cur = out ? S.settings.outputDir : S.settings.dataDir;
-    const dir = await api.ChooseFolder(out ? 'Where should replays go?' : 'Where should the engine and game live?', cur);
+    const dir = await api.ChooseFolder('Where should FogOfWar keep its files?', S.settings.home);
     if (!dir) return;
-    if (!out && !(await confirmBox('Move the data folder?', 'The engine and game (several GB) will be downloaded again into the new folder.', 'Move', 'Cancel'))) return;
-    saveSettings(out ? { outputDir: dir } : { dataDir: dir });
+    if (!(await confirmBox('Move FogOfWar\'s folder?', 'Settings, log, replays and the engine and game move to the new folder. On another drive the engine and game are downloaded again instead.', 'Move', 'Cancel'))) return;
+    saveSettings({ home: dir });
   };
   $('sRecheck').onclick = () => { api.RetrySetup(); openPanel(null); };
   $('sOpenLog').onclick = () => api.OpenLog().catch(toastErr);
@@ -793,7 +790,7 @@ function makeMock(scene) {
   hist.sort((a, b) => b.finishedAt.localeCompare(a.finishedAt));
   const st = {
     mode: 'ready', steps: steps(), setup: { engineVersion: '2026.07.04', gameVersion: 'Beyond All Reason test-31620-b0a3bbf', doneAt: new Date().toISOString() },
-    history: hist, settings: { dataDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\data', outputDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays', patchedEngine: true, minFreeMB: 512, diskLimitGB: 10 }, patchedBuilds: [{ engine: '2026.07.04', build: '2026.7.4-barreplay.5', stale: true }],
+    history: hist, settings: { home: 'D:\\Games\\FogOfWar', patchedEngine: true, minFreeMB: 512, diskLimitGB: 10 }, patchedBuilds: [{ engine: '2026.07.04', build: '2026.7.4-barreplay.5', stale: true }],
     hostRam: 16 * GB, cores: 8, version: '0.1.0', installId: '0192f3a1-7c2e-7d41-9b0e-5a3c8e21f4d7',
   };
   let timer = 0;
