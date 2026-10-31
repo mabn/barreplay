@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/mabn/barreplay/assets"
 )
@@ -419,10 +420,15 @@ func (e *Engine) runPRD(ctx context.Context, args ...string) error {
 	hideChild(cmd, false)
 	cmd.Env = e.prdEnv()
 	reason := &prdErrors{}
-	cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stderr, reason), io.MultiWriter(os.Stderr, reason)
+	// ONE writer for both streams: os/exec then shares a single pipe and copy
+	// goroutine. Two distinct writers got a goroutine each, both appending to
+	// reason at once — a race that crashed FogOfWar with "slice bounds out of
+	// range" in Write as a download finished.
+	w := io.MultiWriter(os.Stderr, reason)
+	cmd.Stdout, cmd.Stderr = w, w
 	err := cmd.Run()
-	if err != nil && reason.first != "" {
-		return fmt.Errorf("%s (pr-downloader %w)", reason.first, err)
+	if first := reason.reason(); err != nil && first != "" {
+		return fmt.Errorf("%s (pr-downloader %w)", first, err)
 	}
 	return err
 }
@@ -431,11 +437,20 @@ func (e *Engine) runPRD(ctx context.Context, args ...string) error {
 // reason a download failed ("Insufficient free disk space ..."), which its
 // exit status alone does not say.
 type prdErrors struct {
+	mu      sync.Mutex // Write may be called from more than one goroutine
 	partial []byte
 	first   string
 }
 
+func (p *prdErrors) reason() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.first
+}
+
 func (p *prdErrors) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.first != "" {
 		return len(b), nil
 	}
