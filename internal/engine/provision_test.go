@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -91,5 +92,28 @@ func TestPRDReason(t *testing.T) {
 		if got := prdReason(in); got != want {
 			t.Errorf("prdReason(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// pr-downloader's stdout and stderr can both be written at once (they were two
+// copy goroutines in runPRD); an unguarded Write panicked "slice bounds out of
+// range" in FogOfWar as a download finished. Run with -race.
+func TestPRDErrorsConcurrentWrites(t *testing.T) {
+	p := &prdErrors{}
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 2000; i++ {
+				p.Write([]byte("[Progress] 100% [=====] 1/1\r[Info] still"))
+				p.Write([]byte(" going\n"))
+			}
+		}()
+	}
+	wg.Wait()
+	p.Write([]byte("[Error] x.cpp:1:f():boom\n"))
+	if got := p.reason(); got != "boom" {
+		t.Errorf("reason = %q, want boom", got)
 	}
 }
