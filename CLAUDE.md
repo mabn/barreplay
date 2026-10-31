@@ -375,7 +375,7 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           Marcin's call), not published, has no pending/processing job and is not in the local
                           history (failed ones included), looking again a minute later when none
                           qualifies; Stop on an auto-picked run turns it off, three failures in a
-                          row pause it 10 min. History rows open /replays/<gameId> in the browser
+                          row pause it 10 min. The run screen lists the finished replays under the running game as tiles (app.js renderDone), so an auto-replay session shows what it has done. History rows and tiles open /replays/<gameId> in the browser
                           (FOGOFWAR_SITE overrides the site). Wherever a game is shown (preview,
                           run banner, result, history) it carries its LOBBY NAME (the site's GET
                           /api/games?id=, absent when the mirror never matched a lobby) and its
@@ -421,10 +421,21 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           log sleep, and session.json is rewritten every minute with what the app is doing,
                           plus the close reason; at the next start an unclosed record is logged with whether
                           Windows booted since (restart/power loss) or not (killed from outside).
-                          No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
-                          (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
-                          memory floor, history), data\ (engine, game, maps; the engine's write
-                          dir), replays\ (output), work\, webview\, fogofwar.log (every line the
+                          ONE FOLDER (Marcin's call, 0.2.20): the FogOfWar folder (Config.Home,
+                          the one setting for where things go; by default the folder FogOfWar.exe
+                          is in when writable and not a temp dir, else %LOCALAPPDATA%\FogOfWar)
+                          holds settings.json (faster-engine toggle, memory floor, disk limit,
+                          install id, history), session.json, fogofwar.log, webview\, work\,
+                          data\ (engine, game, maps; the engine's write dir) and replays\. No
+                          admin rights: %LOCALAPPDATA%\FogOfWar (FOGOFWAR_HOME overrides) holds
+                          only config.json, {"home": ...}. Older layouts (0.2.19's dataDir/
+                          outputDir with <data>\fogofwar\, and before it everything in
+                          config.json) load and are moved in on start (loadConfig's old layout,
+                          relocate: renames, so the data folder moves for free on one drive and
+                          downloads again across drives; replays are copied). Changing the
+                          folder in settings moves everything the same way (App.moveTo); the
+                          WebView2 data, held open, goes at the next start (config.json's
+                          "previous"). fogofwar.log (every line the
                           pipeline prints: logtee.go swaps os.Stderr for a pipe, which also feeds
                           pr-downloader's "[Progress] N%" into the download bars). FIRST LAUNCH
                           (setup.go) downloads the engine, the published patched build and the

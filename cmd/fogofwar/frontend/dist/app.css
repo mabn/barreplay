@@ -407,8 +407,25 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .toast { position: fixed; left: 50%; bottom: 22px; z-index: 30; transform: translate(-50%, 30px); opacity: 0; transition: all .3s var(--ease); padding: 10px 16px; border-radius: 10px; background: var(--float); border: 1px solid var(--line-2); box-shadow: 0 20px 40px -10px #000; font-weight: 600; pointer-events: none; }
 .toast.on { transform: translate(-50%, 0); opacity: 1; }
 
+/* finished replays under the running game */
+.done-list { margin-top: 22px; }
+.done-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.done-tile { all: unset; box-sizing: border-box; cursor: pointer; display: flex; flex-direction: column; min-width: 0; border-radius: 12px; overflow: hidden; background: rgba(0, 0, 0, .18); border: 1px solid var(--line); transition: transform .2s var(--ease), border-color .2s, background .2s; }
+.done-tile:hover, .done-tile:focus-visible { transform: translateY(-2px); border-color: var(--line-2); background: var(--smoke-2); }
+.done-tile .img { position: relative; height: 74px; background: #2a1a1f center/cover; }
+.done-tile .img::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0, 0, 0, 0) 40%, rgba(0, 0, 0, .55)); }
+.done-tile .size { position: absolute; left: 8px; bottom: 6px; z-index: 1; font: 700 13px var(--display); text-shadow: 0 1px 3px #000; }
+.done-tile .st { position: absolute; right: 7px; top: 7px; z-index: 1; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; background: rgba(6, 32, 25, .85); color: var(--accent); }
+.done-tile .st.busy { background: rgba(30, 20, 40, .85); color: var(--lilac); }
+.done-tile .st.warn { background: rgba(40, 28, 8, .85); color: var(--warn); }
+.done-tile .body { padding: 8px 10px 10px; min-width: 0; }
+.done-tile .t { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.done-tile .lob { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.done-tile .s { font-size: 11px; color: var(--dim); margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 @media (max-width: 900px) {
   .tiles { grid-template-columns: repeat(2, 1fr); }
+  .done-tiles { grid-template-columns: repeat(3, 1fr); }
   .preview { grid-template-columns: 120px 1fr; }
   h1.big { font-size: 32px; }
 }

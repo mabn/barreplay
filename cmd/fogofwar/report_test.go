@@ -58,7 +58,7 @@ func TestQueueJobReportsTheRun(t *testing.T) {
 	reportEvery = 20 * time.Millisecond
 	defer func() { reportEvery = old }()
 
-	a := NewApp(t.TempDir(), Config{InstallID: "0192aaaa-0000-7000-8000-000000000000", MinFreeMB: 512}, &logTee{})
+	a := NewApp(t.TempDir(), Config{Stored: Stored{InstallID: "0192aaaa-0000-7000-8000-000000000000", MinFreeMB: 512}}, &logTee{})
 	run := &jobRun{gameID: "abc", progress: &resim.Progress{}, stats: &resim.RunStats{}, started: time.Now(), auto: true}
 	run.progress.SetPhase(resim.PhaseSimulating)
 	q := a.startQueueJob(run, a.config())
@@ -131,7 +131,7 @@ func TestQueueJobBeatsAtStartAndEnd(t *testing.T) {
 	reportEvery = time.Hour
 	defer func() { reportEvery = old }()
 
-	a := NewApp(t.TempDir(), Config{InstallID: "0192aaaa-0000-7000-8000-000000000000"}, &logTee{})
+	a := NewApp(t.TempDir(), Config{Stored: Stored{InstallID: "0192aaaa-0000-7000-8000-000000000000"}}, &logTee{})
 	run := &jobRun{gameID: "abc", progress: &resim.Progress{}, stats: &resim.RunStats{}, started: time.Now()}
 	run.progress.SetPhase(resim.PhaseLoading)
 	q := a.startQueueJob(run, a.config())

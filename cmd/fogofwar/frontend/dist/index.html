@@ -149,6 +149,11 @@
         <button class="btn danger ghost" id="btnStop">Stop</button>
       </div>
     </div>
+
+    <div class="done-list" id="doneList" hidden>
+      <div class="recent-head"><h2 id="doneHead">Finished</h2></div>
+      <div class="done-tiles" id="doneTiles"></div>
+    </div>
   </section>
 </main>
 
@@ -157,14 +162,9 @@
   <div class="drawer-head"><h2>Settings</h2><button class="tb-btn" data-close><svg viewBox="0 0 20 20"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg></button></div>
   <div class="drawer-body">
     <div class="set">
-      <label>Replays folder</label>
-      <div class="path-row"><code id="sOut"></code><button class="btn ghost small" data-pick="out">Change</button><button class="btn ghost small" data-open="output">Open</button></div>
-      <p>Finished .brp files go here. Only the newest 50 are kept; every one is also uploaded to the site.</p>
-    </div>
-    <div class="set">
-      <label>Data folder</label>
-      <div class="path-row"><code id="sData"></code><button class="btn ghost small" data-pick="data">Change</button><button class="btn ghost small" data-open="data">Open</button></div>
-      <p>The engine, game and maps (several GB). Moving it downloads them again.</p>
+      <label>FogOfWar folder</label>
+      <div class="path-row"><code id="sHome"></code><button class="btn ghost small" data-pick="home">Change</button><button class="btn ghost small" data-open="home">Open</button></div>
+      <p>Everything FogOfWar keeps: its settings and log, the engine, game and maps (several GB, in <b>data</b>) and the newest 50 replays (in <b>replays</b>). Changing it moves everything there.</p>
     </div>
     <div class="set toggle-set">
       <div><label>Faster engine</label><p>Use the patched engine build when one is published for a game's engine. Same replay, about a quarter faster, 1.5 GB less memory.</p><p class="engbuild" id="sPatchedBuild"></p></div>
