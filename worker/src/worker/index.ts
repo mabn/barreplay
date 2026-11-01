@@ -27,6 +27,30 @@ const PRUNE_MINUTE = 17;
  * day is the ROW BUDGET pattern to avoid. */
 const LAVA_SYNC_MINUTE = 43;
 
+/** How often teiserver's lobby list is read: twice per cron minute. */
+const LOBBY_POLL_SEC = 30;
+
+/** One teiserver lobby poll (teiserver.ts). Its own try/catch, so a teiserver
+ * outage never costs the games mirror a run and vice versa; skipped entirely
+ * without the secrets, so local dev and forks run the games sync alone. */
+async function lobbySync(env: Env): Promise<void> {
+  if (env.TEISERVER_EMAIL === undefined || env.TEISERVER_PASSWORD === undefined) return;
+  try {
+    const r = await syncLobbies(indexStub(env), {
+      email: env.TEISERVER_EMAIL,
+      password: env.TEISERVER_PASSWORD,
+      base: env.TEISERVER_BASE,
+    });
+    if (r.started > 0 || r.ended > 0 || r.changed > 0 || r.matched > 0 || r.failed > 0) {
+      console.log(
+        `lobby sync: active=${r.active} started=${r.started} ended=${r.ended} changed=${r.changed} matched=${r.matched} failed=${r.failed}`,
+      );
+    }
+  } catch (e) {
+    console.error(`lobby sync failed: ${e}`);
+  }
+}
+
 export default {
   fetch: app.fetch,
 
@@ -64,22 +88,7 @@ export default {
     // the lobby details it copies onto the games row must be there before
     // that submission reads them, or lavabalance stores the game without
     // its parties forever.
-    if (env.TEISERVER_EMAIL !== undefined && env.TEISERVER_PASSWORD !== undefined) {
-      try {
-        const r = await syncLobbies(indexStub(env), {
-          email: env.TEISERVER_EMAIL,
-          password: env.TEISERVER_PASSWORD,
-          base: env.TEISERVER_BASE,
-        });
-        if (r.started > 0 || r.ended > 0 || r.matched > 0 || r.failed > 0) {
-          console.log(
-            `lobby sync: active=${r.active} started=${r.started} ended=${r.ended} matched=${r.matched} failed=${r.failed}`,
-          );
-        }
-      } catch (e) {
-        console.error(`lobby sync failed: ${e}`);
-      }
-    }
+    await lobbySync(env);
 
     // Same tick, third step: offer freshly-finished lava games to the sibling
     // lavabalance worker over the service binding (lavasync.ts — it marks what
@@ -137,5 +146,14 @@ export default {
     } catch (e) {
       console.error(`app job expiry failed: ${e}`);
     }
+
+    // Half a minute on, the lobby poll again: the cron fires once a minute,
+    // and teiserver is polled every LOBBY_POLL_SEC so a short game's start
+    // and a running lobby's last state (who left, a map switch) are caught
+    // within half a minute. Cheap: one index GET, plus a show page only for
+    // a lobby that started or changed.
+    const wait = controller.scheduledTime + LOBBY_POLL_SEC * 1000 - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    await lobbySync(env);
   },
 } satisfies ExportedHandler<Env>;

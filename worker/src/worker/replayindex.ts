@@ -32,8 +32,8 @@ import type {
   QueueGame,
   QueueJob,
 } from "./jobs";
-import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
-import type { LobbyDetails, LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
+import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, lobbyNearMisses, pickLobbyMatches } from "./teiserver";
+import type { LobbyDetails, LobbyEndUpdate, LobbyMatchResult, LobbyNearMiss, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import {
   LAVA_GAME_SIZE,
   SETTINGS_LAVA_FLAG,
@@ -313,7 +313,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -606,6 +606,11 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // matched observation is pruned after 48h and match time is the only
   // chance. Like the two above, NOT in gamesInsert's upsert list.
   ["lobbies", "lobby_details TEXT"],
+  // lobbySig (map | player count) of the index row as last recorded for an
+  // OPEN observation; a tick that sees a different one re-reads the show page
+  // and stores the lobby's state as lobby_details.end (lobbiesUpdate). NULL
+  // on observations from before it, which then count as changed once.
+  ["lobbies", "seen_sig TEXT"],
   ["games", "lobby_details TEXT"],
   // When this game was handed to lavabalance (lavaMarkOffered), NULL until it
   // has been. It is the lava sync's whole memory, and the reason the sync now
@@ -1747,9 +1752,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * from one finished (close it). */
   lobbiesOpen(): OpenLobby[] {
     return this.ctx.storage.sql
-      .exec(`SELECT lobby_id, started_unix FROM lobbies WHERE ended_unix IS NULL`)
+      .exec(`SELECT lobby_id, started_unix, seen_sig FROM lobbies WHERE ended_unix IS NULL`)
       .toArray()
-      .map((r) => ({ lobbyId: r.lobby_id as number, startedUnix: r.started_unix as number }));
+      .map((r) => ({
+        lobbyId: r.lobby_id as number,
+        startedUnix: r.started_unix as number,
+        seenSig: (r.seen_sig as string | null) ?? null,
+      }));
   }
 
   /** lobbiesObserve opens an observation per newly started lobby-game.
@@ -1762,8 +1771,8 @@ export class ReplayIndex extends DurableObject<Env> {
     const now = Math.floor(Date.now() / 1000);
     for (const o of obs) {
       this.ctx.storage.sql.exec(
-        `INSERT INTO lobbies (lobby_id, started_unix, name, map, players, player_count, lobby_details, ended_unix, matched_game_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+        `INSERT INTO lobbies (lobby_id, started_unix, name, map, players, player_count, lobby_details, seen_sig, ended_unix, matched_game_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
          ON CONFLICT(lobby_id, started_unix) DO NOTHING`,
         o.lobbyId,
         now - Math.max(0, o.elapsedSec ?? 0),
@@ -1772,6 +1781,26 @@ export class ReplayIndex extends DurableObject<Env> {
         o.players === null ? null : JSON.stringify(o.players),
         o.playerCount,
         o.details == null ? null : JSON.stringify(o.details),
+        o.sig ?? null,
+      );
+    }
+  }
+
+  /** lobbiesUpdate records a running lobby's changed state as
+   * lobby_details.end (teiserver.ts LobbyEndState) and remembers the
+   * signature that triggered it, so the next change overwrites it and the
+   * last one standing is the lobby as it was just before the game ended.
+   * Only open observations: a closed one describes a game that is over. */
+  lobbiesUpdate(updates: LobbyEndUpdate[]): void {
+    for (const u of updates) {
+      this.ctx.storage.sql.exec(
+        `UPDATE lobbies SET seen_sig = ?,
+           lobby_details = json_set(COALESCE(lobby_details, '{}'), '$.end', json(?))
+         WHERE lobby_id = ? AND started_unix = ? AND ended_unix IS NULL`,
+        u.sig,
+        JSON.stringify(u.end),
+        u.lobbyId,
+        u.startedUnix,
       );
     }
   }
@@ -1845,7 +1874,10 @@ export class ReplayIndex extends DurableObject<Env> {
       // minutes of observations off lobbies_started.
       const lobbies: MatchLobby[] = sql
         .exec(
-          `SELECT lobby_id, started_unix, map, players FROM lobbies
+          `SELECT lobby_id, started_unix, map, players,
+                  json_extract(lobby_details, '$.end.map') AS end_map,
+                  json_extract(lobby_details, '$.end.players') AS end_players
+           FROM lobbies
            WHERE matched_game_id IS NULL AND started_unix BETWEEN ? AND ?`,
           Math.min(...starts) - LOBBY_MATCH_EARLY_SLACK_SEC,
           Math.max(...starts) + LOBBY_MATCH_WINDOW_SEC,
@@ -1856,6 +1888,7 @@ export class ReplayIndex extends DurableObject<Env> {
           startedUnix: r.started_unix as number,
           map: (r.map as string | null) ?? null,
           players: r.players == null ? null : JSON.parse(r.players as string),
+          ...lobbyEnd(r),
         }));
       for (const m of pickLobbyMatches(lobbies, games)) {
         // lobby_details rides the same write-once UPDATE: the observation is
@@ -1907,6 +1940,78 @@ export class ReplayIndex extends DurableObject<Env> {
       now - LOBBY_MATCHED_KEEP_SEC,
     ).rowsWritten;
     return { matched, pruned };
+  }
+
+  /** lobbyMisses is the admin report on games the lobby match left unnamed:
+   * every game that ENDED in the last `hours` (capped at 48, the matched
+   * observations' retention) with no lobby, each with the observations near
+   * its start — same map or a shared player, started within an hour either
+   * way — and the verdict of every gate pickLobbyMatches applies
+   * (lobbyNearMisses). Read-only and on demand, so its cost is a window of
+   * the mirror off games_end plus the lobbies two hours wide around it off
+   * lobbies_started — a few thousand rows, never a table. */
+  lobbyMisses(hours = 24): {
+    from: number;
+    to: number;
+    games: number;
+    unmatched: { id: string; map: string | null; startUnix: number; durationSec: number | null; gameSize: string | null; nearest: LobbyNearMiss[] }[];
+  } {
+    const sql = this.ctx.storage.sql;
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - Math.max(1, Math.min(48, Math.floor(hours))) * 3600;
+    const all = sql
+      .exec(
+        `SELECT id, start_unix, duration_sec, map, game_size, players, lobby_name FROM games
+         WHERE end_unix BETWEEN ? AND ? AND start_unix IS NOT NULL`,
+        from,
+        to,
+      )
+      .toArray();
+    const miss = all.filter((r) => r.lobby_name == null);
+    if (miss.length === 0) return { from, to, games: all.length, unmatched: [] };
+    const starts = miss.map((r) => r.start_unix as number);
+    const lobbies = sql
+      .exec(
+        `SELECT lobby_id, started_unix, name, map, players, matched_game_id, ended_unix,
+                json_extract(lobby_details, '$.end.map') AS end_map,
+                json_extract(lobby_details, '$.end.players') AS end_players
+         FROM lobbies
+         WHERE started_unix BETWEEN ? AND ?`,
+        Math.min(...starts) - 3600,
+        Math.max(...starts) + 3600,
+      )
+      .toArray()
+      .map((r) => ({
+        lobbyId: r.lobby_id as number,
+        startedUnix: r.started_unix as number,
+        name: r.name as string,
+        map: (r.map as string | null) ?? null,
+        players: r.players == null ? null : (JSON.parse(r.players as string) as string[]),
+        ...lobbyEnd(r),
+        matchedGameId: (r.matched_game_id as string | null) ?? null,
+        endedUnix: (r.ended_unix as number | null) ?? null,
+      }));
+    const unmatched = miss.map((r) => {
+      const startUnix = r.start_unix as number;
+      const teams: CatalogTeam[] = r.players == null ? [] : JSON.parse(r.players as string);
+      const game: MatchGame = {
+        id: r.id as string,
+        startUnix,
+        map: (r.map as string | null) ?? null,
+        players: teams.flatMap((t) => t.players.map((p) => p.name)),
+      };
+      const near = lobbies.filter((l) => Math.abs(l.startedUnix - startUnix) <= 3600);
+      return {
+        id: game.id,
+        map: game.map,
+        startUnix,
+        durationSec: (r.duration_sec as number | null) ?? null,
+        gameSize: (r.game_size as string | null) ?? null,
+        nearest: lobbyNearMisses(game, near),
+      };
+    });
+    unmatched.sort((a, b) => b.startUnix - a.startUnix);
+    return { from, to, games: all.length, unmatched };
   }
 
   /** jobInsert records fresh work as a pending ingest job. A "resim" carries
@@ -3103,4 +3208,14 @@ function parseStored<T>(raw: string | null, parse: (v: unknown) => T | null): T 
       ).sqlTracked(name, fn, args);
     };
   }
+}
+
+/** The end-state half of a MatchLobby, from a row selecting end_map and
+ * end_players (json_extract of lobby_details.end). */
+function lobbyEnd(r: Record<string, SqlStorageValue>): { endMap: string | null; endPlayers: string[] | null } {
+  const roster = r.end_players == null ? null : (JSON.parse(r.end_players as string) as { name: string }[]);
+  return {
+    endMap: (r.end_map as string | null) ?? null,
+    endPlayers: roster === null ? null : roster.map((p) => p.name),
+  };
 }

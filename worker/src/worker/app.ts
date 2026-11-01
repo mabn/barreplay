@@ -237,6 +237,15 @@ app.get("/admin/logout", (c) => {
 // a deploy or eviction resets it.
 app.get("/api/admin/sqlstats", async (c) => c.json(await indexStub(c.env).sqlStatsReport()));
 
+// Games the teiserver lobby match left unnamed, with the observations near
+// each and which gate (map, time, roster overlap) each one failed — the
+// diagnosis for a game list with gaps in its lobby column. ?hours= (1-48,
+// default 24) is the window of game END times. Admin-only like sqlstats.
+app.get("/api/admin/lobbies/misses", async (c) => {
+  const hours = Number(c.req.query("hours") ?? "24");
+  return c.json(await indexStub(c.env).lobbyMisses(Number.isFinite(hours) ? hours : 24));
+});
+
 // authorized checks the shared-secret guard used by every write API the
 // ingest daemon / pack talk to. When the REPLAY_PUT_TOKEN secret is not
 // configured (local dev) the guard is open.

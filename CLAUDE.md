@@ -2471,7 +2471,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           games, and the second call added none.
                           LOBBY NAMES (teiserver poll, src/worker/teiserver.ts + the same
                           cron): the tick's second step — BEFORE the lava sync, see its entry
-                          — because a mirrored game carries no
+                          — and again 30 s later in the same invocation (index.ts
+                          LOBBY_POLL_SEC: the cron's minute is too coarse) — because a mirrored game carries no
                           LOBBY NAME — that exists only while the lobby is alive, on
                           teiserver's web UI (server4.beyondallreason.info/battle/lobbies, a
                           Phoenix dead render scraped with small regexes; parsers and the
@@ -2489,6 +2490,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           land in ONE lobby_details JSON column (teiserver.ts LobbyDetails,
                           the jobs.stats pattern — nothing filters on it in SQL). The flat
                           `players` name list stays what the MATCH reads, untouched.
+                          THE LAST STATE BEFORE THE GAME ENDED (lobby_details.end, LobbyEndState):
+                          each tick compares a running lobby's index row (map | player count,
+                          teiserver.ts lobbySig; spectators churn and are left out) with the
+                          lobbies.seen_sig last recorded, and on a change re-reads the show page
+                          and overwrites `end` (ReplayIndex.lobbiesUpdate, json_set) — so who left
+                          or dropped, and a map switched after the lobby went in progress, are
+                          kept, and the match accepts the end map and roster as well as the start
+                          ones. Only changes write (a few per game), never a row per lobby per tick.
                           PARTY IS A COLOUR, NOT TEXT (teiserver.ts partyKey): teiserver
                           gives each party of 2+ a distinct background colour and renders an
                           otherwise EMPTY cell — `<td style="background-color: #62ea6b;"
@@ -2505,7 +2514,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           lavabalance/src/teiserver.ts, which drives these same pages.
                           When the finished game later reaches the rts-api mirror,
                           ReplayIndex.lobbiesMatch pairs them: no shared id exists, so the
-                          match is same map (normalized) + started within [-60s,+300s] of the
+                          match is same map (normalized) + started within [-600s,+300s] of the
                           game's start + >=50% roster overlap (lowercase names; a null-roster
                           observation passes on map+time but scores below any real roster).
                           It is ARRIVAL-DRIVEN, from the games side: each run considers the
@@ -2540,7 +2549,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           composite key (lobby_id, started_unix); name/map/roster are all
                           per-game, so renames between games record correctly). Matched
                           observations prune after 48h; unmatched ones are kept forever as
-                          the record of why a game has no name. SERVED: the DO's list JOINS
+                          the record of why a game has no name. GET /api/admin/lobbies/misses?hours=N
+                          (ReplayIndex.lobbyMisses, teiserver.ts lobbyNearMisses) reads that record: every
+                          game that ended in the window with no lobby, its nearest observations and which
+                          gate (map, time, roster overlap) each failed. Measured 2026-11-01: ~3.5% unmatched. SERVED: the DO's list JOINS
                           lobby_name per read (a scalar subselect on games' primary key;
                           games.map_file rides the same join into `mapFile` — the archive
                           name behind the list's 18px map THUMBNAILS, fetched lazily from

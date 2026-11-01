@@ -1524,6 +1524,42 @@ test("lobbiesMatch names the game and survives a re-sync", async () => {
   });
 });
 
+test("lobbiesUpdate stores the last running state, and the match can use it", async () => {
+  await inIndex((index, sql) => {
+    // Seen going in progress on another map with strangers' names (the lobby
+    // switched map and relaunched).
+    index.lobbiesObserve([
+      { lobbyId: 9, name: "Switcheroo", map: "Archsimkats", players: ["x", "y"], playerCount: 2, elapsedSec: 0, details: det(), sig: "Archsimkats|2" },
+    ]);
+    const open = index.lobbiesOpen();
+    expect(open).toEqual([{ lobbyId: 9, startedUnix: open[0].startedUnix, seenSig: "Archsimkats|2" }]);
+    const end = {
+      atUnix: open[0].startedUnix + 60,
+      elapsedSec: 60,
+      map: "Great Divide V1",
+      playerCount: 2,
+      memberCount: 5,
+      spectatorCount: 3,
+      players: [
+        { name: "Rouben", team: 0, party: null, rating: 30, bonus: 0, faction: null },
+        { name: "LaufendeStahlwand", team: 1, party: null, rating: 20, bonus: 0, faction: null },
+      ],
+    };
+    index.lobbiesUpdate([{ lobbyId: 9, startedUnix: open[0].startedUnix, sig: "Great Divide V1|2", end }]);
+    expect(index.lobbiesOpen()[0].seenSig).toBe("Great Divide V1|2");
+    const stored = JSON.parse(rows(sql, `SELECT lobby_details FROM lobbies WHERE lobby_id = 9`)[0].lobby_details as string);
+    expect(stored).toEqual({ ...det(), end });
+    // The game (on the map and with the players of the END state) matches,
+    // and its games row carries the end state with the rest of the details.
+    index.gamesInsert([game("g9", { startUnix: open[0].startedUnix - 5 })]);
+    expect(index.lobbiesMatch()).toEqual({ matched: 1, pruned: 0 });
+    expect(index.gamesByIds(["g9"])[0].lobbyDetails).toEqual({ ...det(), end });
+    // A closed observation is not rewritten.
+    index.lobbiesUpdate([{ lobbyId: 9, startedUnix: open[0].startedUnix, sig: "z", end: { ...end, playerCount: 1 } }]);
+    expect(JSON.parse(rows(sql, `SELECT lobby_details FROM lobbies WHERE lobby_id = 9`)[0].lobby_details as string).end.playerCount).toBe(2);
+  });
+});
+
 test("a match re-opens an already-offered game to the lava sync, once", async () => {
   await inIndex((index, sql) => {
     // The order that costs parties: the game is mirrored and submitted before
@@ -2121,5 +2157,22 @@ test("the app's update refuses a daemon's job, and an install's jobs list togeth
     // A retry of an app run is an ordinary re-sim.
     index.appJobUpdate("a2", "error", "crashed", null, null, null);
     expect(index.jobRetry("r2", "a2")).toMatchObject({ status: "queued", job: { kind: "resim", gameId: "g2" } });
+  });
+});
+
+test("lobbyMisses lists unnamed games with their nearby observations", async () => {
+  await inIndex((index) => {
+    index.lobbiesObserve([
+      { lobbyId: 9, name: "Rotato | 8v8", map: "The Rock Jungle 2.1.1", players: ["Rouben", "LaufendeStahlwand"], playerCount: 2, elapsedSec: 0, details: det() },
+    ]);
+    const now = Math.floor(Date.now() / 1000);
+    // Same players, a map the observation does not carry: no match.
+    index.gamesInsert([game("gmiss", { startUnix: now - 20, durationSec: 10, map: "Riverrun_V1" })]);
+    expect(index.lobbiesMatch().matched).toBe(0);
+    const r = index.lobbyMisses(24);
+    expect(r.games).toBe(1);
+    expect(r.unmatched.map((u) => u.id)).toEqual(["gmiss"]);
+    const [n] = r.unmatched[0].nearest;
+    expect([n.lobbyId, n.name, n.mapOk, n.timeOk, n.overlapOk, n.common]).toEqual([9, "Rotato | 8v8", false, true, true, 2]);
   });
 });

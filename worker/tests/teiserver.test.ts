@@ -9,6 +9,7 @@ import { test } from "node:test";
 
 import {
   LOBBIES_PATH,
+  LOBBY_MATCH_EARLY_SLACK_SEC,
   LOBBY_MATCH_WINDOW_SEC,
   TeiserverSession,
   extractCsrfToken,
@@ -16,10 +17,12 @@ import {
   partyKey,
   parseLobbyShowPlayers,
   parseLobbyShowRoster,
+  lobbyNearMisses,
+  lobbySig,
   pickLobbyMatches,
   syncLobbies,
 } from "../src/worker/teiserver";
-import type { LobbyIndex, LobbyObservation, LobbyRosterPlayer, MatchGame, MatchLobby, OpenLobby } from "../src/worker/teiserver";
+import type { LobbyEndUpdate, LobbyIndex, LobbyObservation, LobbyRosterPlayer, MatchGame, MatchLobby, OpenLobby } from "../src/worker/teiserver";
 
 // ---- Fixtures (trimmed from a real /battle/lobbies dead render) ----
 
@@ -253,6 +256,7 @@ class FakeLobbyIndex implements LobbyIndex {
   open: OpenLobby[] = [];
   observed: LobbyObservation[] = [];
   ended: number[] = [];
+  updates: LobbyEndUpdate[] = [];
   matchCalls = 0;
   teiserverCookies() {
     return this.cookies;
@@ -268,6 +272,9 @@ class FakeLobbyIndex implements LobbyIndex {
   }
   lobbiesEnd(ids: number[]) {
     this.ended.push(...ids);
+  }
+  lobbiesUpdate(u: LobbyEndUpdate[]) {
+    this.updates.push(...u);
   }
   lobbiesMatch() {
     this.matchCalls++;
@@ -285,12 +292,13 @@ test("syncLobbies observes new games, closes finished ones, skips known ones", a
   const index = new FakeLobbyIndex();
   // 7000 is already open (still in progress: no show fetch, no observation);
   // 5 finished since last tick (absent from the page).
+  const row7000 = parseLobbyIndex(INDEX_HTML).find((l) => l.id === 7000)!;
   index.open = [
-    { lobbyId: 7000, startedUnix: 1000 },
-    { lobbyId: 5, startedUnix: 900 },
+    { lobbyId: 7000, startedUnix: 1000, seenSig: lobbySig(row7000) },
+    { lobbyId: 5, startedUnix: 900, seenSig: "x" },
   ];
   const r = await syncLobbies(index, { email: "a@b.c", password: "pw" }, impl);
-  assert.deepEqual(r, { active: 2, started: 1, ended: 1, matched: 0, failed: 0 });
+  assert.deepEqual(r, { active: 2, started: 1, ended: 1, changed: 0, matched: 0, failed: 0 });
   assert.deepEqual(index.observed, [
     {
       lobbyId: 10795,
@@ -299,6 +307,7 @@ test("syncLobbies observes new games, closes finished ones, skips known ones", a
       players: ["Adzek", "[BS]Phoenix", "Kirdiel", "voidy"],
       playerCount: 4,
       elapsedSec: 13 * 60 + 49,
+      sig: "Proving Grounds v1.0|16",
       details: {
         locked: false,
         passworded: false,
@@ -323,7 +332,52 @@ test("syncLobbies with a stored session performs no login", async () => {
   index.cookies = { guardian_default_token: "guard1" };
   const r = await syncLobbies(index, { email: "a@b.c", password: "pw" }, impl);
   assert.deepEqual(calls, [`GET ${LOBBIES_PATH}`]);
-  assert.deepEqual(r, { active: 0, started: 0, ended: 0, matched: 0, failed: 0 });
+  assert.deepEqual(r, { active: 0, started: 0, ended: 0, changed: 0, matched: 0, failed: 0 });
+});
+
+test("syncLobbies records a running lobby's state when its map or player count changes", async () => {
+  const { impl, calls } = fakeWeb({
+    [`GET ${LOBBIES_PATH}`]: () => new Response(INDEX_HTML, { status: 200 }),
+    [`GET ${LOBBIES_PATH}/show/7000`]: () => new Response(SHOW_HTML, { status: 200 }),
+  });
+  const page = parseLobbyIndex(INDEX_HTML);
+  const row10795 = page.find((l) => l.id === 10795)!;
+  const row7000 = page.find((l) => l.id === 7000)!;
+  const index = new FakeLobbyIndex();
+  index.cookies = { guardian_default_token: "guard1" };
+  // 10795 unchanged since it was recorded; 7000 had one more player then.
+  index.open = [
+    { lobbyId: 10795, startedUnix: 1000, seenSig: lobbySig(row10795) },
+    { lobbyId: 7000, startedUnix: 1100, seenSig: lobbySig({ map: row7000.map, playerCount: row7000.playerCount + 1 }) },
+  ];
+  const r = await syncLobbies(index, { email: "a@b.c", password: "pw" }, impl);
+  assert.equal(r.changed, 1);
+  assert.equal(r.started, 0);
+  assert.ok(!calls.includes(`GET ${LOBBIES_PATH}/show/10795`));
+  assert.equal(index.updates.length, 1);
+  const u = index.updates[0];
+  assert.equal(u.lobbyId, 7000);
+  assert.equal(u.startedUnix, 1100);
+  assert.equal(u.sig, lobbySig(row7000));
+  assert.equal(u.end.playerCount, row7000.playerCount);
+  assert.equal(u.end.map, row7000.map);
+  assert.deepEqual(u.end.players, SHOW_ROSTER);
+  // Next tick, same page: nothing changed, nothing fetched.
+  index.open[1].seenSig = u.sig;
+  index.updates = [];
+  const r2 = await syncLobbies(index, { email: "a@b.c", password: "pw" }, impl);
+  assert.equal(r2.changed, 0);
+  assert.equal(index.updates.length, 0);
+});
+
+test("pickLobbyMatches: the end state's map and roster can match too", () => {
+  // The lobby switched map after it went in progress (seen on Archsimkats,
+  // played on Comet Catcher), and lost two players to a relaunch.
+  const switched = lob({ map: "Archsimkats", players: ["X", "Y", "Z", "W"], endMap: "Comet Catcher", endPlayers: ["Alpha", "Bravo", "Charlie"] });
+  const g = game({ map: "Comet Catcher" });
+  assert.deepEqual(pickLobbyMatches([switched], [g]), [{ lobbyId: 1, startedUnix: 1000, gameId: "g1" }]);
+  // Without the end state it fails both gates.
+  assert.equal(pickLobbyMatches([lob({ map: "Archsimkats", players: ["X", "Y", "Z", "W"] })], [g]).length, 0);
 });
 
 test("a failed show fetch still records the observation, with players null", async () => {
@@ -386,8 +440,11 @@ test("pickLobbyMatches: map and time gates", () => {
   assert.equal(pickLobbyMatches([lob()], [game({ startUnix: null })]).length, 0);
   // Observation began too long after the game's start.
   assert.equal(pickLobbyMatches([lob({ startedUnix: 990 + LOBBY_MATCH_WINDOW_SEC + 1 })], [game()]).length, 0);
-  // ...or meaningfully before it.
-  assert.equal(pickLobbyMatches([lob({ startedUnix: 990 - 61 })], [game()]).length, 0);
+  // ...or too long before it.
+  assert.equal(pickLobbyMatches([lob({ startedUnix: 990 - LOBBY_MATCH_EARLY_SLACK_SEC - 1 })], [game()]).length, 0);
+  // Minutes early is a long load or a relaunched game (measured: 92-488 s
+  // with 14-16 of 16 names shared) and still matches.
+  assert.equal(pickLobbyMatches([lob({ startedUnix: 990 - 488 })], [game()]).length, 1);
   // Map compare is case- and whitespace-insensitive.
   assert.equal(pickLobbyMatches([lob({ map: "supreme  isthmus V2.1" })], [game()]).length, 1);
 });
@@ -400,9 +457,14 @@ test("pickLobbyMatches: roster overlap threshold, case-insensitive", () => {
     pickLobbyMatches([lob({ players: ["Alpha", "X", "Y", "Z"] })], [game()]).length,
     0,
   );
-  // An empty roster on either side cannot vouch for anything.
-  assert.equal(pickLobbyMatches([lob({ players: [] })], [game()]).length, 0);
+  // A game with no roster cannot vouch for anything.
   assert.equal(pickLobbyMatches([lob()], [game({ players: [] })]).length, 0);
+  // An observation with an EMPTY roster is as unknown as a null one: it
+  // passes on map + time and loses to a real roster.
+  assert.equal(pickLobbyMatches([lob({ players: [] })], [game()]).length, 1);
+  assert.deepEqual(pickLobbyMatches([lob({ lobbyId: 7, players: [] }), lob({ lobbyId: 2 })], [game()]), [
+    { lobbyId: 2, startedUnix: 1000, gameId: "g1" },
+  ]);
 });
 
 test("pickLobbyMatches: a null roster falls back to map+time and loses to a real one", () => {
@@ -429,4 +491,33 @@ test("pickLobbyMatches: greedy one-to-one; ties resolve by smaller time delta", 
   assert.deepEqual(pickLobbyMatches([far, near], [game({ startUnix: 992 })]), [
     { lobbyId: 5, startedUnix: 995, gameId: "g1" },
   ]);
+});
+
+test("lobbyNearMisses reports which gate each nearby observation failed", () => {
+  const game: MatchGame = { id: "g", startUnix: 10_000, map: "Riverrun_V1", players: ["A", "B", "C", "D"] };
+  const obs = (over: Partial<MatchLobby & { name: string }>) => ({
+    lobbyId: 1,
+    startedUnix: 10_030,
+    name: "lobby",
+    map: "Riverrun_V1",
+    players: ["a", "b", "c", "d"] as string[] | null,
+    matchedGameId: null,
+    endedUnix: null,
+    ...over,
+  });
+  const out = lobbyNearMisses(game, [
+    obs({ lobbyId: 1, map: "The Rock Jungle 2.1.1" }), // wrong map, same players
+    obs({ lobbyId: 2, startedUnix: 10_000 - LOBBY_MATCH_EARLY_SLACK_SEC - 100 }), // too early
+    obs({ lobbyId: 3, players: ["a", "x", "y", "z"] }), // 1 of 4 shared
+    obs({ lobbyId: 4, map: "Elsewhere", players: ["q"] }), // unrelated: left out
+  ]);
+  assert.deepEqual(
+    out.map((m) => [m.lobbyId, m.mapOk, m.timeOk, m.overlapOk, m.common, m.dtSec]),
+    [
+      [1, false, true, true, 4, 30],
+      [3, true, true, false, 1, 30],
+      [2, true, false, true, 4, -LOBBY_MATCH_EARLY_SLACK_SEC - 100],
+    ],
+  );
+  assert.equal(out[1].overlap, 0.25);
 });
