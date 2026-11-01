@@ -180,8 +180,10 @@
            The setup link is RELATIVE: it resolves to /setup on whichever
            origin serves the page (https://replay.fogofwar.dev/setup deployed,
            the loopback origin under `vite dev`). -->
-      <span id="droplabel">Want more games here? <a href="/setup">Get FogOfWar for Windows</a> to simulate them on your PC.
-        Drop a <code>.brp</code> here to publish it, or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream,.brp" hidden></label>.</span>
+      <!-- Dropping a .brp or .brepstream on the box still publishes it; the
+           banner just no longer advertises it. The picker stays for app.js. -->
+      <span id="droplabel">Want more games here? <a href="/setup">Get FogOfWar for Windows</a> to simulate them on your PC.</span>
+      <input type="file" id="dropfile" accept=".brepstream,.brp" hidden>
       <div id="dropstatus" style="display:none"></div>
     </div>
 
