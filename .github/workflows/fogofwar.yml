@@ -1,6 +1,8 @@
-# Builds FogOfWar.exe (cmd/fogofwar) on demand. Nothing here runs on an
-# ordinary push: a release is either a pushed tag or the Run workflow button.
+# Builds FogOfWar.exe (cmd/fogofwar). A release comes from one of:
 #
+#   a merge to main that changes cmd/fogofwar/VERSION
+#                                  -> the release fogofwar/v<VERSION>
+#                                     (skipped when that tag already exists)
 #   Run workflow, version empty    -> test build, kept as a workflow
 #                                     artifact for 14 days, no release
 #   Run workflow, version 0.3.0    -> published as the GitHub release
@@ -21,6 +23,10 @@ on:
   push:
     tags:
       - "fogofwar/v*"
+    branches:
+      - main
+    paths:
+      - cmd/fogofwar/VERSION
 
 concurrency:
   group: fogofwar-${{ github.ref }}-${{ inputs.version }}
@@ -57,6 +63,17 @@ jobs:
         run: |
           if [ "$REF_TYPE" = tag ]; then
             v="${REF_NAME#fogofwar/v}"
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            # A merge that changed VERSION. Re-landing a version that is
+            # already released (a revert, a re-merge) builds but publishes
+            # nothing, rather than failing.
+            v="$(tr -d ' \r\n' < VERSION)"
+            if git ls-remote --exit-code --tags origin "refs/tags/fogofwar/v$v" >/dev/null; then
+              echo "::notice::fogofwar/v$v is already released; nothing to publish"
+              echo "version=$v" >> "$GITHUB_OUTPUT"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           else
             v="$INPUT_VERSION"
           fi
