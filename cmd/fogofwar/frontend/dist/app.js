@@ -281,8 +281,6 @@ function previewCard(p) {
   est.innerHTML = '';
   est.append('About ', el('b', '', fmtDur(p.estimateSec)), ' on this PC · needs ~', el('b', '', gb(p.estRam)), ' memory');
   foot.append(est);
-  const eng = el('span', p.patchedReady ? 'chip ok' : 'chip', p.patchedReady ? 'Faster engine' : `Engine ${p.engineVersion}`);
-  foot.append(eng);
   c.append(foot);
   return c;
 }
@@ -520,13 +518,6 @@ function renderRun(st) {
   spark($('spSpeed'), series.speed); spark($('spMem'), series.mem); spark($('spCpu'), series.cpu, (st.cores || 1) * 100);
 
   $('runElapsed').textContent = 'Running for ' + fmtDur(j.elapsedSec);
-  const be = $('runEngine');
-  be.hidden = !j.engine;
-  be.textContent = j.engine === 'patched' ? 'Faster engine' : 'Stock engine';
-  be.classList.toggle('stock', j.engine === 'stock');
-  be.title = j.engine === 'patched'
-    ? 'Running the patched engine build: same replay, faster, less memory'
-    : 'No patched build for this engine version (or Faster engine is off in Settings)';
   $('runEyebrow').textContent = (j.auto ? 'Auto-replay · ' : '') + (j.phase === 'simulating' ? 'Simulating' : j.phase === 'uploading' ? 'Uploading' : 'Re-simulating');
   $('runAuto').hidden = !st.autoReplay;
   renderDone(st.history);
