@@ -47,6 +47,7 @@ export const READ_METHODS: ReadonlySet<string> = new Set([
   "jobSamples",
   "queuePage",
   "sqlStatsReport",
+  "lobbyMisses",
 ]);
 
 /** What a write against production raises locally. proddev.ts turns it into

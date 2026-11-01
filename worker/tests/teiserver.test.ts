@@ -16,6 +16,7 @@ import {
   partyKey,
   parseLobbyShowPlayers,
   parseLobbyShowRoster,
+  lobbyNearMisses,
   pickLobbyMatches,
   syncLobbies,
 } from "../src/worker/teiserver";
@@ -429,4 +430,33 @@ test("pickLobbyMatches: greedy one-to-one; ties resolve by smaller time delta", 
   assert.deepEqual(pickLobbyMatches([far, near], [game({ startUnix: 992 })]), [
     { lobbyId: 5, startedUnix: 995, gameId: "g1" },
   ]);
+});
+
+test("lobbyNearMisses reports which gate each nearby observation failed", () => {
+  const game: MatchGame = { id: "g", startUnix: 10_000, map: "Riverrun_V1", players: ["A", "B", "C", "D"] };
+  const obs = (over: Partial<MatchLobby & { name: string }>) => ({
+    lobbyId: 1,
+    startedUnix: 10_030,
+    name: "lobby",
+    map: "Riverrun_V1",
+    players: ["a", "b", "c", "d"] as string[] | null,
+    matchedGameId: null,
+    endedUnix: null,
+    ...over,
+  });
+  const out = lobbyNearMisses(game, [
+    obs({ lobbyId: 1, map: "The Rock Jungle 2.1.1" }), // wrong map, same players
+    obs({ lobbyId: 2, startedUnix: 9_800 }), // 200 s early
+    obs({ lobbyId: 3, players: ["a", "x", "y", "z"] }), // 1 of 4 shared
+    obs({ lobbyId: 4, map: "Elsewhere", players: ["q"] }), // unrelated: left out
+  ]);
+  assert.deepEqual(
+    out.map((m) => [m.lobbyId, m.mapOk, m.timeOk, m.overlapOk, m.common, m.dtSec]),
+    [
+      [1, false, true, true, 4, 30],
+      [3, true, true, false, 1, 30],
+      [2, true, false, true, 4, -200],
+    ],
+  );
+  assert.equal(out[1].overlap, 0.25);
 });

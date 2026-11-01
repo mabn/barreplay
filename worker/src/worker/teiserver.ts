@@ -517,6 +517,74 @@ export function pickLobbyMatches(lobbies: MatchLobby[], games: MatchGame[]): Lob
   return out;
 }
 
+/** One lobby observation set against one game that did NOT match, with the
+ * verdict of each of pickLobbyMatches' gates — the admin lobby-miss report
+ * (ReplayIndex.lobbyMisses). */
+export interface LobbyNearMiss {
+  lobbyId: number;
+  startedUnix: number;
+  name: string;
+  map: string | null;
+  /** started_unix - game start; the gate is [-EARLY_SLACK, +WINDOW]. */
+  dtSec: number;
+  mapOk: boolean;
+  timeOk: boolean;
+  /** Shared names (lowercased), and each roster's size. */
+  common: number;
+  lobbyN: number | null;
+  gameN: number;
+  /** common / min(lobbyN, gameN); null when the observation has no roster. */
+  overlap: number | null;
+  overlapOk: boolean;
+  /** The game this observation named instead, if any. */
+  matchedGameId: string | null;
+  endedUnix: number | null;
+}
+
+/** Score every observation against one game exactly as pickLobbyMatches
+ * gates them, keeping those that share the map or at least one player —
+ * the plausible candidates — best first (gates passed, then |dt|). */
+export function lobbyNearMisses(
+  game: MatchGame,
+  lobbies: (MatchLobby & { name: string; matchedGameId: string | null; endedUnix: number | null })[],
+  limit = 5,
+): LobbyNearMiss[] {
+  const gameNames = new Set(game.players.map((n) => n.toLowerCase()));
+  const out: LobbyNearMiss[] = [];
+  for (const l of lobbies) {
+    const mapOk = l.map !== null && game.map !== null && normMap(l.map) === normMap(game.map);
+    const dtSec = l.startedUnix - (game.startUnix ?? 0);
+    const timeOk = game.startUnix !== null && dtSec >= -LOBBY_MATCH_EARLY_SLACK_SEC && dtSec <= LOBBY_MATCH_WINDOW_SEC;
+    const lobbyNames = l.players === null ? null : new Set(l.players.map((n) => n.toLowerCase()));
+    let common = 0;
+    if (lobbyNames) for (const n of lobbyNames) if (gameNames.has(n)) common++;
+    const overlap =
+      lobbyNames === null || lobbyNames.size === 0 || gameNames.size === 0
+        ? null
+        : common / Math.min(lobbyNames.size, gameNames.size);
+    if (!mapOk && common === 0) continue;
+    out.push({
+      lobbyId: l.lobbyId,
+      startedUnix: l.startedUnix,
+      name: l.name,
+      map: l.map,
+      dtSec,
+      mapOk,
+      timeOk,
+      common,
+      lobbyN: lobbyNames === null ? null : lobbyNames.size,
+      gameN: gameNames.size,
+      overlap,
+      overlapOk: lobbyNames === null || (overlap !== null && overlap >= LOBBY_MATCH_MIN_OVERLAP),
+      matchedGameId: l.matchedGameId,
+      endedUnix: l.endedUnix,
+    });
+  }
+  const passed = (m: LobbyNearMiss) => Number(m.mapOk) + Number(m.timeOk) + Number(m.overlapOk);
+  out.sort((a, b) => passed(b) - passed(a) || Math.abs(a.dtSec) - Math.abs(b.dtSec) || a.lobbyId - b.lobbyId);
+  return out.slice(0, limit);
+}
+
 // ---- The sync itself ----
 
 /** Everything the lobby pages say about a game beyond name/map/roster-names:

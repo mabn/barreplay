@@ -2123,3 +2123,20 @@ test("the app's update refuses a daemon's job, and an install's jobs list togeth
     expect(index.jobRetry("r2", "a2")).toMatchObject({ status: "queued", job: { kind: "resim", gameId: "g2" } });
   });
 });
+
+test("lobbyMisses lists unnamed games with their nearby observations", async () => {
+  await inIndex((index) => {
+    index.lobbiesObserve([
+      { lobbyId: 9, name: "Rotato | 8v8", map: "The Rock Jungle 2.1.1", players: ["Rouben", "LaufendeStahlwand"], playerCount: 2, elapsedSec: 0, details: det() },
+    ]);
+    const now = Math.floor(Date.now() / 1000);
+    // Same players, a map the observation does not carry: no match.
+    index.gamesInsert([game("gmiss", { startUnix: now - 20, durationSec: 10, map: "Riverrun_V1" })]);
+    expect(index.lobbiesMatch().matched).toBe(0);
+    const r = index.lobbyMisses(24);
+    expect(r.games).toBe(1);
+    expect(r.unmatched.map((u) => u.id)).toEqual(["gmiss"]);
+    const [n] = r.unmatched[0].nearest;
+    expect([n.lobbyId, n.name, n.mapOk, n.timeOk, n.overlapOk, n.common]).toEqual([9, "Rotato | 8v8", false, true, true, 2]);
+  });
+});

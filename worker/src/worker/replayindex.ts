@@ -32,8 +32,8 @@ import type {
   QueueGame,
   QueueJob,
 } from "./jobs";
-import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
-import type { LobbyDetails, LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
+import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, lobbyNearMisses, pickLobbyMatches } from "./teiserver";
+import type { LobbyDetails, LobbyMatchResult, LobbyNearMiss, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import {
   LAVA_GAME_SIZE,
   SETTINGS_LAVA_FLAG,
@@ -1907,6 +1907,74 @@ export class ReplayIndex extends DurableObject<Env> {
       now - LOBBY_MATCHED_KEEP_SEC,
     ).rowsWritten;
     return { matched, pruned };
+  }
+
+  /** lobbyMisses is the admin report on games the lobby match left unnamed:
+   * every game that ENDED in the last `hours` (capped at 48, the matched
+   * observations' retention) with no lobby, each with the observations near
+   * its start — same map or a shared player, started within an hour either
+   * way — and the verdict of every gate pickLobbyMatches applies
+   * (lobbyNearMisses). Read-only and on demand, so its cost is a window of
+   * the mirror off games_end plus the lobbies two hours wide around it off
+   * lobbies_started — a few thousand rows, never a table. */
+  lobbyMisses(hours = 24): {
+    from: number;
+    to: number;
+    games: number;
+    unmatched: { id: string; map: string | null; startUnix: number; durationSec: number | null; gameSize: string | null; nearest: LobbyNearMiss[] }[];
+  } {
+    const sql = this.ctx.storage.sql;
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - Math.max(1, Math.min(48, Math.floor(hours))) * 3600;
+    const all = sql
+      .exec(
+        `SELECT id, start_unix, duration_sec, map, game_size, players, lobby_name FROM games
+         WHERE end_unix BETWEEN ? AND ? AND start_unix IS NOT NULL`,
+        from,
+        to,
+      )
+      .toArray();
+    const miss = all.filter((r) => r.lobby_name == null);
+    if (miss.length === 0) return { from, to, games: all.length, unmatched: [] };
+    const starts = miss.map((r) => r.start_unix as number);
+    const lobbies = sql
+      .exec(
+        `SELECT lobby_id, started_unix, name, map, players, matched_game_id, ended_unix FROM lobbies
+         WHERE started_unix BETWEEN ? AND ?`,
+        Math.min(...starts) - 3600,
+        Math.max(...starts) + 3600,
+      )
+      .toArray()
+      .map((r) => ({
+        lobbyId: r.lobby_id as number,
+        startedUnix: r.started_unix as number,
+        name: r.name as string,
+        map: (r.map as string | null) ?? null,
+        players: r.players == null ? null : (JSON.parse(r.players as string) as string[]),
+        matchedGameId: (r.matched_game_id as string | null) ?? null,
+        endedUnix: (r.ended_unix as number | null) ?? null,
+      }));
+    const unmatched = miss.map((r) => {
+      const startUnix = r.start_unix as number;
+      const teams: CatalogTeam[] = r.players == null ? [] : JSON.parse(r.players as string);
+      const game: MatchGame = {
+        id: r.id as string,
+        startUnix,
+        map: (r.map as string | null) ?? null,
+        players: teams.flatMap((t) => t.players.map((p) => p.name)),
+      };
+      const near = lobbies.filter((l) => Math.abs(l.startedUnix - startUnix) <= 3600);
+      return {
+        id: game.id,
+        map: game.map,
+        startUnix,
+        durationSec: (r.duration_sec as number | null) ?? null,
+        gameSize: (r.game_size as string | null) ?? null,
+        nearest: lobbyNearMisses(game, near),
+      };
+    });
+    unmatched.sort((a, b) => b.startUnix - a.startUnix);
+    return { from, to, games: all.length, unmatched };
   }
 
   /** jobInsert records fresh work as a pending ingest job. A "resim" carries

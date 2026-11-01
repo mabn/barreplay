@@ -2540,7 +2540,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           composite key (lobby_id, started_unix); name/map/roster are all
                           per-game, so renames between games record correctly). Matched
                           observations prune after 48h; unmatched ones are kept forever as
-                          the record of why a game has no name. SERVED: the DO's list JOINS
+                          the record of why a game has no name. GET /api/admin/lobbies/misses?hours=N
+                          (ReplayIndex.lobbyMisses, teiserver.ts lobbyNearMisses) reads that record: every
+                          game that ended in the window with no lobby, its nearest observations and which
+                          gate (map, time, roster overlap) each failed. Measured 2026-11-01: ~3.5% unmatched. SERVED: the DO's list JOINS
                           lobby_name per read (a scalar subselect on games' primary key;
                           games.map_file rides the same join into `mapFile` — the archive
                           name behind the list's 18px map THUMBNAILS, fetched lazily from
