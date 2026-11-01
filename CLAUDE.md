@@ -2505,7 +2505,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           lavabalance/src/teiserver.ts, which drives these same pages.
                           When the finished game later reaches the rts-api mirror,
                           ReplayIndex.lobbiesMatch pairs them: no shared id exists, so the
-                          match is same map (normalized) + started within [-60s,+300s] of the
+                          match is same map (normalized) + started within [-600s,+300s] of the
                           game's start + >=50% roster overlap (lowercase names; a null-roster
                           observation passes on map+time but scores below any real roster).
                           It is ARRIVAL-DRIVEN, from the games side: each run considers the

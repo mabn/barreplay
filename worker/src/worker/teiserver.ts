@@ -42,9 +42,15 @@ const SHOW_CONCURRENCY = 2;
  * between teiserver and the API. */
 export const LOBBY_MATCH_WINDOW_SEC = 300;
 /** How much EARLIER than the game's start an observation may be and still
- * match. It should never meaningfully precede the game it describes; one
- * minute covers the two clocks disagreeing. */
-export const LOBBY_MATCH_EARLY_SLACK_SEC = 60;
+ * match. The observation's clock starts when teiserver marks the lobby in
+ * progress, and the game's recorded start can come minutes later: a long
+ * load, or a game relaunched after a player dropped (the relaunch keeps the
+ * lobby in progress and swaps one name). Measured 2026-11-01 over 1479 games:
+ * 14 of the ~40 unmatched had their lobby 92-488 s early with 14-16 of 16
+ * names shared; ten minutes catches them, and the roster gate still keeps a
+ * lobby's previous game out (it would need half the same players AND a game
+ * shorter than this, and then the better-timed match wins the tie). */
+export const LOBBY_MATCH_EARLY_SLACK_SEC = 600;
 /** Minimum roster agreement: |intersection| / min(|lobby|, |game|). Half the
  * smaller roster still present tolerates the join/leave churn around a game
  * start without letting two different games on one map shake hands. */
@@ -466,7 +472,7 @@ function normMap(s: string): string {
  * [-LOBBY_MATCH_EARLY_SLACK_SEC, +LOBBY_MATCH_WINDOW_SEC] of the game's start
  * — then the roster score: |intersection| / min(|lobby|, |game|) of the
  * lowercased names, at least LOBBY_MATCH_MIN_OVERLAP. An observation whose
- * show-page fetch failed (players null) passes on map + time alone but scores
+ * show-page fetch failed (players null, or an empty list) passes on map + time alone but scores
  * below every real roster match, so it only wins what nothing better claims.
  *
  * Assignment is greedy best-first — score, then smaller |Δt|, then lobby id —
@@ -490,10 +496,12 @@ export function pickLobbyMatches(lobbies: MatchLobby[], games: MatchGame[]): Lob
       const dt = lobby.startedUnix - game.startUnix;
       if (dt < -LOBBY_MATCH_EARLY_SLACK_SEC || dt > LOBBY_MATCH_WINDOW_SEC) continue;
       let score = 0;
-      if (lobby.players !== null) {
+      // An EMPTY roster is as unknown as a null one (the show page parsed to
+      // no players table): it passes on map + time, scoring 0.
+      if (lobby.players !== null && lobby.players.length > 0) {
         const gameNames = new Set(game.players.map((n) => n.toLowerCase()));
         const lobbyNames = new Set(lobby.players.map((n) => n.toLowerCase()));
-        if (gameNames.size === 0 || lobbyNames.size === 0) continue;
+        if (gameNames.size === 0) continue;
         let common = 0;
         for (const n of lobbyNames) if (gameNames.has(n)) common++;
         score = common / Math.min(lobbyNames.size, gameNames.size);
@@ -555,7 +563,7 @@ export function lobbyNearMisses(
     const mapOk = l.map !== null && game.map !== null && normMap(l.map) === normMap(game.map);
     const dtSec = l.startedUnix - (game.startUnix ?? 0);
     const timeOk = game.startUnix !== null && dtSec >= -LOBBY_MATCH_EARLY_SLACK_SEC && dtSec <= LOBBY_MATCH_WINDOW_SEC;
-    const lobbyNames = l.players === null ? null : new Set(l.players.map((n) => n.toLowerCase()));
+    const lobbyNames = l.players === null || l.players.length === 0 ? null : new Set(l.players.map((n) => n.toLowerCase()));
     let common = 0;
     if (lobbyNames) for (const n of lobbyNames) if (gameNames.has(n)) common++;
     const overlap =

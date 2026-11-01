@@ -9,6 +9,7 @@ import { test } from "node:test";
 
 import {
   LOBBIES_PATH,
+  LOBBY_MATCH_EARLY_SLACK_SEC,
   LOBBY_MATCH_WINDOW_SEC,
   TeiserverSession,
   extractCsrfToken,
@@ -387,8 +388,11 @@ test("pickLobbyMatches: map and time gates", () => {
   assert.equal(pickLobbyMatches([lob()], [game({ startUnix: null })]).length, 0);
   // Observation began too long after the game's start.
   assert.equal(pickLobbyMatches([lob({ startedUnix: 990 + LOBBY_MATCH_WINDOW_SEC + 1 })], [game()]).length, 0);
-  // ...or meaningfully before it.
-  assert.equal(pickLobbyMatches([lob({ startedUnix: 990 - 61 })], [game()]).length, 0);
+  // ...or too long before it.
+  assert.equal(pickLobbyMatches([lob({ startedUnix: 990 - LOBBY_MATCH_EARLY_SLACK_SEC - 1 })], [game()]).length, 0);
+  // Minutes early is a long load or a relaunched game (measured: 92-488 s
+  // with 14-16 of 16 names shared) and still matches.
+  assert.equal(pickLobbyMatches([lob({ startedUnix: 990 - 488 })], [game()]).length, 1);
   // Map compare is case- and whitespace-insensitive.
   assert.equal(pickLobbyMatches([lob({ map: "supreme  isthmus V2.1" })], [game()]).length, 1);
 });
@@ -401,9 +405,14 @@ test("pickLobbyMatches: roster overlap threshold, case-insensitive", () => {
     pickLobbyMatches([lob({ players: ["Alpha", "X", "Y", "Z"] })], [game()]).length,
     0,
   );
-  // An empty roster on either side cannot vouch for anything.
-  assert.equal(pickLobbyMatches([lob({ players: [] })], [game()]).length, 0);
+  // A game with no roster cannot vouch for anything.
   assert.equal(pickLobbyMatches([lob()], [game({ players: [] })]).length, 0);
+  // An observation with an EMPTY roster is as unknown as a null one: it
+  // passes on map + time and loses to a real roster.
+  assert.equal(pickLobbyMatches([lob({ players: [] })], [game()]).length, 1);
+  assert.deepEqual(pickLobbyMatches([lob({ lobbyId: 7, players: [] }), lob({ lobbyId: 2 })], [game()]), [
+    { lobbyId: 2, startedUnix: 1000, gameId: "g1" },
+  ]);
 });
 
 test("pickLobbyMatches: a null roster falls back to map+time and loses to a real one", () => {
@@ -446,7 +455,7 @@ test("lobbyNearMisses reports which gate each nearby observation failed", () => 
   });
   const out = lobbyNearMisses(game, [
     obs({ lobbyId: 1, map: "The Rock Jungle 2.1.1" }), // wrong map, same players
-    obs({ lobbyId: 2, startedUnix: 9_800 }), // 200 s early
+    obs({ lobbyId: 2, startedUnix: 10_000 - LOBBY_MATCH_EARLY_SLACK_SEC - 100 }), // too early
     obs({ lobbyId: 3, players: ["a", "x", "y", "z"] }), // 1 of 4 shared
     obs({ lobbyId: 4, map: "Elsewhere", players: ["q"] }), // unrelated: left out
   ]);
@@ -455,7 +464,7 @@ test("lobbyNearMisses reports which gate each nearby observation failed", () => 
     [
       [1, false, true, true, 4, 30],
       [3, true, true, false, 1, 30],
-      [2, true, false, true, 4, -200],
+      [2, true, false, true, 4, -LOBBY_MATCH_EARLY_SLACK_SEC - 100],
     ],
   );
   assert.equal(out[1].overlap, 0.25);
