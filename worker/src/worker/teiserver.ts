@@ -442,6 +442,11 @@ export interface MatchLobby {
   /** Non-spectator names; null when the show-page fetch failed at capture
    * time (the observation is still worth matching on map + time alone). */
   players: string[] | null;
+  /** The lobby's last state while the game ran (LobbyEndState), when it
+   * changed after the observation: a map switched after the lobby went in
+   * progress, or a roster that lost a player. Either side may match. */
+  endMap?: string | null;
+  endPlayers?: string[] | null;
 }
 
 /** A mirrored game still without a lobby name, as the matcher sees it. */
@@ -489,22 +494,22 @@ export function pickLobbyMatches(lobbies: MatchLobby[], games: MatchGame[]): Lob
   }
   const candidates: Candidate[] = [];
   for (const lobby of lobbies) {
-    if (lobby.map === null) continue;
+    const maps = lobbyMaps(lobby);
+    if (maps.length === 0) continue;
+    const rosters = lobbyRosters(lobby);
     for (const game of games) {
       if (game.startUnix === null || game.map === null) continue;
-      if (normMap(lobby.map) !== normMap(game.map)) continue;
+      if (!maps.includes(normMap(game.map))) continue;
       const dt = lobby.startedUnix - game.startUnix;
       if (dt < -LOBBY_MATCH_EARLY_SLACK_SEC || dt > LOBBY_MATCH_WINDOW_SEC) continue;
       let score = 0;
-      // An EMPTY roster is as unknown as a null one (the show page parsed to
-      // no players table): it passes on map + time, scoring 0.
-      if (lobby.players !== null && lobby.players.length > 0) {
+      // A lobby with no known roster (null, or EMPTY — the show page parsed
+      // to no players table) passes on map + time, scoring 0. With rosters,
+      // the better of the start and end ones counts.
+      if (rosters.length > 0) {
         const gameNames = new Set(game.players.map((n) => n.toLowerCase()));
-        const lobbyNames = new Set(lobby.players.map((n) => n.toLowerCase()));
         if (gameNames.size === 0) continue;
-        let common = 0;
-        for (const n of lobbyNames) if (gameNames.has(n)) common++;
-        score = common / Math.min(lobbyNames.size, gameNames.size);
+        score = Math.max(...rosters.map((r) => rosterOverlap(r, gameNames)));
         if (score < LOBBY_MATCH_MIN_OVERLAP) continue;
       }
       candidates.push({ lobby, game, score, dt: Math.abs(dt) });
@@ -523,6 +528,29 @@ export function pickLobbyMatches(lobbies: MatchLobby[], games: MatchGame[]): Lob
     out.push({ lobbyId: c.lobby.lobbyId, startedUnix: c.lobby.startedUnix, gameId: c.game.id });
   }
   return out;
+}
+
+/** The normalized maps a lobby was seen on: at the start, and at the end
+ * when it differed. */
+function lobbyMaps(l: MatchLobby): string[] {
+  const out: string[] = [];
+  for (const m of [l.map, l.endMap ?? null]) if (m !== null && m !== "" && !out.includes(normMap(m))) out.push(normMap(m));
+  return out;
+}
+
+/** The known rosters (lowercased, non-empty) of a lobby: start, then end. */
+function lobbyRosters(l: MatchLobby): Set<string>[] {
+  const out: Set<string>[] = [];
+  for (const r of [l.players, l.endPlayers ?? null]) {
+    if (r !== null && r.length > 0) out.push(new Set(r.map((n) => n.toLowerCase())));
+  }
+  return out;
+}
+
+function rosterOverlap(lobbyNames: Set<string>, gameNames: Set<string>): number {
+  let common = 0;
+  for (const n of lobbyNames) if (gameNames.has(n)) common++;
+  return common / Math.min(lobbyNames.size, gameNames.size);
 }
 
 /** One lobby observation set against one game that did NOT match, with the
@@ -560,12 +588,18 @@ export function lobbyNearMisses(
   const gameNames = new Set(game.players.map((n) => n.toLowerCase()));
   const out: LobbyNearMiss[] = [];
   for (const l of lobbies) {
-    const mapOk = l.map !== null && game.map !== null && normMap(l.map) === normMap(game.map);
+    const mapOk = game.map !== null && lobbyMaps(l).includes(normMap(game.map));
     const dtSec = l.startedUnix - (game.startUnix ?? 0);
     const timeOk = game.startUnix !== null && dtSec >= -LOBBY_MATCH_EARLY_SLACK_SEC && dtSec <= LOBBY_MATCH_WINDOW_SEC;
-    const lobbyNames = l.players === null || l.players.length === 0 ? null : new Set(l.players.map((n) => n.toLowerCase()));
+    // The roster that agrees best with the game, start or end.
+    const rosters = lobbyRosters(l);
+    let lobbyNames: Set<string> | null = null;
     let common = 0;
-    if (lobbyNames) for (const n of lobbyNames) if (gameNames.has(n)) common++;
+    for (const r of rosters) {
+      let c = 0;
+      for (const n of r) if (gameNames.has(n)) c++;
+      if (lobbyNames === null || c > common) [lobbyNames, common] = [r, c];
+    }
     const overlap =
       lobbyNames === null || lobbyNames.size === 0 || gameNames.size === 0
         ? null
@@ -608,6 +642,39 @@ export interface LobbyDetails {
   /** Per-player rows from the show page (party assignments live here); null
    * when that fetch failed — the index-page fields above are still good. */
   players: LobbyRosterPlayer[] | null;
+  /** The lobby's LAST state while the game ran, recorded whenever the index
+   * page's map or player count changed after the observation (a player
+   * leaving or dropping, a map switch, a relaunch). Absent when nothing
+   * changed — the observation above then describes the whole game. */
+  end?: LobbyEndState;
+}
+
+/** The lobby as last seen in progress, after a change (see LobbyDetails.end). */
+export interface LobbyEndState {
+  /** When this state was read (the tick that saw the change). */
+  atUnix: number;
+  /** The game's running clock on the index page at that tick. */
+  elapsedSec: number | null;
+  map: string | null;
+  playerCount: number;
+  memberCount: number;
+  spectatorCount: number;
+  /** The show page's players at that tick; null when that fetch failed. */
+  players: LobbyRosterPlayer[] | null;
+}
+
+/** What makes the sync re-read a running lobby: the index page's map and
+ * player count. Spectators churn all game, so their count is left out. */
+export function lobbySig(l: Pick<IndexLobby, "map" | "playerCount">): string {
+  return `${l.map}|${l.playerCount}`;
+}
+
+/** A running lobby whose state changed: write its end state. */
+export interface LobbyEndUpdate {
+  lobbyId: number;
+  startedUnix: number;
+  sig: string;
+  end: LobbyEndState;
 }
 
 /** A newly started lobby-game, ready to record. started_unix is stamped by
@@ -624,12 +691,18 @@ export interface LobbyObservation {
   elapsedSec: number | null;
   /** The full lobby detail at observation time (see LobbyDetails). */
   details: LobbyDetails;
+  /** lobbySig of the index row at observation, which later ticks compare
+   * against to notice a change worth recording. */
+  sig?: string;
 }
 
 /** An observation still open (its lobby was in progress last tick). */
 export interface OpenLobby {
   lobbyId: number;
   startedUnix: number;
+  /** lobbySig last recorded for it; null/absent = unknown (an observation
+   * from before the column), which counts as a change. */
+  seenSig?: string | null;
 }
 
 /** What one lobbiesMatch run did. */
@@ -646,6 +719,7 @@ export interface LobbyIndex {
   lobbiesOpen(): OpenLobby[] | Promise<OpenLobby[]>;
   lobbiesObserve(obs: LobbyObservation[]): void | Promise<void>;
   lobbiesEnd(lobbyIds: number[]): void | Promise<void>;
+  lobbiesUpdate(updates: LobbyEndUpdate[]): void | Promise<void>;
   lobbiesMatch(): LobbyMatchResult | Promise<LobbyMatchResult>;
 }
 
@@ -657,11 +731,14 @@ export interface LobbySyncResult {
   started: number;
   /** Open observations whose lobby finished or vanished. */
   ended: number;
+  /** Running lobbies whose map or player count changed: end state rewritten. */
+  changed: number;
   /** Observations paired to a mirrored game this tick. */
   matched: number;
-  /** Started lobbies whose show page could not be fetched. Their observation
-   * is still recorded (players null) — that first-minute roster never comes
-   * back, but name + map + time can still match on their own. */
+  /** Show pages that could not be fetched. A started lobby's observation is
+   * still recorded (players null) — that first-minute roster never comes
+   * back, but name + map + time can still match on their own; a changed
+   * lobby's end state is recorded with players null. */
   failed: number;
 }
 
@@ -696,6 +773,14 @@ export async function syncLobbies(
   const inProgressIds = new Set(inProgress.map((l) => l.id));
 
   const started = inProgress.filter((l) => !openIds.has(l.id));
+  // Lobbies still running whose map or player count moved since it was last
+  // recorded: one show-page read each, so the lobby's LAST state before the
+  // game ended is kept (who left or dropped, a map switch). A few a tick.
+  const openById = new Map(open.map((o) => [o.lobbyId, o]));
+  const changed = inProgress.flatMap((l) => {
+    const o = openById.get(l.id);
+    return o !== undefined && (o.seenSig ?? null) !== lobbySig(l) ? [{ lobby: l, open: o }] : [];
+  });
   const endedIds = open.map((o) => o.lobbyId).filter((id) => !inProgressIds.has(id));
 
   let failed = 0;
@@ -714,6 +799,7 @@ export async function syncLobbies(
       players: roster === null ? null : roster.map((p) => p.name),
       playerCount: roster !== null ? roster.length : lobby.playerCount,
       elapsedSec: lobby.elapsedSec,
+      sig: lobbySig(lobby),
       details: {
         locked: lobby.locked,
         passworded: lobby.passworded,
@@ -724,7 +810,33 @@ export async function syncLobbies(
     });
   });
 
+  const now = Math.floor(Date.now() / 1000);
+  const updates: LobbyEndUpdate[] = [];
+  await pool(changed, SHOW_CONCURRENCY, async ({ lobby, open: o }) => {
+    let roster: LobbyRosterPlayer[] | null = null;
+    try {
+      roster = parseLobbyShowRoster(await session.authedFetch(`${LOBBIES_PATH}/show/${lobby.id}`));
+    } catch {
+      failed++;
+    }
+    updates.push({
+      lobbyId: o.lobbyId,
+      startedUnix: o.startedUnix,
+      sig: lobbySig(lobby),
+      end: {
+        atUnix: now,
+        elapsedSec: lobby.elapsedSec,
+        map: lobby.map === "" ? null : lobby.map,
+        playerCount: lobby.playerCount,
+        memberCount: lobby.memberCount,
+        spectatorCount: lobby.spectatorCount,
+        players: roster,
+      },
+    });
+  });
+
   if (observations.length > 0) await index.lobbiesObserve(observations);
+  if (updates.length > 0) await index.lobbiesUpdate(updates);
   if (endedIds.length > 0) await index.lobbiesEnd(endedIds);
   const m = await index.lobbiesMatch();
 
@@ -732,6 +844,7 @@ export async function syncLobbies(
     active: inProgress.length,
     started: started.length,
     ended: endedIds.length,
+    changed: updates.length,
     matched: m.matched,
     failed,
   };
