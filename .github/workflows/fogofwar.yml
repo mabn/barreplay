@@ -117,6 +117,9 @@ jobs:
           name: FogOfWar
           path: out
 
+      # --latest: replay.fogofwar.dev/setup links to
+      # releases/latest/download/FogOfWar.exe, so every release must become
+      # "latest" (and keep that asset name) for the page to serve it.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -126,5 +129,5 @@ jobs:
           sha256sum FogOfWar.exe > FogOfWar.exe.sha256
           notes="Unsigned build: Windows shows a SmartScreen warning (More info, then Run anyway). Built by this run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           gh release create "fogofwar/v$VERSION" FogOfWar.exe FogOfWar.exe.sha256 \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
             --title "FogOfWar $VERSION" --notes "$notes"
