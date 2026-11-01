@@ -58,6 +58,7 @@ type App struct {
 	startedAt time.Time
 
 	autoNote  string        // what auto-replay is doing, for the page
+	siteMsg   *siteError    // the site's message on the last work poll (siteerror.go)
 	autoNext  time.Time     // auto-replay looks no sooner than this
 	autoFails int           // auto-picked runs failed in a row
 	autoPoke  chan struct{} // wakes the auto-replay loop
@@ -144,11 +145,14 @@ type State struct {
 	PatchedBuilds []PatchedInfo `json:"patchedBuilds"`
 	AutoReplay    bool          `json:"autoReplay"`
 	AutoNote      string        `json:"autoNote,omitempty"`
-	Site          string        `json:"site"`
-	HostRAM       int64         `json:"hostRam"`
-	Cores         int           `json:"cores"`
-	Version       string        `json:"version"`
-	InstallID     string        `json:"installId"`
+	// SiteMessage is what the site said when the work poll last asked
+	// ("please upgrade"), shown as a banner; nil once it answers normally.
+	SiteMessage *siteError `json:"siteMessage,omitempty"`
+	Site        string     `json:"site"`
+	HostRAM     int64      `json:"hostRam"`
+	Cores       int        `json:"cores"`
+	Version     string     `json:"version"`
+	InstallID   string     `json:"installId"`
 }
 
 // Settings is the part of the config the page may change.
@@ -459,6 +463,19 @@ func (a *App) OpenReplay(gameID string) error {
 		return errors.New("No replay for that game.")
 	}
 	wruntime.BrowserOpenURL(a.ctx, replayURL(id))
+	return nil
+}
+
+// OpenSiteMessage opens the link the site's message named. The page names
+// nothing: the URL is the one the site sent (http(s) only, siteRefusal).
+func (a *App) OpenSiteMessage() error {
+	a.mu.Lock()
+	m := a.siteMsg
+	a.mu.Unlock()
+	if m == nil || m.URL == "" {
+		return errors.New("The site named no link.")
+	}
+	wruntime.BrowserOpenURL(a.ctx, m.URL)
 	return nil
 }
 
@@ -791,6 +808,7 @@ func (a *App) snapshot() State {
 		PatchedBuilds: patched,
 		AutoReplay:    a.cfg.AutoReplay,
 		AutoNote:      a.autoNote,
+		SiteMessage:   a.siteMsg,
 		Site:          siteURL(),
 		HostRAM:       host,
 		Cores:         runtime.NumCPU(),

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,7 +58,7 @@ func fetchSiteGames(ctx context.Context, n int) ([]siteGame, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("games list: %s", resp.Status)
+		return nil, siteRefusal(resp, "games list")
 	}
 	var out struct {
 		Games []siteGame `json:"games"`
@@ -143,17 +144,32 @@ func (a *App) autoStep() {
 	if err == nil {
 		id = pickAutoGame(games, tried)
 	}
+	var se *siteError
+	a.mu.Lock()
+	newMsg := false
+	if errors.As(err, &se) {
+		newMsg = a.siteMsg == nil || *a.siteMsg != *se
+		a.siteMsg = se
+	} else if err == nil {
+		a.siteMsg = nil
+	}
+	a.mu.Unlock()
+	if newMsg {
+		a.logf("auto-replay: the site says (%d): %s", se.Status, se.Message)
+	}
 	if id == "" {
 		a.mu.Lock()
 		a.autoNext = time.Now().Add(autoRecheck)
-		if err != nil {
+		if se != nil {
+			a.autoNote = "Paused by replay.fogofwar.dev (see the message above); asking again at " + a.autoNext.Format("15:04")
+		} else if err != nil {
 			a.autoNote = "Couldn't reach the games list; trying again at " + a.autoNext.Format("15:04")
 		} else {
 			a.autoNote = fmt.Sprintf("All of the %d newest games are modded, have a replay or are being worked on; looking again at %s", autoListSize, a.autoNext.Format("15:04"))
 		}
 		a.dirty = true
 		a.mu.Unlock()
-		if err != nil {
+		if err != nil && se == nil {
 			a.logf("auto-replay: %v", err)
 		}
 		return
