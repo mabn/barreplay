@@ -42,6 +42,13 @@
 
 <main id="main">
 
+  <!-- The site's own message (siteerror.go), e.g. "please upgrade" -->
+  <div class="sitemsg" id="siteMsg" hidden>
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5l7 12.5H3z"/><path d="M10 8.5v3.5M10 14.2v.1"/></svg>
+    <span id="siteMsgText"></span>
+    <button class="btn primary small" id="siteMsgBtn" hidden>Download</button>
+  </div>
+
   <!-- First launch -->
   <section class="view" id="viewSetup" hidden>
     <div class="setup-head">

@@ -42,6 +42,8 @@ func run() error {
 	// The engine and pr-downloader must not outlive the window, even when it
 	// is killed rather than closed.
 	killChildrenWithUs()
+	// Every request names the app and its version (siteerror.go).
+	installUserAgent()
 
 	// The log lives in the FogOfWar folder, which config.json names, so the
 	// config is read before anything can be logged; what it has to say waits.

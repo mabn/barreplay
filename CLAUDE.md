@@ -389,7 +389,7 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           RSS/swap, uploadJob, and host {RAM, cores, CPU model, Windows name + build, free RAM and
                           disk at start} — NO hostname (a volunteer's PC name is theirs). Best-effort: a site it
                           cannot reach never costs a run. INSTALL ID: a UUIDv7 made on first launch (config.json
-                          installId), on every app job and on the .brp upload (/api/upload?install=&app=). Its OWN Go module (go.mod with a replace onto the
+                          installId), on every app job and on the .brp upload (/api/upload?install=&app=). THE SITE CAN TALK BACK (siteerror.go): every request carries User-Agent "FogOfWar/<version> (<os>; ...)" (http.DefaultTransport is wrapped, so barapi and the engine downloads send it too; pr-downloader sends its own), and a non-200 whose JSON body has "error" (plus an optional http(s) "url") is a message for the user. On the work poll (auto-replay's GET /api/games) it shows as a banner and auto-replay waits, re-asking every minute; 426 marks it an upgrade request (the banner's Download opens "url"). The site sends none yet: that is how an outdated app would be told to upgrade. Its OWN Go module (go.mod with a replace onto the
                           repo root) because it needs third-party code the root keeps out: Wails
                           v2 (the window is a WebView2 page; frontend/dist is plain HTML/CSS/JS,
                           embedded, no Node, no build step — opened in a browser it runs a MOCK

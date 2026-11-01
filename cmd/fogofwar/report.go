@@ -464,8 +464,7 @@ func postJSON(ctx context.Context, path string, body, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return fmt.Errorf("%s: %s: %s", path, resp.Status, strings.TrimSpace(string(msg)))
+		return siteRefusal(resp, path)
 	}
 	if out == nil {
 		return nil

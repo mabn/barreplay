@@ -94,6 +94,17 @@ function setState(st) {
   else if (st.mode === 'running') renderRun(st);
   else renderReady(st, prevMode);
   renderSettings(st);
+  renderSiteMsg(st.siteMessage);
+}
+
+// The site's message from the last work poll ("please upgrade"); 426
+// (upgrade) offers the download when the site named a link.
+function renderSiteMsg(m) {
+  $('siteMsg').hidden = !m;
+  if (!m) return;
+  $('siteMsgText').textContent = m.message;
+  $('siteMsgBtn').hidden = !m.url;
+  $('siteMsgBtn').textContent = m.status === 426 ? 'Download' : 'Open';
 }
 
 let currentView = '';
@@ -216,6 +227,7 @@ async function setAuto(on) {
   try { setState(await api.SetAutoReplay(on)); } catch (e) { toastErr(e); }
 }
 
+function openSiteMsg() { api.OpenSiteMessage().catch(toastErr); }
 function openReplay(id) { api.OpenReplay(id).catch(toastErr); }
 
 // What became of a replay's upload, in words and as a chip.
@@ -703,6 +715,7 @@ function wire() {
   });
   $('btnOpenOut').onclick = () => api.OpenFolder('output').catch(toastErr);
   $('autoSwitch').onclick = () => setAuto($('autoSwitch').getAttribute('aria-checked') !== 'true');
+  $('siteMsgBtn').onclick = openSiteMsg;
   $('runAuto').onclick = () => setAuto(false);
 
   $('btnStop').onclick = async () => {
@@ -833,6 +846,7 @@ function makeMock(scene) {
     void bytes;
   }
   if (scene === 'running') setTimeout(() => run(9), 50);
+  if (scene === 'upgrade') { st.autoReplay = true; st.siteMessage = { status: 426, message: 'This version of FogOfWar is out of date. Please download 0.3.0 to keep replaying games.', url: 'https://replay.fogofwar.dev/setup' }; st.autoNote = 'Paused by replay.fogofwar.dev (see the message above); asking again at 14:32'; }
   if (scene === 'auto') { st.autoReplay = true; st.autoNote = 'All of the 10 newest games are modded, have a replay or are being worked on; looking again at 14:32'; }
   if (scene === 'done') { st.history = hist; finish(); }
   if (scene === 'fail') finish('This computer ran out of memory for this game. Close other programs, or try a smaller game.');
@@ -854,6 +868,7 @@ function makeMock(scene) {
       SaveSettings: (s) => { st.settings = s; return later(JSON.parse(JSON.stringify(st))); },
       ChooseFolder: () => later(''),
       OpenFolder: () => later(null),
+      OpenSiteMessage: () => { toast('Would open ' + st.siteMessage.url); return later(null); },
       OpenReplay: (id) => { toast('Would open replay.fogofwar.dev/replays/' + shortId(id)); return later(null); },
       SetAutoReplay: (on) => { st.autoReplay = on; st.autoNote = on ? 'All of the 10 newest games have a replay or are being worked on; looking again at 14:32' : ''; return later(JSON.parse(JSON.stringify(st))); },
       OpenLog: () => later(null),

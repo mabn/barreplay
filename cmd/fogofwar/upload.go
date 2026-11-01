@@ -100,7 +100,7 @@ func uploadJobState(ctx context.Context, job string) (state, msg string, err err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("upload job: %s", resp.Status)
+		return "", "", siteRefusal(resp, "upload job")
 	}
 	var out struct {
 		State string `json:"state"`
