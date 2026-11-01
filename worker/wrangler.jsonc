@@ -66,7 +66,7 @@
     // a 200 carrying the whole HTML document, labelled text/html, as the tab
     // icon.
     //
-    // The widget download (/setup's step 1, synced into public/ from
+    // The widget download (once /setup's step 1, still served; synced into public/ from
     // assets/lua by tools/sync-assets.mjs) is excluded for the _headers
     // reason: routed through the Worker its no-cache rule would be dead, and
     // it is the one file here whose bytes change under a stable URL.
@@ -80,6 +80,7 @@
       "!/favicon.ico",
       "!/favicon.svg",
       "!/replay_uploader.lua",
+      "!/fogofwar-app.webp",
       "!/embed/*"
     ]
   },

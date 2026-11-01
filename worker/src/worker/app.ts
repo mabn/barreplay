@@ -1216,7 +1216,7 @@ app.get("/queue", serveEntry);
 app.get("/games", serveEntry);
 app.get("/sqlstats", serveEntry);
 
-// The widget-install guide (public/setup.html), linked from the landing page's
+// The FogOfWar.exe download page (public/setup.html), linked from the landing page's
 // dropzone. The asset layer resolves the extensionless /setup to setup.html on
 // its own; this route exists only to serve it no-cache, like the SPA entry
 // above, so an edit to the guide reaches everyone on a plain reload.

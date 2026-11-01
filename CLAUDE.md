@@ -2598,9 +2598,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           is the LAVA SYNC (see the games-mirror entry): the cron submits
                           candidates over the LAVABALANCE service binding; the button stays
                           as the manual door and the way to see exactly what is sent.
-                          WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
-                          resolves on any origin serving the page) to /setup — public/setup.html, four numbered
-                          steps ending in a drag&drop upload. The page is deliberately
+                          FOGOFWAR DOWNLOAD PAGE: the dropzone banner links (relatively, so it
+                          resolves on any origin serving the page) to /setup — public/setup.html, which
+                          offers FogOfWar.exe through GitHub's releases/latest/download/FogOfWar.exe
+                          redirect (the workflow marks every release --latest, so a new release needs no
+                          edit) above a screenshot, public/fogofwar-app.webp (excluded from
+                          run_worker_first, a day's cache in _headers). It used to be a four-step guide to
+                          installing the Replay uploader widget; the widget is still synced and served at
+                          /replay_uploader.lua for links already out there, just no longer offered. The page is deliberately
                           SELF-CONTAINED (inline CSS, no /style.<rev>.css): only index.html goes
                           through the __ASSET_REV__ substitution, so a second page referencing the
                           fingerprinted subresources would have to be taught to every substituter.

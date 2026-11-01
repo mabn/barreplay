@@ -1200,7 +1200,6 @@ body.admin-mode #filters .admin { display: inline-block; }
 }
 #dropzone code { color: var(--muted); }
 #dropzone.drag { border-color: var(--accent); background: var(--accent-soft); color: var(--text-2); }
-#dropzone .browse { color: var(--accent); cursor: pointer; text-decoration: underline; }
 #dropzone a { color: var(--accent); }
 #dropstatus { margin-top: 8px; font-size: 12px; color: var(--text-2); }
 #dropstatus.error { color: #e2785b; }

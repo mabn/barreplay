@@ -175,13 +175,15 @@
          progress line stays put while the Queue section is watched. -->
     <div id="dropzone">
       <!-- A standing banner: it is the only place a visitor learns uploads
-           exist (removing it on 2026-10-10 left /setup linked from nowhere).
+           exist and where FogOfWar.exe comes from (removing it on 2026-10-10
+           left /setup linked from nowhere).
            The setup link is RELATIVE: it resolves to /setup on whichever
            origin serves the page (https://replay.fogofwar.dev/setup deployed,
            the loopback origin under `vite dev`). -->
-      <span id="droplabel">Drop a <code>.brepstream</code> or <code>.brp</code> capture here to publish it —
-        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream,.brp" hidden></label>.
-        Want to record your own games? <a href="/setup">Here is how.</a></span>
+      <!-- Dropping a .brp or .brepstream on the box still publishes it; the
+           banner just no longer advertises it. The picker stays for app.js. -->
+      <span id="droplabel">Want more games here? <a href="/setup">Learn how to add your games!</a></span>
+      <input type="file" id="dropfile" accept=".brepstream,.brp" hidden>
       <div id="dropstatus" style="display:none"></div>
     </div>
 

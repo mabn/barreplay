@@ -4,7 +4,7 @@
 // bearer-guarded daemon queue. The Durable Object's SQL lives out of reach of
 // node, so a faithful in-memory stand-in implements its RPC surface.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import app from "../src/worker/app";
@@ -1303,27 +1303,30 @@ test("/setup serves the guide page without rewriting the path", async () => {
 // URL, and tools/sync-assets.mjs
 // is what puts that file in public/ (it is gitignored — the source of truth is
 // assets/lua/replay_uploader.lua, so nothing here can be checked by presence).
-test("the setup guide is wired to the banner and to the widget", () => {
+test("the setup page is wired to the banner and offers the latest FogOfWar.exe", () => {
   const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
-  assert.match(at("../index.html"), /href="\/setup"/, "the dropzone banner links to the guide");
+  assert.match(at("../index.html"), /href="\/setup"/, "the dropzone banner links to the page");
 
-  const guide = at("../public/setup.html");
-  assert.match(guide, /href="\/replay_uploader\.lua" download/, "the guide offers the widget");
-  assert.match(guide, /LuaUI\\Widgets\\replay_uploader\.lua/, "the guide names the install path");
-
-  assert.match(at("../tools/sync-assets.mjs"), /"replay_uploader\.lua"/, "the sync copies the widget");
-  // The widget must reach the browser from the ASSET LAYER: routed through the
-  // Worker, public/_headers (its only cache-control) is silently ignored.
-  assert.match(at("../wrangler.jsonc"), /"!\/replay_uploader\.lua"/, "excluded from run_worker_first");
-  assert.match(at("../public/_headers"), /^\/replay_uploader\.lua$/m, "and has a cache rule");
-  assert.ok(
-    readFileSync(new URL("../../assets/lua/replay_uploader.lua", import.meta.url), "utf8").includes(
-      'or "Replay uploader",',
-    ),
-    "the widget's F11 name is the one the guide tells players to look for",
+  const page = at("../public/setup.html");
+  // Never a versioned URL: GitHub's latest-release redirect is what makes a
+  // new build reach the page with no edit, and the workflow must keep
+  // marking releases latest for it to.
+  assert.match(
+    page,
+    /href="https:\/\/github\.com\/mabn\/barreplay\/releases\/latest\/download\/FogOfWar\.exe"/,
+    "the page links the latest release's exe",
   );
-  assert.match(guide, /Replay uploader/);
+  assert.doesNotMatch(page, /fogofwar\/v\d/, "no release version is hardcoded");
+  assert.match(at("../../.github/workflows/fogofwar.yml"), /gh release create[^\n]*\n[^\n]*--latest/,
+    "every release is marked latest");
+  assert.doesNotMatch(page, /replay_uploader\.lua/, "the widget is no longer offered");
+
+  // The screenshot comes from the ASSET LAYER, where its _headers rule applies.
+  assert.match(page, /src="\/fogofwar-app\.webp"/, "the page shows the app");
+  assert.ok(existsSync(new URL("../public/fogofwar-app.webp", import.meta.url)), "the screenshot is committed");
+  assert.match(at("../wrangler.jsonc"), /"!\/fogofwar-app\.webp"/, "excluded from run_worker_first");
+  assert.match(at("../public/_headers"), /^\/fogofwar-app\.webp$/m, "and has a cache rule");
 });
 
 // A running job's live self-report: it rides the healthcheck, comes back out on

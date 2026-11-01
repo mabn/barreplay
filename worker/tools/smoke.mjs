@@ -174,7 +174,11 @@ try {
   // own bounce forever.
   const setup = await get(base, "/setup");
   check("GET /setup is a page, not a redirect", setup.status === 200, `status ${setup.status}`);
-  check("/setup is the guide", setup.body.includes('href="/replay_uploader.lua"'));
+  check("/setup offers the latest FogOfWar.exe",
+    setup.body.includes('href="https://github.com/mabn/barreplay/releases/latest/download/FogOfWar.exe"'));
+  const shot = await get(base, "/fogofwar-app.webp");
+  check("/setup's screenshot is served", shot.status === 200 && shot.headers.get("content-type") === "image/webp",
+    `status ${shot.status} ${shot.headers.get("content-type")}`);
   check("/setup revalidates", setup.headers.get("cache-control") === "no-cache",
     String(setup.headers.get("cache-control")));
 

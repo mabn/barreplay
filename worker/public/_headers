@@ -50,7 +50,8 @@
 /ranks/*
   Cache-Control: public, max-age=604800
 
-# The Replay uploader widget offered by /setup (synced into public/ from
+# The Replay uploader widget, no longer linked from /setup but still served
+# for links already out there (synced into public/ from
 # assets/lua by tools/sync-assets.mjs). Its URL is printed in a guide, so the
 # name cannot carry a content hash; revalidate instead, so a widget release
 # reaches players on their next visit rather than after a cache expiry. Like
@@ -58,6 +59,11 @@
 # never run.
 /replay_uploader.lua
   Cache-Control: no-cache
+
+# FogOfWar's screenshot on /setup. A fixed name (setup.html is not stamped),
+# so a day rather than immutable; excluded from run_worker_first like the rest.
+/fogofwar-app.webp
+  Cache-Control: public, max-age=86400
 
 # The favicon cannot be fingerprinted either: a browser will ask for it at a
 # fixed path of its own accord, with no markup to point elsewhere. A day is the

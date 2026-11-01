@@ -7464,7 +7464,7 @@ function renderQueue(errMsg) {
   }
 
   const text = errMsg || (rows.length ? '' :
-    'Nothing in the queue. Drop a .brepstream or .brp above, or paste a replay link to re-simulate one nobody uploaded, and it shows up here until a daemon has published it.');
+    'Nothing in the queue. Paste a replay link to re-simulate one nobody uploaded, and it shows up here until a daemon has published it.');
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -7885,7 +7885,7 @@ function renderHome(errMsg) {
       ? 'Nothing on this page any more — go back a page.'
       : filtered
         ? 'No replays match these filters.'
-        : 'No replays yet. Drop a .brepstream or .brp above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
+        : 'No replays yet.'));
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
