@@ -365,11 +365,13 @@ func ContentRev(path string) (string, error) {
 
 // UploadOptions configures UploadStatic.
 type UploadOptions struct {
-	// Target is "r2" (the real bucket) or "local" (the wrangler/vite dev
-	// simulator's preview bucket).
+	// Target is "r2" (the real bucket) or "local" (the `cf dev` simulator's
+	// bucket).
 	Target string
-	// WorkerDir is the Cloudflare worker project directory whose upload
-	// tooling (npx tsx tools/upload.ts) performs the R2 puts.
+	// WorkerDir is the Cloudflare worker project directory: its
+	// cloudflare.config.ts names the account and bucket, and for "local" with
+	// the dev server down its tooling (npx tsx tools/upload.ts --local) writes
+	// the simulator's state.
 	WorkerDir string
 	// IndexURL is the deployed worker's base URL for the catalog PUT;
 	// empty skips the registration with a warning.
@@ -409,11 +411,13 @@ type UploadOptions struct {
 //     R2_SECRET_ACCESS_KEY): NATIVE Go — concurrent SigV4 PUTs straight
 //     against the bucket's S3 endpoint (r2.go), no node tooling involved.
 //   - "local": concurrent PUTs through the dev worker's own bearer-guarded
-//     PUT /replays/* route (the vite/wrangler dev server binds the simulator
-//     bucket) — milliseconds, vs ~1s of node startup per object through
-//     `wrangler r2 object put`.
-//   - fallback (r2 without credentials, or the local dev server not
-//     reachable): shell the worker's uploader (npx tsx tools/upload.ts).
+//     PUT /replays/* route (the `cf dev` server binds the simulator bucket) —
+//     milliseconds, vs ~1s of node startup per object through the CLI.
+//   - fallback (the local dev server not reachable): shell the worker's
+//     uploader (npx tsx tools/upload.ts --local, i.e. `cf r2 objects put
+//     --local`), which writes the same local state `cf dev` serves.
+//
+// "r2" without credentials is ErrNoR2Credentials: there is no CLI fallback.
 //
 // With a Rev the key follows names.go: replays/<YYYY-MM>/<gameId>.brp when
 // the capture saw every team and the game has no main replay yet, else
@@ -426,9 +430,9 @@ type UploadOptions struct {
 // Durable Object SQLite table behind GET /api/replays) via
 // PUT <IndexURL>/api/replays/<id>.
 func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
-	var native *R2Client
-	if o.Target == "r2" {
-		native = r2ClientFromEnv(o.WorkerDir)
+	native, err := nativeClient(o)
+	if err != nil {
+		return err
 	}
 	meta, err := brpMeta(brpPath)
 	if err != nil {
@@ -581,11 +585,33 @@ func brpMeta(path string) (snapshot.Meta, error) {
 // through the same transports as UploadStatic. It registers nothing in the
 // catalog: it adds pieces beside a replay that is already published.
 func UploadPieces(ctx context.Context, o UploadOptions, bundleDir, label string) error {
-	var native *R2Client
-	if o.Target == "r2" {
-		native = r2ClientFromEnv(o.WorkerDir)
+	native, err := nativeClient(o)
+	if err != nil {
+		return err
 	}
 	return uploadDir(ctx, o, native, bundleDir, label)
+}
+
+// ErrNoR2Credentials refuses an "r2" publish without R2 API credentials. With
+// wrangler there was a CLI fallback (`wrangler r2 object put`); its successor,
+// `cf r2 objects put`, goes through the REST API, which cannot store the
+// Cache-Control every published object needs (objectHTTPMeta) — an object
+// without it is uncacheable at the cdn-bar edge, so every read of it would be
+// a billed GetObject. Publishing nothing beats publishing that.
+var ErrNoR2Credentials = errors.New("publishing to R2 needs R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY " +
+	"(Cloudflare dash -> R2 -> Manage R2 API Tokens): the cf CLI cannot store the " +
+	"Cache-Control the CDN needs, so there is no CLI fallback")
+
+// nativeClient is the native S3 client for an "r2" target, or nil for any
+// other target. An "r2" target without credentials is ErrNoR2Credentials.
+func nativeClient(o UploadOptions) (*R2Client, error) {
+	if o.Target != "r2" {
+		return nil, nil
+	}
+	if c := r2ClientFromEnv(o.WorkerDir); c != nil {
+		return c, nil
+	}
+	return nil, ErrNoR2Credentials
 }
 
 // uploadDir is UploadStatic's transport choice: native S3 when credentials
@@ -610,9 +636,9 @@ func uploadDir(ctx context.Context, o UploadOptions, native *R2Client, bundleDir
 		} else if ctx.Err() != nil {
 			return err
 		} else {
-			// Dev server down or an older worker without the route: the wrangler
-			// path writes the simulator's state directly, so fall through to it.
-			fmt.Fprintf(os.Stderr, "worker-route upload failed (%v); falling back to wrangler\n", err)
+			// Dev server down or an older worker without the route: `cf --local`
+			// writes the simulator's state directly, so fall through to it.
+			fmt.Fprintf(os.Stderr, "worker-route upload failed (%v); falling back to cf --local\n", err)
 		}
 	}
 	if !uploaded {
@@ -620,12 +646,10 @@ func uploadDir(ctx context.Context, o UploadOptions, native *R2Client, bundleDir
 		if err := checkWorkerDir(o.WorkerDir); err != nil {
 			return err
 		}
-		args := []string{"tsx", "tools/upload.ts", bundleDir, uploadID}
-		if o.Target == "local" {
-			// --preview: the local dev servers (vite dev and wrangler dev) bind the
-			// preview bucket, so that is where a "local" upload must land to show up.
-			args = append(args, "--local", "--preview")
+		if o.Target != "local" {
+			return ErrNoR2Credentials // nativeClient refuses this first; kept as a guard
 		}
+		args := []string{"tsx", "tools/upload.ts", bundleDir, uploadID, "--local"}
 		cmd := exec.CommandContext(ctx, "npx", args...)
 		cmd.Dir = o.WorkerDir
 		cmd.Stdout = os.Stderr
@@ -640,7 +664,7 @@ func uploadDir(ctx context.Context, o UploadOptions, native *R2Client, bundleDir
 // checkWorkerDir verifies workerDir holds the Cloudflare worker project the
 // upload paths shell into.
 func checkWorkerDir(workerDir string) error {
-	if _, err := os.Stat(filepath.Join(workerDir, "wrangler.jsonc")); err != nil {
+	if _, err := os.Stat(filepath.Join(workerDir, WorkerConfigFile)); err != nil {
 		return fmt.Errorf("uploading needs the Cloudflare worker project: %w (run from the repo root, or point -worker-dir at it)", err)
 	}
 	return nil

@@ -1206,7 +1206,7 @@ test("uploads of the same game from the same side get distinct keys", async () =
   assert.deepEqual(bucket.objects.get(again.streamKey), full);
 });
 
-// The favicons are served by the ASSET LAYER, not by these routes: wrangler.jsonc
+// The favicons are served by the ASSET LAYER, not by these routes: cloudflare.config.ts
 // excludes them from run_worker_first so public/_headers can set their
 // cache-control. That makes their presence on disk the thing worth guarding —
 // if either file goes missing, the request falls to the catch-all, where the
@@ -1325,7 +1325,7 @@ test("the setup page is wired to the banner and offers the latest FogOfWar.exe",
   // The screenshot comes from the ASSET LAYER, where its _headers rule applies.
   assert.match(page, /src="\/fogofwar-app\.webp"/, "the page shows the app");
   assert.ok(existsSync(new URL("../public/fogofwar-app.webp", import.meta.url)), "the screenshot is committed");
-  assert.match(at("../wrangler.jsonc"), /"!\/fogofwar-app\.webp"/, "excluded from run_worker_first");
+  assert.match(at("../cloudflare.config.ts"), /"!\/fogofwar-app\.webp"/, "excluded from run_worker_first");
   assert.match(at("../public/_headers"), /^\/fogofwar-app\.webp$/m, "and has a cache rule");
 });
 

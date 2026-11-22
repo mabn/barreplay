@@ -9,3 +9,4 @@ public/ranks/
 # The Replay uploader widget offered by /setup, synced from assets/lua by the
 # same script (source of truth is assets/lua/replay_uploader.lua).
 public/replay_uploader.lua
+.cloudflare/

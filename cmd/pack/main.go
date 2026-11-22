@@ -48,8 +48,8 @@
 // index.json is uploaded — the Worker lists the bucket live. Needs the worker/
 // project on disk with node_modules installed (-worker-dir if it is not
 // ./worker) and, for "r2", either R2 API credentials (R2_ACCESS_KEY_ID/
-// R2_SECRET_ACCESS_KEY, the fast S3 path) or wrangler auth (`npx wrangler
-// login` / CLOUDFLARE_API_TOKEN).
+// R2_SECRET_ACCESS_KEY; there is no CLI fallback, since the cf CLI cannot
+// store the objects' Cache-Control).
 package main
 
 import (
@@ -72,7 +72,7 @@ func main() {
 		idArg     = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brepstream input (default: the input's file name; only valid with a single input)")
 		noDemo    = flag.Bool("no-demo", false, "do not fetch the demo for .brepstream inputs; the .brp then only has the metadata the stream itself carries")
 		upload    = flag.String("upload", "r2", "after packing, publish the replay to "+packer.TargetHelp()+". Empty packs only, uploading nothing")
-		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
+		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory: its cloudflare.config.ts names the account and bucket (with -upload)")
 		stats     = flag.Bool("stats", true, "print size statistics for each resulting .brp (per-section sizes + the top unit defs by encoded bytes); a .brp input is analyzed directly without repacking")
 		rev       = flag.Bool("rev", true, "with -upload: publish under replays/<YYYY-MM>/ (the game's start month, UTC): as the game's main replay <gameId>.brp when the capture saw every team and the game has none yet, else as <gameId>-<sha256[:8] of the .brp> so nothing served is ever overwritten; -rev=false uses the old flat layout under the bare gameId")
 		view      = flag.String("view", "", "with -upload: whose point of view the capture is, overriding what it says itself: \"full\" (saw every team — e.g. a re-sim .brp packed before captures recorded that), \"ally\" or \"unknown\". Decides whether it may take the game's main, unsuffixed name")

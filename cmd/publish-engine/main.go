@@ -44,7 +44,7 @@
 // The re-simulations take the data dir's lock, so a bringest -resim daemon
 // using the same -data must be idle or stopped. Uploading needs
 // R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (./.env is read, as bringest does);
-// the account and bucket come from the worker's wrangler.jsonc.
+// the account and bucket come from the worker's cloudflare.config.ts.
 package main
 
 import (
@@ -97,7 +97,7 @@ func run() error {
 	dataDir := flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR data dir holding the stock engine (default $BAR_DATA_DIR); the gate runs in it")
 	version := flag.String("version", "", "engine version the binary was built from; default: the only version under -data with a patched build, or what the named binary's --version reports")
 	gate := flag.String("gate", "", "comma-separated gameIds to gate on, recorded on this engine version; default: the version's benchmark replay")
-	workerDir := flag.String("worker-dir", "./worker", "worker project dir, for the account id and bucket in wrangler.jsonc")
+	workerDir := flag.String("worker-dir", "./worker", "worker project dir, for the account id and bucket in cloudflare.config.ts")
 	patchesDir := flag.String("patches", "./patches", "the repo's patches dir; the series in it names the build's revision")
 	dry := flag.Bool("dry", false, "strip and gate, but upload nothing")
 	windows := flag.Bool("windows", false, "publish a WINDOWS build (the named spring-headless.exe), gated under Wine against the stock Linux engine")

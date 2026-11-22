@@ -47,10 +47,11 @@ const uploadConcurrency = 16
 // r2ClientFromEnv assembles a native client when the environment carries R2
 // API credentials (R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY). The account id
 // and bucket come from CLOUDFLARE_ACCOUNT_ID / R2_BUCKET, falling back to
-// workerDir's wrangler.jsonc (account_id / the first bucket_name); R2_ENDPOINT
-// overrides the derived endpoint outright (tests, other S3-compatible
-// stores). Returns nil — callers fall back to the worker's node tooling —
-// when credentials or the account id are missing.
+// workerDir's cloudflare.config.ts (its ACCOUNT_ID / REPLAY_BUCKET constants);
+// R2_ENDPOINT overrides the derived endpoint outright (tests, other
+// S3-compatible stores). Returns nil when credentials or the account id are
+// missing: a "local" publish then goes through the dev worker or `cf --local`,
+// and an "r2" publish is refused (see UploadStatic).
 func r2ClientFromEnv(workerDir string) *R2Client {
 	id, secret := os.Getenv("R2_ACCESS_KEY_ID"), os.Getenv("R2_SECRET_ACCESS_KEY")
 	if id == "" || secret == "" {
@@ -58,20 +59,20 @@ func r2ClientFromEnv(workerDir string) *R2Client {
 	}
 	bucket := os.Getenv("R2_BUCKET")
 	if bucket == "" {
-		bucket = wranglerConfigValue(workerDir, "bucket_name")
+		bucket = workerConfigConst(workerDir, "REPLAY_BUCKET")
 	}
 	endpoint := os.Getenv("R2_ENDPOINT")
 	if endpoint == "" {
 		account := os.Getenv("CLOUDFLARE_ACCOUNT_ID")
 		if account == "" {
-			account = wranglerConfigValue(workerDir, "account_id")
+			account = workerConfigConst(workerDir, "ACCOUNT_ID")
 		}
 		if account != "" {
 			endpoint = "https://" + account + ".r2.cloudflarestorage.com"
 		}
 	}
 	if endpoint == "" || bucket == "" {
-		fmt.Fprintln(os.Stderr, "warning: R2 credentials set but no account id/bucket (CLOUDFLARE_ACCOUNT_ID/R2_BUCKET or wrangler.jsonc); using the worker's upload tooling")
+		fmt.Fprintln(os.Stderr, "warning: R2 credentials set but no account id/bucket (CLOUDFLARE_ACCOUNT_ID/R2_BUCKET or cloudflare.config.ts)")
 		return nil
 	}
 	return &R2Client{
@@ -82,16 +83,20 @@ func r2ClientFromEnv(workerDir string) *R2Client {
 	}
 }
 
-// wranglerConfigValue extracts a `"key": "value"` string from the worker's
-// wrangler.jsonc — the same single-source-of-truth parse the TS tooling does
-// (jsonc has comments, so no JSON decoder). First occurrence wins, which for
-// bucket_name is the production bucket.
-func wranglerConfigValue(workerDir, key string) string {
-	b, err := os.ReadFile(filepath.Join(workerDir, "wrangler.jsonc"))
+// WorkerConfigFile is the worker project's Cloudflare configuration, read by
+// `cf` and the Cloudflare Vite plugin (it replaced wrangler.jsonc).
+const WorkerConfigFile = "cloudflare.config.ts"
+
+// workerConfigConst extracts `const NAME = "value";` from the worker's
+// cloudflare.config.ts — the account id and bucket are written there once, as
+// top-level constants, for the Worker, worker/tools/r2put.ts and this. It is
+// TypeScript, so a regexp over the line rather than an evaluation.
+func workerConfigConst(workerDir, name string) string {
+	b, err := os.ReadFile(filepath.Join(workerDir, WorkerConfigFile))
 	if err != nil {
 		return ""
 	}
-	m := regexp.MustCompile(`"` + key + `"\s*:\s*"([^"]+)"`).FindSubmatch(b)
+	m := regexp.MustCompile(`(?m)^const ` + regexp.QuoteMeta(name) + ` = "([^"]+)";`).FindSubmatch(b)
 	if m == nil {
 		return ""
 	}
@@ -147,7 +152,7 @@ func uploadBundle(ctx context.Context, bundleDir string, put func(ctx context.Co
 
 // workerPut PUTs one object through the worker's bearer-guarded
 // PUT /replays/<key> route — the transport for the "local" target, where the
-// dev server binds the simulator's bucket (wrangler spawns cost ~1s each;
+// dev server binds the simulator's bucket (a CLI spawn costs ~1s each;
 // this is plain fast HTTP). One retry on transient failures, like R2Client.
 //
 // ifAbsent sends If-None-Match: * so the write lands only on a free key; the

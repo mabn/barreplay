@@ -1,4 +1,5 @@
-// Vitest, running inside workerd via @cloudflare/vitest-pool-workers — the
+// Vitest, running inside workerd via @cloudflare/vitest-plugin (the successor
+// of @cloudflare/vitest-pool-workers that reads cloudflare.config.ts) — the
 // only way to drive the ReplayIndex Durable Object, whose `cloudflare:workers`
 // import and SQLite storage are both out of plain node's reach.
 //
@@ -6,12 +7,12 @@
 // Env, the pure modules) stays on `tsx --test`, which boots in milliseconds
 // and needs no runtime. `npm test` runs both — see package.json.
 //
-// The bindings come from wrangler.jsonc itself rather than a second copy here,
-// so a test worker cannot quietly diverge from the deployed one.
+// The bindings come from cloudflare.config.ts itself (`config: true`; vitest's
+// mode "test" selects the deployed "replay" Worker there) rather than a second
+// copy here, so a test worker cannot quietly diverge from the deployed one.
 //
-// There is no storage-isolation option to set: this version's whole option set
-// is main/remoteBindings/verbose/additionalExports/miniflare/wrangler — the
-// vitest-3 `isolatedStorage` and `singleWorker` are gone. Tests that need an
+// There is no storage-isolation option to set: the vitest-3
+// `isolatedStorage` and `singleWorker` are gone. Tests that need an
 // empty table therefore address their OWN Durable Object instance; see the
 // helper in tests/do/replayindex.test.ts.
 //
@@ -19,14 +20,14 @@
 // not a `test.poolOptions.workers` block — that was the vitest-3 API, and the
 // package ships a codemod for the difference (vitest-v3-to-v4). Anything found
 // online in the older form has to be translated.
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      wrangler: { configPath: "./wrangler.jsonc" },
-      // wrangler.jsonc binds LAVABALANCE to the deployed sibling worker, which
+      config: true,
+      // cloudflare.config.ts binds LAVABALANCE to the deployed sibling worker, which
       // does not exist inside the test runtime — without a stub, workerd
       // refuses to start at all. Nothing in tests/do calls it (the lava sync
       // is node-tested with an injected fetch); the stub only satisfies the

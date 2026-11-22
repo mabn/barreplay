@@ -99,12 +99,15 @@ internal/packer/          the capture-to-published-replay pipeline: Pack (stream
                           concurrent PUTs, one retry on 5xx, and the .brw-heads-last barrier —
                           moot for a publish today, which is ONE object, the .brp;
                           account/bucket from CLOUDFLARE_ACCOUNT_ID/R2_BUCKET or the worker
-                          dir's wrangler.jsonc, R2_ENDPOINT overrides). "local" PUTs each piece
+                          dir's cloudflare.config.ts ACCOUNT_ID/REPLAY_BUCKET consts, read as TEXT,
+                          R2_ENDPOINT overrides). "local" PUTs each piece
                           through the dev worker's bearer-guarded PUT /replays/* route (the dev
-                          server binds the simulator bucket; wrangler spawns cost ~1s EACH, the
-                          route is milliseconds). Only the fallbacks (r2 without credentials;
-                          local with the dev server down) shell the worker project's upload
-                          tooling (npx in -worker-dir, default ./worker).
+                          server binds the simulator bucket; a CLI spawn per object costs ~1s, the
+                          route is milliseconds). Only local with the dev server down shells the
+                          worker project's upload tooling (npx in -worker-dir, default ./worker:
+                          `cf r2 objects put --local`). r2 WITHOUT credentials is an error
+                          (ErrNoR2Credentials): its old fallback was `wrangler r2 object put`, and
+                          `cf r2 objects put` cannot set Cache-Control, which the CDN serves verbatim.
                           ALL inputs convert to .brp first; the viewer serves the .brp wire only. Revisioned by default: pieces land under
                           <gameId>-<rev>, append-only (identical bytes re-land on the same keys;
                           NOTHING in the bucket is ever overwritten or deleted — that keeps the
@@ -124,9 +127,9 @@ internal/packer/          the capture-to-published-replay pipeline: Pack (stream
                           $REPLAY_PUT_TOKEN = bearer token when the
                           worker guards writes). UploadOptions.View overrides the point of view
                           the row records ("full" from bringest -resim, whose capture has no
-                          recorder record of its own). "local" uploads pass --local --preview
-                          because both dev servers (vite dev / wrangler dev) bind the PREVIEW
-                          bucket.
+                          recorder record of its own). "local" fallback uploads pass --local,
+                          which writes the simulator state in worker/.cloudflare/state that
+                          `cf dev` reads (there is no preview bucket any more).
                           Pack wraps a demo-fetch failure in ErrDemoUnavailable so callers can
                           degrade to a no-demo pack (the ingest daemon does).
 cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's job queue
@@ -232,8 +235,7 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           WORKING DIR, so run it from the repo root. It logs the var COUNT
                           (never values) and warns when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY
                           are still absent, because otherwise that failure surfaces only as an
-                          unrelated-looking CLOUDFLARE_API_TOKEN error out of the wrangler
-                          fallback. Only bringest auto-loads; pack/barreplay still need a source.
+                          ErrNoR2Credentials at the first publish. Only bringest auto-loads; pack/barreplay still need a source.
                           -patched-engine (DEFAULT ON, -resim only) prefers a locally
                           built PATCHED engine for the replay's version:
                           `spring-headless-patched` sitting BESIDE the stock binary in
@@ -1449,11 +1451,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           by `go test ./internal/viz -run IconTypes -update`, and kept current
                           by that test): it rides the same prefix, so a viewer may hold a stale
                           copy for up to a week after BAR's icon set changes.
-                          HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
+                          HOSTNAMES: the worker is served from replay.fogofwar.dev (a Workers
                           Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
                           Certificate Manager; the zone must live in the worker's own account)
-                          AND from replay.bartools.workers.dev — workers_dev: true is EXPLICIT
-                          in wrangler.jsonc, because with routes configured wrangler's default
+                          AND from replay.bartools.workers.dev — workersDev: true is EXPLICIT
+                          in cloudflare.config.ts, because with a custom domain the default
                           flips to off and a deploy would disable the subdomain. Either origin
                           serves the same viewer unchanged (the bulk pieces go to the absolute
                           cdn-bar.fogofwar.dev data origin from both), which is why the
@@ -1463,7 +1465,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           NO STAGING/PREVIEW deployment exists, and Workers preview URLs
                           CANNOT work here: previews are never generated for Workers that
                           implement a Durable Object (hard platform limitation; this one
-                          implements ReplayIndex — no toggle or wrangler flag changes that,
+                          implements ReplayIndex — no toggle or CLI flag changes that,
                           which was learned the hard way). A separate staging Worker was
                           tried and scrapped: binding production's DO via script_name runs
                           production's DEPLOYED DO code, so any branch adding a DO method
@@ -1475,11 +1477,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           cannot import) + `npm run smoke` + `vite dev`,
                           then deploy.
                           PRODUCTION DATA, READ-ONLY (`npm run dev:prod`): the dev server
-                          with wrangler.proddev.jsonc (entry src/worker/proddev.ts) in place
-                          of wrangler.jsonc, its REPLAY_INDEX and BUCKET swapped for stand-ins
+                          with cloudflare.config.ts's proddev MODE (entry src/worker/proddev.ts) in
+                          place of the deployed Worker, its REPLAY_INDEX and BUCKET swapped for stand-ins
                           (src/worker/readonly.ts) that reach production through a REMOTE
                           service binding to the proxy Worker replay-prod-readonly
-                          (src/prodproxy, wrangler.prodproxy.jsonc, deployed by hand with
+                          (src/prodproxy, mode prodproxy, deployed by hand with
                           `npm run deploy:prodproxy`, no public route). The proxy binds the
                           production DO by script_name and answers only R2 get/head/list and
                           the ReplayIndex methods on READ_METHODS — everything else is a 403
@@ -1521,8 +1523,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           hostname) but are uncacheable at the edge until re-uploaded.
                           The replay CATALOG (per-game stats: start time, duration, map, team-size
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
-                          Object (src/worker/replayindex.ts, single instance, wrangler migration v1
-                          new_sqlite_classes): GET /api/replays lists it newest-game-first (null
+                          Object (src/worker/replayindex.ts, single instance, declared SQLite-backed
+                          in cloudflare.config.ts exports): GET /api/replays lists it newest-game-first (null
                           start times last), PAGED by ?limit=&offset= (every response capped at
                           CATALOG_LIMIT_MAX = 200 rows — absent/junk/oversized limits all serve
                           the cap, never the whole catalog; walk offset until a short page for
@@ -1572,7 +1574,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           full roster walk over the whole catalog on every landing-page load —
                           the single biggest rows-read line in /api/admin/sqlstats (~4000 rows/call).
                           PUT /api/replays/<id> upserts (called by pack -upload
-                          and the ingest daemon; optionally guarded by the REPLAY_PUT_TOKEN wrangler
+                          and the ingest daemon; optionally guarded by the REPLAY_PUT_TOKEN Worker
                           secret as a bearer token; GET /api/admin/sqlstats, /api/admin/queue and
                           /api/admin/jobs/<id>/samples and the maintenance POSTs /view,
                           /refresh-settings, /api/admin/resim and /api/admin/jobs/<id>/disabled are
@@ -1964,7 +1966,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           5/6, the gzipped M meta's gameId and recorder — and archived the same way with
                           a .brp extension, which is what tells bringest not to pack it) (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is
-                          the wrangler entry re-exporting the DO class). The worker never transcodes
+                          the Worker entry re-exporting the DO class). The worker never transcodes
                           (viewer serves the .brp wire only; the Go pipeline produces it): it scans
                           the preamble (src/worker/preamble.ts — gameId + recorder's ally team),
                           archives the raw bytes at streams/<YYYY-MM>/<gameId>/<ts>-<hash8>-a<ally>.brepstream
@@ -2355,7 +2357,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           columns alone) — `backfill-games.ts --refresh <id>,<id>` is the one
                           command that repairs a row mirrored from a half-written detail.
                           LAVA SYNC (src/worker/lavasync.ts + the LAVABALANCE service binding
-                          in wrangler.jsonc): freshly-finished candidate games are handed to
+                          in cloudflare.config.ts): freshly-finished candidate games are handed to
                           the sibling lavabalance worker (claudebar/lavabalance, same account
                           — the LOS OpenSkill ratings for the lava game mode), which ingests a
                           game as the VERBATIM /replays/<id> detail POSTed to its open
@@ -2468,14 +2470,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           tests/games.test.ts drives the whole sync against a fake API. The SQL
                           half — the table, gamesUnknown's dedupe, the ownership rule, the
                           maps-list maintenance — is tests/do/replayindex.test.ts, running INSIDE
-                          workerd under @cloudflare/vitest-pool-workers (vitest.config.ts,
-                          bindings read from wrangler.jsonc, so the test worker cannot diverge
+                          workerd under @cloudflare/vitest-plugin (vitest.config.ts,
+                          bindings read from cloudflare.config.ts, so the test worker cannot diverge
                           from the deployed one; `npm test` runs both suites). That version of
                           the pool has NO per-test storage isolation to configure — vitest-3's
                           isolatedStorage is not among its options — so each test addresses its
                           own DO instance rather than the production idFromName("index").
                           End-to-end was checked once by hand:
-                          curl /cdn-cgi/handler/scheduled against `vite dev` mirrored 24 real
+                          curl /cdn-cgi/local/scheduled against `npm run dev` mirrored 24 real
                           games, and the second call added none.
                           LOBBY NAMES (teiserver poll, src/worker/teiserver.ts + the same
                           cron): the tick's second step — BEFORE the lava sync, see its entry
@@ -2585,7 +2587,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           steady state is ONE authed GET per tick, no login (an expired
                           session shows as a redirect to /login: drop the cookie, log in once,
                           retry). Credentials are the TEISERVER_EMAIL/TEISERVER_PASSWORD
-                          wrangler secrets; without them the step is skipped entirely, its own
+                          Worker secrets (cf workers secrets update); without them the step is skipped entirely, its own
                           try/catch keeps a teiserver outage from costing the games sync, and
                           TEISERVER_BASE (dev only) points the poll at a mock. teiserver.ts is
                           pure like games.ts (injected fetch, a narrowed LobbyIndex port), so
@@ -2713,9 +2715,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (The third of the three read scans, the re-sim
                           daemon listing the whole catalog every ten seconds, is gone entirely:
                           the publish announces that work now — see PUT /api/replays above.)
-                          DEPLOYING: `npm run deploy` is the whole thing — test -> build (whose
-                          prebuild syncs the icons AND the widget into the gitignored public/
-                          copies) -> smoke -> wrangler deploy, spelled out in package.json rather
+                          DEPLOYING: `npm run deploy` is the whole thing — test -> cf build (whose
+                          sync-assets Vite plugin copies the icons AND the widget into the gitignored
+                          public/ copies) -> smoke -> cf deploy --prebuilt (the CF CLI; it replaced
+                          wrangler, and needs `npx cf auth login`; config in worker/cloudflare.config.ts,
+                          output in .cloudflare/output), spelled out in package.json rather
                           than hidden in npm hooks. The smoke step (tools/smoke.mjs) boots the
                           BUILT worker under `vite preview` — workerd plus the REAL asset layer —
                           and checks what it actually serves. It is not redundant with
@@ -3033,8 +3037,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           queued", and asks it nothing further.
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
-                          R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
-                          object put`; a publish is one .brp, which is its own listing
+                          R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), and nothing else for real R2
+                          (--local runs `cf r2 objects put --local`); a publish is one .brp, which is its own listing
                           marker; an older bundle's .brw heads upload after a completion
                           barrier so a half-uploaded replay never lists
 snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk format: the .brp binary).

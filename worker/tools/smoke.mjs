@@ -74,11 +74,12 @@ async function get(base, path) {
   return { status: r.status, headers: r.headers, body: await r.text() };
 }
 
-// This smokes what is on disk in dist/, so a missing build has to be an error
-// rather than a boot failure to squint at. `npm run deploy` always builds
-// first; a bare `npm run smoke` needs `npm run build` in front of it.
-if (!existsSync(new URL("../dist/client/index.html", here))) {
-  console.error("smoke: no dist/client — run `npm run build` first");
+// This smokes the Build Output on disk (.cloudflare/output, what `cf deploy
+// --prebuilt` uploads), so a missing build has to be an error rather than a
+// boot failure to squint at. `npm run deploy` always builds first; a bare
+// `npm run smoke` needs `npm run build` in front of it.
+if (!existsSync(new URL("../.cloudflare/output/v1/workers/default/assets/index.html", here))) {
+  console.error("smoke: no .cloudflare/output — run `npm run build` first");
   process.exit(1);
 }
 

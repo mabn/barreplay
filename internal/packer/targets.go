@@ -40,7 +40,7 @@ var uploadTargets = map[string]UploadTarget{
 	// of the account's workers.dev subdomain, and it is what the catalog rows
 	// are shared as.
 	"r2":    {Name: "r2", IndexURL: "https://replay.fogofwar.dev", DataURL: "https://cdn-bar.fogofwar.dev", What: "the real bucket"},
-	"local": {Name: "local", IndexURL: "http://127.0.0.1:5173", DataURL: "http://127.0.0.1:5173", What: "the vite/wrangler dev simulator"},
+	"local": {Name: "local", IndexURL: "http://127.0.0.1:5173", DataURL: "http://127.0.0.1:5173", What: "the cf dev simulator"},
 }
 
 // LookupTarget resolves an -upload value to its destination. The second result

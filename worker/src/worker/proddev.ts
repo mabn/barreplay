@@ -1,4 +1,4 @@
-// Local entry for `npm run dev:prod` (wrangler.proddev.jsonc): the ordinary
+// Local entry for `npm run dev:prod` (cloudflare.config.ts mode proddev): the ordinary
 // Hono app, reading PRODUCTION's catalog, games mirror, job queue and replay
 // files through the read-only proxy Worker (src/prodproxy, reached over the
 // remote service binding PROD). See src/worker/readonly.ts.

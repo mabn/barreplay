@@ -1,6 +1,6 @@
 // Worker entry point. The routes live in app.ts (kept free of workerd-only
 // imports so the node tests can exercise them); this file adds the Durable
-// Object class export wrangler's migration binding requires, and the cron
+// Object class exports cloudflare.config.ts declares, and the cron
 // handler, which is the one thing that cannot live in a Hono app.
 import app, { indexStub } from "./app";
 import { syncGames } from "./games";
@@ -54,7 +54,7 @@ async function lobbySync(env: Env): Promise<void> {
 export default {
   fetch: app.fetch,
 
-  // Every minute (wrangler.jsonc "triggers"): mirror the newest games BAR
+  // Every minute (cloudflare.config.ts "triggers"): mirror the newest games BAR
   // published into the `games` table. One page, no history walking — see
   // games.ts for why that is enough and what it costs.
   //

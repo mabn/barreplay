@@ -111,7 +111,7 @@ bearer guard; the uploader's own `GET /api/jobs/<id>` poll stays open.
 Three things count as an admin, tried in this order:
 
 1. `ADMIN_OPEN=true` — **local dev only**, in `.dev.vars` (gitignored), never in
-   `wrangler.jsonc`. `vite dev` then shows the admin UI with no login.
+   `cloudflare.config.ts`. `vite dev` then shows the admin UI with no login.
 2. The daemons' bearer token, when `REPLAY_PUT_TOKEN` is configured and matches —
    so an operator's `curl -H "authorization: Bearer $REPLAY_PUT_TOKEN"` can drive
    an admin route. (An absent token opens the daemon routes for a dev bucket; it
@@ -135,10 +135,10 @@ opens the door. The smoke test asserts this on the built worker.
 3. From the application's overview copy the **Application Audience (AUD) Tag**
    (64 hex chars). The **team domain** is under Zero Trust → Settings → Custom
    Pages (`<team>.cloudflareaccess.com`; the bare `<team>` is accepted too).
-4. Give the worker both. They are not secret, so they live in the `vars`
-   block of `wrangler.jsonc` (currently `bartools.cloudflareaccess.com` and
+4. Give the worker both. They are not secret, so they are plain-text
+   bindings in `cloudflare.config.ts` (the `ACCESS` block, currently `bartools.cloudflareaccess.com` and
    the AUD of the `replay.fogofwar.dev/admin/login` application); a
-   `wrangler secret put` of the same names would override them.
+   secret of the same name (`cf workers secrets update`) would override them.
 
 5. `npm run deploy`. Open `https://replay.fogofwar.dev/`: the header's muted
    **sign in** goes through `/admin/login` (Access) and back with the controls on
@@ -165,8 +165,8 @@ one, so the dev server **borrows the deployed login** in three hops (the
    and, because `next` is a **loopback** dev callback and nothing else, redirects
    there with the token attached;
 3. the dev server's `/admin/callback` verifies that token exactly as every admin
-   route would (same team, same AUD, same keys — they come from `wrangler.jsonc`,
-   which `vite dev` reads), stores it as its own `CF_Authorization` cookie, and
+   route would (same team, same AUD, same keys — they come from `cloudflare.config.ts`,
+   which `cf dev` reads), stores it as its own `CF_Authorization` cookie, and
    sends you to the page. The header then shows your email; **sign out**
    (`/admin/logout`) clears the cookie on that origin.
 
@@ -250,8 +250,8 @@ nothing cannot erase a build a previous one recorded. The row describes the
 current revision, so per-revision provenance lives in `uploads[]`: each entry
 is `{rid, ally, widget?}` and keeps the build that produced *that* upload.
 
-Writes can be guarded with a shared secret: `npx wrangler secret put REPLAY_PUT_TOKEN`
-makes the PUT require `Authorization: Bearer <token>`; `pack` sends the same-named env
+Writes can be guarded with a shared secret: `npx cf workers secrets update REPLAY_PUT_TOKEN --worker replay --type secret_text`
+(it asks for the value; `--text` passes it) makes the PUT require `Authorization: Bearer <token>`; `pack` sends the same-named env
 var. Without the secret (local dev) the endpoint is open.
 
 A replay whose files are in the bucket but was never registered does not appear in
@@ -280,7 +280,7 @@ in a growing list, not a set of replays. Changing any filter returns to the firs
 
 ## The games mirror (cron)
 
-A **cron trigger runs every minute** (`triggers.crons` in `wrangler.jsonc`, handler in
+A **cron trigger runs every minute** (`triggers` in `cloudflare.config.ts`, handler in
 `src/worker/index.ts`, logic in `src/worker/games.ts`) and records the newest games BAR
 published into a second DO table, `games`:
 
@@ -313,11 +313,11 @@ otherwise (`gamesInsert` skips an id `replays` holds). The maps list
 mirror is thousands of games nothing has published, and the filter bar must not offer
 options that match no listable replay.
 
-Trigger it by hand against `vite dev` — this really calls the BAR API and writes
+Trigger it by hand against `npm run dev` — this really calls the BAR API and writes
 to the local DO:
 
 ```sh
-curl http://127.0.0.1:5173/cdn-cgi/handler/scheduled
+curl http://127.0.0.1:5173/cdn-cgi/local/scheduled
 ```
 
 ### Lobby names (teiserver poll)
@@ -367,8 +367,8 @@ when the stored session is missing or expired (a redirect back to `/login`).
 Credentials are secrets, and without them the step is **skipped entirely**:
 
 ```sh
-npx wrangler secret put TEISERVER_EMAIL
-npx wrangler secret put TEISERVER_PASSWORD
+npx cf workers secrets update TEISERVER_EMAIL --worker replay --type secret_text
+npx cf workers secrets update TEISERVER_PASSWORD --worker replay --type secret_text
 ```
 
 For local dev put them in `.dev.vars`; `TEISERVER_BASE` there points the poll at a mock
@@ -409,17 +409,19 @@ The sync's logic (which URLs, which games earn a detail fetch, what a row holds)
 `tests/games.test.ts` under the node runner, against a fake API. The **DO half** — the
 `games` table, `gamesUnknown`'s dedupe, and the ownership rule over the derived tables —
 is `tests/do/replayindex.test.ts`, which runs **inside workerd** via
-`@cloudflare/vitest-pool-workers` (`vitest.config.ts`, bindings read from
-`wrangler.jsonc`) because `replayindex.ts` imports `cloudflare:workers` and its
+`@cloudflare/vitest-plugin` (`vitest.config.ts`, bindings read from
+`cloudflare.config.ts`) because `replayindex.ts` imports `cloudflare:workers` and its
 behaviour *is* its SQL. Note there is no per-test storage isolation to configure in this
-version of the pool, so each test addresses its own DO instance; see the helper at the
+version of the plugin, so each test addresses its own DO instance; see the helper at the
 top of that file.
 
 ## Layout
 
 ```
 worker/
-  wrangler.jsonc          Worker config (name, main, account_id, assets + R2 + DO bindings, cron trigger)
+  cloudflare.config.ts    Worker config for `cf` and the Vite plugin (name, entry, account, assets +
+                          R2 + DO bindings, cron trigger); --mode proddev / prodproxy pick the
+                          dev:prod Worker and the read-only proxy
   vite.config.ts          Vite + @cloudflare/vite-plugin
   index.html              viewer page (Vite entry)
   public/app.js           viewer logic (the ONE copy of the front-end)
@@ -429,7 +431,7 @@ worker/
   public/icons, ranks/    synced from internal/viz/bardata by tools/sync-assets.mjs (gitignored)
   public/replay_uploader.lua  the widget /setup hands out, synced from assets/lua by the same
                           script (gitignored — source of truth is assets/lua/replay_uploader.lua)
-  src/worker/index.ts     wrangler entry: re-exports the app + the Durable Object class
+  src/worker/index.ts     Worker entry: re-exports the app + the Durable Object class
   src/worker/app.ts       Hono app: serve R2 (replays/**), /api/replays,
                           /api/upload + jobs, SPA fallback (no workerd imports — node-testable)
   src/worker/replayindex.ts  the catalog + ingest-jobs Durable Object (SQLite)
@@ -442,16 +444,15 @@ worker/
   tools/sync-assets.mjs   copies the vendored icons + the uploader widget into public/ before dev/build
   tools/smoke.mjs         boots the BUILT worker (vite preview -> workerd + the real asset
                           layer) and checks what it serves; `npm run deploy` gates on it
-  tools/r2put.ts          shared upload backend: parallel S3 PUTs (with R2 creds) or parallel wrangler
+  tools/r2put.ts          shared upload backend: S3 PUTs (needs R2 creds) or, for --local, cf r2 objects put
   tools/upload.ts         upload a barreplay-static bundle (npm run upload)
 ```
 
 ## Producing and uploading replay data
 
 ```sh
-# 0. create the buckets once (prod + the preview one `wrangler dev` binds)
-npx wrangler r2 bucket create barreplay-replays
-npx wrangler r2 bucket create barreplay-replays-preview
+# 0. create the bucket once (the dev server simulates its own locally)
+npx cf r2 buckets create --name barreplay-replays
 
 # 1. from the repo root: build the packer and pack captures into a bucket mirror
 go build ./cmd/barreplay-static
@@ -464,9 +465,12 @@ npm run upload -- ../static              # every replay in the dir, to real R2
 npm run upload -- ../static <id> --local # into the local dev simulator (for `npm run dev`)
 ```
 
-The default is **real R2**. The bucket must exist first — `npx wrangler r2 bucket create
-barreplay-replays` — and you need either R2 API credentials (fast path, below) or a
-wrangler login (`npx wrangler login`) to the account in `wrangler.jsonc` (`account_id`).
+The default is **real R2**. The bucket must exist first — `npx cf r2 buckets create
+--name barreplay-replays` — and you need R2 API credentials (below). There is no
+CLI fallback for real R2 any more: `cf r2 objects put` cannot set an object's
+`Cache-Control`, and the CDN hostname serves exactly what is stored (see "Serving
+replay data straight from the bucket"), so an upload through it would land
+uncacheable. Without the credentials the upload stops with an error saying so.
 
 ### Upload speed: the S3 fast path
 
@@ -476,10 +480,10 @@ Go publishers (`pack -upload r2`, the ingest daemon) upload **natively** when
 objects in flight against `https://<account>.r2.cloudflarestorage.com` — no
 node process involved. `-upload local` PUTs each piece through the running
 dev worker's bearer-guarded `PUT /replays/*` route instead (the dev server
-binds the simulator's bucket; a whole replay lands in milliseconds, vs ~1s of
-node+wrangler startup **per object** through `wrangler r2 object put`). Only
-the fallbacks — r2 without credentials, or local with the dev server not
-running — shell into the TS tooling below.
+binds the simulator's bucket; a whole replay lands in milliseconds, vs a CLI
+startup **per object** through `cf r2 objects put --local`). Only the local
+fallback — the dev server not running — shells into the TS tooling below; r2
+without credentials is an error.
 
 The TS upload tools go through `tools/r2put.ts`, which picks a transport:
 
@@ -488,12 +492,9 @@ The TS upload tools go through `tools/r2put.ts`, which picks a transport:
   bucket) and objects are PUT straight against
   `https://<account_id>.r2.cloudflarestorage.com` with [`aws4fetch`](https://github.com/mhart/aws4fetch)
   signing, 16 in flight in one process — a whole replay in a couple of seconds. The
-  account id comes from `wrangler.jsonc` (`CLOUDFLARE_ACCOUNT_ID` overrides).
-- **wrangler (fallback, and always for `--local`).** One `wrangler r2 object put` per
-  object, 8 in flight (the local simulator stays serial — concurrent processes against
-  the same miniflare state flake with 500s). Each spawn pays ~2 s of node+wrangler
-  startup, which is why the old serial upload was slow; parallelism hides most of it,
-  credentials stay wrangler's.
+  account id comes from `cloudflare.config.ts` (`CLOUDFLARE_ACCOUNT_ID` overrides).
+- **`cf r2 objects put --local` (only `--local`).** One per object, serially, into
+  `.cloudflare/state` — the state `npm run dev` reads.
 
 A replay published today is a single `.brp`, which is its own listing marker. For an
 older bundle in the directory, each replay's `.brw` head is uploaded **after all its
@@ -507,22 +508,19 @@ sync ./static/replays -> bucket/replays` against R2's S3 API works too (same R2 
 token).
 
 For a fresh capture there is a one-step shortcut: `cmd/pack` converts the raw stream
-AND uploads in the same run (it shells into these same tools, so the auth options are
-identical — export the R2 credentials to get the fast path). It also registers the
-replay in the catalog (PUT /api/replays/<id>, see above) so it appears in the landing
-list with its stats — point it at the deployed worker with `-index-url` or
-`BARREPLAY_INDEX_URL` (for `-upload local` it defaults to the vite dev server):
+AND uploads in the same run (natively, with the same R2 credentials). It also
+registers the replay in the catalog (PUT /api/replays/<id>, see above) so it appears
+in the landing list with its stats; `-upload` names the bucket and the worker together
+(`r2` = the deployed site, `local` = the dev server):
 
 ```sh
 # from the repo root:
-BARREPLAY_INDEX_URL=https://<worker-host> \
-go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream      # convert + push to real R2
+go run ./cmd/pack ./caps/<gameId>.brepstream                 # convert + push to real R2
 go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...or seed the local dev simulator
 ```
 
-Note on local buckets: both dev servers (`npm run dev` and `npx wrangler dev`) bind the
-**preview** bucket, so seeding the simulator needs `--local --preview` with the upload
-tool (`pack -upload local` passes both automatically).
+Note on local buckets: the dev server simulates the bucket in `.cloudflare/state`
+(there is no separate preview bucket any more), and `--local` uploads write there.
 
 ## Drag & drop uploads (the ingest pipeline)
 
@@ -562,7 +560,7 @@ export REPLAY_PUT_TOKEN=...                # if the worker guards writes
 export R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...   # S3 fast path for the puts
 go run ./cmd/bringest              # poll every 10s, forever
 go run ./cmd/bringest -once        # drain the backlog and exit
-go run ./cmd/bringest -upload local -index-url http://127.0.0.1:5173  # against `npm run dev`
+go run ./cmd/bringest -upload local   # against `npm run dev`
 ```
 
 The raw archives under `streams/` accumulate on purpose (nothing in the bucket
@@ -635,7 +633,7 @@ game leaves in `…\data`. Three things make that page work:
   that produced it (see the catalog's `widgetSha`). A widget with uncommitted
   changes is published unstamped — and `npm run smoke`, and so `npm run
   deploy`, fails on that rather than shipping captures with no provenance.
-- `wrangler.jsonc` excludes `/replay_uploader.lua` from `run_worker_first`:
+- `cloudflare.config.ts` excludes `/replay_uploader.lua` from `run_worker_first`:
   through the Worker its `public/_headers` `no-cache` rule would be dead, and
   this is the one file whose bytes change under a stable URL.
 - `src/worker/app.ts` routes `GET /setup` to the `/setup.html` asset. Without
@@ -646,30 +644,34 @@ game leaves in `…\data`. Three things make that page work:
 
 ```sh
 npm install
-npm run dev         # vite dev — runs the Worker in workerd + HMR (needs a local R2, see below)
+npm run dev         # cf dev — runs the Worker in workerd + HMR (needs a local R2, see below)
 npm run dev:prod    # the same, reading PRODUCTION data read-only (see "against production data")
 npm run deploy:prodproxy  # deploy the read-only proxy dev:prod reads through (once)
-npm run build       # sync icons + widget, build client bundle + Worker into dist/
-npm run preview     # vite preview — the client bundle alone, no Worker behind it
+npm run build       # cf build: sync icons + widget, build client + Worker into .cloudflare/output
+npm run preview     # vite preview — the built Worker + assets in workerd (what smoke boots)
 npm run test        # both suites below
 npm run test:node   # node tests over the real Hono routes + pure modules (fake bindings, no workerd)
-npm run test:do     # vitest in workerd (@cloudflare/vitest-pool-workers): the Durable Object's SQL
+npm run test:do     # vitest in workerd (@cloudflare/vitest-plugin): the Durable Object's SQL
 npm run smoke       # boot the BUILT worker in workerd and check what it actually serves
-npm run typecheck   # tsc --noEmit
-npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
-npm run deploy      # test → sync+build → smoke → wrangler deploy (needs Cloudflare auth)
+npm run typecheck   # cf workers types && tsc --noEmit
+npm run types       # regenerate .cloudflare/types (the Env type) from cloudflare.config.ts
+npm run deploy      # test → build → smoke → cf deploy --prebuilt (needs `npx cf auth login`)
 ```
 
 `npm run deploy` is the whole deploy: nothing has to be run before or after it.
 The chain is spelled out in `package.json` rather than hidden in hooks —
 
 1. `npm test` — the route-level node tests **and** the Durable Object tests.
-2. `npm run build` — whose `prebuild` syncs the vendored icons **and the
-   uploader widget** into `public/` (both gitignored, so a build is the only
-   thing that puts them there) and stamps the asset hash + data origin.
+2. `cf build` — the Vite config's `sync-assets` plugin syncs the vendored
+   icons **and the uploader widget** into `public/` (both gitignored, so a build
+   is the only thing that puts them there), then it stamps the asset hash + data
+   origin and writes `.cloudflare/output`.
 3. `npm run smoke` (`tools/smoke.mjs`) — boots the built Worker under
    `vite preview` and asserts what it really serves.
-4. `wrangler deploy`.
+4. `cf deploy --prebuilt` — uploads exactly what step 3 checked.
+
+`cf deploy` needs a `cf auth login` on the machine (a Wrangler login does not
+carry over) or `CLOUDFLARE_API_TOKEN`.
 
 Step 3 exists because steps 1 and 2 cannot see the **asset layer**, which is
 where this project's deploy bugs live. The node tests use a fake `ASSETS`
@@ -687,11 +689,10 @@ failure modes, one per line of output — including that the served
 pre-existing `noUnusedLocals` errors in `tests/`, so wiring it in would block
 every deploy on unrelated cleanup.
 
-To ship without the guards (a hotfix, or when `wrangler` is the only step that
-matters), call the last step directly: `npm run build && npx wrangler deploy`.
+To ship without the guards (a hotfix), call the last step directly: `npx cf
+deploy` builds and uploads.
 
-For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
-`preview_bucket_name`):
+For local dev, seed the local R2 with a packed bundle:
 
 ```sh
 npm run upload -- ../static --local
@@ -722,8 +723,8 @@ binding in this account reaches it.
 Setup, once:
 
 ```sh
-npx wrangler login              # remote bindings use your Cloudflare login
-npm run deploy:prodproxy        # deploys wrangler.prodproxy.jsonc as replay-prod-readonly
+npx cf auth login               # remote bindings use your Cloudflare login
+npm run deploy:prodproxy        # cf deploy --mode prodproxy: deploys replay-prod-readonly
 ```
 
 Then `npm run dev:prod` and open http://127.0.0.1:5173/. What differs from
@@ -744,9 +745,9 @@ production:
 - `ADMIN_OPEN=true` in `.dev.vars` applies here too, so admin pages show
   production's queue and SQL stats.
 
-`npm run dev` is unchanged: `BARREPLAY_PROD=1` (set by `dev:prod`) is what
-makes `vite.config.ts` load `wrangler.proddev.jsonc` instead of
-`wrangler.jsonc`, and a build always uses `wrangler.jsonc`. Before the proxy is
+`npm run dev` is unchanged: `--mode proddev` (set by `dev:prod`) is what makes
+`cloudflare.config.ts` hand back the proddev Worker instead of the deployed one,
+and a build or deploy without a mode always uses the deployed one. Before the proxy is
 deployed, `dev:prod` stops at startup with "Service binding 'PROD' references
 Worker 'replay-prod-readonly' which was not found".
 
@@ -769,9 +770,9 @@ Durable Object); it is not an object a bucket could serve.
 
 `replay.fogofwar.dev` (Worker)      SPA, /api/*, uploads
 `replay.bartools.workers.dev`       the same Worker on its workers.dev hostname
-                                    (`workers_dev: true` in wrangler.jsonc —
-                                    explicit, because configured routes flip
-                                    wrangler's default to off)
+                                    (`workersDev: true` in cloudflare.config.ts —
+                                    explicit, because a custom domain flips
+                                    the default to off)
 `cdn-bar.fogofwar.dev` (R2 direct)  replays/** — cached at the edge
 
 ### One-time setup
@@ -779,7 +780,7 @@ Durable Object); it is not an object a bucket could serve.
 ```sh
 # 1. bind the bucket to its hostname (--zone-id from the fogofwar.dev zone's
 #    dashboard overview). The zone must be in the same account as the bucket.
-npx wrangler r2 bucket domain add barreplay-replays \
+npx cf r2 buckets domains custom create barreplay-replays \
   --domain cdn-bar.fogofwar.dev --zone-id <ZONE_ID> --min-tls 1.2
 
 # 2. allow the viewer's origins to read it cross-origin. Without this the
@@ -788,8 +789,8 @@ npx wrangler r2 bucket domain add barreplay-replays \
 #    (the custom domain AND replay.bartools.workers.dev); RE-RUN this whenever
 #    an origin is added to that file, or the new hostname loads a page whose
 #    every replay piece the browser refuses.
-npx wrangler r2 bucket cors set barreplay-replays --file r2-cors.json
-npx wrangler r2 bucket cors list barreplay-replays   # verify it took
+npx cf r2 buckets cors update barreplay-replays --body @r2-cors.json
+npx cf r2 buckets cors get barreplay-replays   # verify it took
 ```
 
 **3. Add a Cache Rule** for `cdn-bar.fogofwar.dev` in the dashboard

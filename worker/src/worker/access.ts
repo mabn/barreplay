@@ -26,7 +26,7 @@
 // application's Audience tag. FAIL-CLOSED: with either missing every admin
 // route answers 401, so a deploy that forgot them locks the admin out rather
 // than opening the door. Local dev opts out with ADMIN_OPEN=true in .dev.vars
-// — a deliberate setting, never a default, and never in wrangler.jsonc.
+// — a deliberate setting, never a default, and never in cloudflare.config.ts.
 //
 // The bearer token the daemons hold (REPLAY_PUT_TOKEN) is accepted too, so an
 // operator's script can drive an admin route with the credential it already

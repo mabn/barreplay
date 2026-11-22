@@ -59,7 +59,7 @@ func run() error {
 	flag.IntVar(&o.jobs, "j", 8, "uploads at once")
 	flag.BoolVar(&o.dry, "dry", false, "check the bucket and list what would be uploaded, upload nothing")
 	flag.BoolVar(&o.force, "force", false, "upload even when the bucket already has a file of the same size")
-	workerDir := flag.String("worker-dir", "./worker", "worker project dir, for the account id and bucket in wrangler.jsonc")
+	workerDir := flag.String("worker-dir", "./worker", "worker project dir, for the account id and bucket in cloudflare.config.ts")
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "usage: upload-maps [flags] <dir or file.png>...")
 		flag.PrintDefaults()

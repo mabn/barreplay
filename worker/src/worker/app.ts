@@ -21,7 +21,7 @@
 // The SPA, unit icons (/icons/*) and rank icons (/ranks/*) are fixed static
 // assets served by the ASSETS binding before the Worker even runs.
 
-// The Hono app with every route. Split from index.ts (the wrangler entry
+// The Hono app with every route. Split from index.ts (the Worker entry
 // point, which re-exports the ReplayIndex Durable Object class) so this file
 // has no `cloudflare:workers` import anywhere in its module graph — the
 // node-side tests (tsx --test) drive the real routes via app.request() with a
@@ -69,7 +69,7 @@ app.onError((err, c) => {
 const accessVerifier = new AccessVerifier();
 
 /** Who is asking, when it is an admin. Three ways in, tried in order:
- * ADMIN_OPEN=true (local dev only — .dev.vars, never wrangler.jsonc); the
+ * ADMIN_OPEN=true (local dev only — .dev.vars, never cloudflare.config.ts); the
  * daemons' bearer token, when one is CONFIGURED and matches (an operator's
  * script drives the admin routes with the credential it already holds); and
  * a valid Access token for this application. Unconfigured Access is CLOSED:
@@ -162,7 +162,7 @@ app.get("/api/admin/me", (c) => {
 // only to a loopback address, which is this machine; a link that names any
 // other host gets the plain on-site redirect.
 /** The deployed site, where the Access application lives; a dev server
- * borrows its login. The custom domain in wrangler.jsonc. */
+ * borrows its login. The custom domain in cloudflare.config.ts. */
 const PUBLIC_ORIGIN = "https://replay.fogofwar.dev";
 
 app.get("/admin/login", (c) => {
@@ -302,7 +302,7 @@ app.get("/api/replays/maps", async (c) => {
 });
 
 // Writes are guarded by a shared secret when the REPLAY_PUT_TOKEN secret is
-// configured on the Worker (`wrangler secret put REPLAY_PUT_TOKEN`); without
+// configured on the Worker (`cf workers secrets update REPLAY_PUT_TOKEN`); without
 // it (local dev) the endpoint is open.
 app.put("/api/replays/:id", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
@@ -1167,8 +1167,8 @@ app.on(["GET", "HEAD"], "/replays/*", (c) => {
 
 // Trusted piece writes: PUT the exact key the viewer will GET. This is how
 // `pack -upload local` and the ingest daemon's local mode seed the dev
-// simulator's bucket quickly (it is otherwise only writable via `wrangler r2
-// object put` — one ~1s node startup per object, serially); it works against
+// simulator's bucket quickly (it is otherwise only writable via `cf r2
+// objects put --local` — one CLI startup per object, serially); it works against
 // a deployed worker too when the bearer secret authorizes it. The publisher
 // is responsible for the order of an older multi-object bundle (its .brw
 // head last — the listing barrier); a .brp is one object.
@@ -1194,7 +1194,7 @@ app.put("/replays/*", async (c) => {
   // bucket is also read through its OWN hostname (cdn-bar.fogofwar.dev), where
   // R2 replies with exactly what is stored and no Worker gets to fix it up.
   // Derived from the key, not from the request headers, so every transport
-  // (S3, wrangler, this route) leaves the bucket in the same state.
+  // (S3, cf --local, this route) leaves the bucket in the same state.
   const meta = objectHTTPMeta(key);
   const stored = await c.env.BUCKET.put(key, body, {
     httpMetadata: { contentType: meta.contentType, cacheControl: meta.cacheControl },
@@ -1205,7 +1205,7 @@ app.put("/replays/*", async (c) => {
 });
 
 // The SPA entry is routed through the Worker (assets.run_worker_first in
-// wrangler.jsonc) so it is served no-cache: its subresource URLs carry a
+// cloudflare.config.ts) so it is served no-cache: its subresource URLs carry a
 // content hash (/app.js?v=…, stamped by the Vite asset-rev plugin), so a
 // revalidated index.html is all a UI deploy needs to reach every browser —
 // the hashed js/css URLs change and get refetched automatically.
