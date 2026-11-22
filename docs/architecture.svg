@@ -108,8 +108,9 @@
   <path class="ar" d="M312,226 H418" marker-start="url(#a)" marker-end="url(#a)"/>
   <text class="al" x="346" y="218">jobs</text>
 
-  <path class="ar" d="M312,320 H418" marker-end="url(#a)"/>
-  <text class="al" x="334" y="312">uploads</text>
+  <path class="ar" d="M312,320 H418" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="322" y="312">games to run,</text>
+  <text class="al" x="322" y="336">uploads</text>
 
   <path class="ar" d="M312,416 H418" marker-start="url(#a)" marker-end="url(#a)"/>
   <text class="al" x="322" y="408">uploads,</text>
