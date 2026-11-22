@@ -17,7 +17,7 @@
 // one has appeared (or an index has stopped being used), not that something
 // got a little slower.
 import { env, runInDurableObject } from "cloudflare:test";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { emptyFilter } from "../../src/worker/replayentry";
 
 import type { ReplayIndex } from "../../src/worker/replayindex";
@@ -180,6 +180,8 @@ test("the lava priority lookup costs a day of the mirror, not the mirror", async
     // game near the head costs a handful of rows).
     sql.exec(`INSERT INTO replay_settings (replay_id, flag)
       VALUES (printf('g%06d', ${LAVA_AT}), 'lava')`);
+    // ...and the games.lava mark gamesInsert writes for such a game.
+    sql.exec(`UPDATE games SET lava = 1 WHERE id = printf('g%06d', ${LAVA_AT})`);
     tally();
     const found = index.jobsOffer("resim", "job-lava-found");
     out.lavaScanFound = tally();
@@ -190,15 +192,12 @@ test("the lava priority lookup costs a day of the mirror, not the mirror", async
   });
 
   const report = JSON.stringify(costs, null, 2);
-  // A day of games, and NOT the 5000-row mirror behind them (measured: 2566
-  // for the empty scan — which includes the ranked window's own scan behind it
-  // — and 2106 to reach a lava game at the window's edge). What the bound
-  // asserts is that the walk STOPS at that edge; the number does not grow as
-  // the mirror does, which is the whole reason the window is measured in time
-  // rather than in rank. At LAVA_COOLDOWN_SEC that is ~750k rows a day in the
-  // idle case — see ROW BUDGET in CLAUDE.md.
-  expect(costs.lavaScanEmpty, report).toBeLessThan(4000);
-  expect(costs.lavaScanFound, report).toBeLessThan(4000);
+  // The lava-shaped games of the day (games_lava_end), not the day's whole
+  // mirror. Measured before games.lava: 2566 for the empty scan and 2106 to
+  // reach a lava game at the window's edge; now 405 — nearly all of it the
+  // ranked window's own scan behind the empty answer — and 5.
+  expect(costs.lavaScanEmpty, report).toBeLessThan(600);
+  expect(costs.lavaScanFound, report).toBeLessThan(50);
 });
 
 test("the polled and cron reads do not scan the tables they read from", async () => {
@@ -320,6 +319,11 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     for (let n = 1; n <= 100; n++) probe.push(`u${String(n).padStart(6, "0")}`); // new
     index.gamesUnknown(probe);
     out.gamesUnknown = tally();
+    // ...and the NEXT minute's tick, which hands over the same window plus a
+    // game or two: the ids already found in the mirror are remembered, so
+    // only the ids not seen there yet are looked up.
+    index.gamesUnknown([...probe, "u000101"]);
+    out.gamesUnknownNext = tally();
 
     // The lava sync's candidate query (trigger + hourly, never per-minute):
     // driven by replay_settings' (flag, replay_id) index, so its cost is the
@@ -333,6 +337,14 @@ test("the polled and cron reads do not scan the tables they read from", async ()
         settings: { lava: true, mods: true }, engineVersion: "e", gameVersion: "v",
       },
     ]);
+    // ...plus the history: thousands of lava games mirrored and offered long
+    // ago (the deployment had ~6k), which the old flag-driven query read on
+    // every call to find the few still pending.
+    const sql = (index as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+    sql.exec(`INSERT INTO replay_settings (replay_id, flag)
+      SELECT id, 'lava' FROM games WHERE id LIKE 'g%' AND rowid <= 3000`);
+    sql.exec(`UPDATE games SET lava = 1, lava_offered_unix = ${NOW - 86400}
+      WHERE id LIKE 'g%' AND rowid <= 3000`);
     tally();
     index.gamesLavaPending(30, NOW);
     out.gamesLavaPending = tally();
@@ -385,6 +397,7 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // gamesUnknown over a 200-id window: a seek per id (the 100 that exist), not
   // a scan of the 5000-row mirror — chunked so it also fits the bind cap.
   expect(costs.gamesUnknown, report).toBeLessThan(400);
+  expect(costs.gamesUnknownNext, report).toBeLessThan(150);
   // A seek into the settings index for the lava flag + a row per lava game —
   // never a scan of the 5000-row mirror or of the 5000 'ranked' entries.
   expect(costs.gamesLavaPending, report).toBeLessThan(50);
@@ -429,10 +442,22 @@ test("the recurring writes stay a handful of rows", async () => {
     ]);
     out.gamesInsert = written();
 
-    index.jobAnnounce("wg1", "resim", "wj1");
+    index.jobAnnounce("wj1", "wg1", "resim");
     out.jobAnnounce = written();
-    index.jobUpdate("wj1", "processing", null, null, { state: "simulating", percent: 10 });
-    out.healthcheck = written();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(NOW * 1000);
+    try {
+      index.jobUpdate("wj1", "processing", null, null, { state: "simulating", percent: 10 });
+      out.healthcheck = written();
+      // The NEXT beat, ten seconds on: the steady state, ~8640 a day per
+      // running job. Only updated_unix and progress move, so no index that
+      // names neither may be rewritten — jobs_state and jobs_kind used to end
+      // in updated_unix and cost four index writes a beat between them.
+      clock.mockReturnValue((NOW + 10) * 1000);
+      index.jobUpdate("wj1", "processing", null, null, { state: "simulating", percent: 11 });
+      out.healthcheckNext = written();
+    } finally {
+      clock.mockRestore();
+    }
     return out;
   });
 
@@ -441,8 +466,11 @@ test("the recurring writes stay a handful of rows", async () => {
   // settings rows. The roster is NOT indexed — at 16 names x 3 rows each it
   // was the whole budget.
   expect(costs.gamesInsert, report).toBeLessThan(20);
-  // A daemon heartbeat: the job row update + one sample row.
-  expect(costs.healthcheck, report).toBeLessThan(15);
+  // The FIRST beat moves the job into processing and puts the game into the
+  // catalog as a placeholder row (with its index entries): once per job.
+  expect(costs.healthcheck, report).toBeLessThan(30);
+  // The steady beat: the jobs row and one sample row (plus its key).
+  expect(costs.healthcheckNext, report).toBeLessThan(4);
 });
 
 /** The lava RETRY lookup (jobsOffer -> lavaRetryCandidate) walks FAILED jobs
@@ -520,4 +548,57 @@ test("expiring silent app jobs costs the app jobs in flight, not the queue", asy
   // A page of 25 plus the install's COUNT (2003 index entries): bounded by
   // the install's own jobs, not the 20k-row table.
   expect(costs.installPage, report).toBeLessThan(2200);
+});
+
+/** A filtered catalog read costs the rows its narrowest filter leaves, not the
+ * catalog. The case that bit: an outside scraper asking every few hours for
+ * `settings=ranked&from=<day>&to=<day+1>&minDuration=1200&limit=100`. The flag
+ * test was an `id IN (SELECT ... replay_settings WHERE flag = ?)`, which SQLite
+ * DROVE the query from — every ranked row in the catalog (nearly all of it),
+ * each with the four per-row lookups, then sorted — so a one-day question read
+ * ~225k rows on a ~45k-row catalog. The date range is the selective part here,
+ * and replays_start can answer it. */
+const CATALOG = 6000;
+const CATALOG_STEP = 600; // a replay every 10 minutes: 144 a day, ~42 days
+
+test("a filtered catalog page reads its date range, not every flagged row", async () => {
+  const costs = await measured((index, tally) => {
+    const sql = (index as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+    const seq = `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${CATALOG}) SELECT n FROM seq`;
+    const roster = `'[{"ally":0,"count":8,"players":[{"name":"p' || n || '","os":25}]}]'`;
+    sql.exec(`INSERT INTO replays (id, start_unix, duration_sec, map, game_size, size_bytes,
+                player_count, players, settings, updated_unix, placeholder)
+      SELECT printf('r%06d', n), ${NOW} - n*${CATALOG_STEP}, 600 + (n % 4) * 400, 'Map ' || (n % 40),
+             '8v8', 8000000, 16, ${roster}, '{"ranked":true}', ${NOW}, 0
+      FROM (${seq})`);
+    sql.exec(`INSERT INTO replay_settings (replay_id, flag) SELECT printf('r%06d', n), 'ranked' FROM (${seq})`);
+    // The mirror rows the per-row lookups join to.
+    sql.exec(`INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset,
+                player_count, players, settings, engine_version, game_version, synced_unix, end_unix)
+      SELECT printf('r%06d', n), ${NOW} - n*${CATALOG_STEP}, 900, 'Map', 'map', '8v8', 'team', 16,
+             ${roster}, '{"ranked":true}', 'e', 'v', ${NOW}, ${NOW}
+      FROM (${seq})`);
+    tally();
+    const out: Record<string, number> = {};
+
+    // The scraper's request, one day ten days back.
+    const day = { ...emptyFilter(), from: NOW - 11 * 86400, to: NOW - 10 * 86400,
+                  minDuration: 1200, settings: ["ranked"] };
+    const page = index.list(day, 101, 0);
+    out.scraperDay = tally();
+    expect(page.length, "the day holds 144 replays, half of them 20 minutes or longer").toBe(72);
+
+    // The flag alone, as the landing page's settings chip asks for it: the
+    // walk goes in start order and stops at the page edge.
+    index.list({ ...emptyFilter(), settings: ["ranked"] }, 51, 0);
+    out.settingsOnly = tally();
+    return out;
+  });
+
+  const report = JSON.stringify(costs, null, 2);
+  // A day is 144 rows; each costs its index entry, the row and its flag seek,
+  // and the 72 listed ones their four lookups. Before the fix: every one of
+  // the 6000 flagged rows, with the lookups (~30000).
+  expect(costs.scraperDay, report).toBeLessThan(1200);
+  expect(costs.settingsOnly, report).toBeLessThan(600);
 });

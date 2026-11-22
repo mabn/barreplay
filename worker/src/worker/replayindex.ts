@@ -161,6 +161,19 @@ const GAMES_ID_WALK_MIN = 4;
 
 const LAVA_WINDOW_SEC = 24 * 3600;
 const LAVA_COOLDOWN_SEC = 300;
+/** How many mirrored ids gamesUnknown remembers: a few times the ~300 games
+ * the sync's 2h window (GAMES_MAX_PAGES x GAMES_PAGE_LIMIT) can hold. */
+const KNOWN_GAMES_MAX = 2000;
+/** How far back the one-time games.lava backfill reaches (DERIVED_VERSION 4):
+ * twice the lava sync's horizon. */
+const LAVA_BACKFILL_SEC = 14 * 24 * 3600;
+/** isLavaShaped is what games.lava stores: the lava flag on an 8v8 roster —
+ * what lavabalance requires of every game it stores, and the re-sim's first
+ * priority. Same reading of a flag as indexSettings. */
+function isLavaShaped(gameSize: string | null, settings: Record<string, boolean | string> | null): boolean {
+  const v = settings?.[SETTINGS_LAVA_FLAG];
+  return gameSize === LAVA_GAME_SIZE && (v === true || (typeof v === "string" && v !== ""));
+}
 
 /** The lava RETRY lookup (lavaRetryCandidate): how far back a failed job
  * still counts, and how long the lookup rests on an empty answer.
@@ -305,15 +318,16 @@ function progressPercent(progressJSON: unknown): number | null {
  * current one). v1 backfilled rows that predate the derived data; v2 seeded
  * unique_values('maps') from the catalog's existing rows; v3 added the
  * jobs_count seed (and re-runs the v2 seed, which never deployed on its own —
- * both are idempotent recomputes). */
-const DERIVED_VERSION = 3;
+ * both are idempotent recomputes); v4 backfilled games.lava over the last two
+ * weeks. */
+const DERIVED_VERSION = 4;
 
 /** Version of the SCHEMA itself, stamped into the schema_version table by the
  * migration that produced it. schemaCurrent reads this one row to decide
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 12;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -342,7 +356,13 @@ const SCHEMA_DDL = `
         created_unix INTEGER NOT NULL,
         updated_unix INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state, updated_unix);
+      -- (state) alone, NOT (state, updated_unix): a running job's
+      -- updated_unix moves with every 10-second heartbeat, and an index ending
+      -- in it is rewritten on each one — with jobs_kind's twin, four of the six
+      -- rows a beat wrote, and the beats were most of the daily write budget.
+      -- Everything that seeks by state reads a small in-flight set whole, and
+      -- the one range over updated_unix (jobSamplePrune) walks jobs_settled.
+      CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 
       -- Every healthcheck a running job sent, kept as history. The jobs row's
       -- progress column holds only the newest reading and is cleared when the
@@ -479,7 +499,10 @@ const INDEX_DDL = `
       CREATE INDEX IF NOT EXISTS replays_map   ON replays (map);
       CREATE INDEX IF NOT EXISTS replays_count ON replays (player_count);
       CREATE INDEX IF NOT EXISTS replays_dur   ON replays (duration_sec);
-      CREATE INDEX IF NOT EXISTS jobs_kind     ON jobs (kind, state, updated_unix);
+      CREATE INDEX IF NOT EXISTS jobs_by_kind  ON jobs (kind, state);
+      -- Their predecessors ended in updated_unix (see jobs_by_state).
+      DROP INDEX IF EXISTS jobs_state;
+      DROP INDEX IF EXISTS jobs_kind;
       -- Every catalog read asks "is a job processing this game", once per row.
       CREATE INDEX IF NOT EXISTS jobs_game     ON jobs (game_id, state);
 
@@ -507,6 +530,13 @@ const INDEX_DDL = `
       CREATE INDEX IF NOT EXISTS games_map_end    ON games (map, end_unix DESC, id);
       CREATE INDEX IF NOT EXISTS games_count_end  ON games (player_count, end_unix DESC, id);
       CREATE INDEX IF NOT EXISTS games_durmin_end ON games ((duration_sec / 60), end_unix DESC, id);
+      -- The two lava lookups (see the games.lava column): PARTIAL, over the
+      -- lava-shaped games only — a few dozen a day out of ~2000.
+      -- lavaCandidate: the newest ended. gamesLavaPending: the not yet
+      -- offered, oldest started first; a game leaves it when marked offered.
+      CREATE INDEX IF NOT EXISTS games_lava_end ON games (end_unix DESC, id) WHERE lava = 1;
+      CREATE INDEX IF NOT EXISTS games_lava_pending ON games (start_unix, id)
+        WHERE lava = 1 AND lava_offered_unix IS NULL;
       DROP INDEX IF EXISTS games_backfill_end;
       DROP INDEX IF EXISTS games_backfill;
       DROP INDEX IF EXISTS games_start;
@@ -596,6 +626,15 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // NOT in gamesInsert's upsert list: a later re-sync of the game knows
   // nothing about lobbies and must not erase what the match wrote.
   ["games", "lobby_name TEXT"],
+  // 1 for a LAVA-SHAPED game (the lava flag on an 8v8 roster: the re-sim's
+  // first priority and the lava sync's candidates), NULL otherwise. Stored so
+  // the two lookups can walk a partial index over just those games: deriving
+  // it per query from replay_settings read every lava game ever mirrored
+  // (gamesLavaPending, ~6k rows a call) or a whole day of the mirror
+  // (lavaCandidate, ~2k rows every five minutes) to find a handful.
+  // Written by gamesInsert; rows mirrored before it are backfilled for the
+  // windows the lookups read (ensureDerived, DERIVED_VERSION 4).
+  ["games", "lava INTEGER"],
   ["games", "lobby_id INTEGER"],
   // The full lobby detail at observation time (teiserver.ts LobbyDetails
   // JSON: locked/passworded/counts from the index page, the per-player
@@ -691,6 +730,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * every write to the row, so like sampleCounts it is a cache of something
    * the table already knows and costs nothing to lose. */
   private mapsCache: { at: number; maps: string[] } | null = null;
+  /** Ids gamesUnknown has found in the mirror (or gamesInsert has written),
+   * newest last. A mirror row is never deleted, so a remembered id stays
+   * true; the games sync hands over the same ~2h window of ids every minute,
+   * and remembering them is what keeps that tick from re-reading ~200 rows to
+   * learn nothing. Bounded (KNOWN_GAMES_MAX) and lost on eviction, after which
+   * the next tick simply reads them once again. */
+  private knownGames = new Set<string>();
 
   /** What each method has cost in SQLite rows since this instance started —
    * the live counterpart of tests/do/rowcost.test.ts, served by
@@ -857,6 +903,18 @@ export class ReplayIndex extends DurableObject<Env> {
       this.rebuildMapsList();
       const jobs = this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM jobs`).toArray();
       this.metaPut(JOBS_COUNT_KEY, Number(jobs[0].n));
+      // v4: games.lava for rows mirrored before the column, over the windows
+      // the lava lookups read (lavaCandidate's day, the lava sync's week)
+      // with margin. Older games are never asked about, so leaving them NULL
+      // costs nothing and keeps this pass to a few hundred rows written.
+      this.ctx.storage.sql.exec(
+        `UPDATE games SET lava = 1
+          WHERE end_unix >= ? AND game_size = ? AND lava IS NULL
+            AND EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = games.id AND s.flag = ?)`,
+        Math.floor(Date.now() / 1000) - LAVA_BACKFILL_SEC,
+        LAVA_GAME_SIZE,
+        SETTINGS_LAVA_FLAG,
+      );
       this.ctx.storage.sql.exec(
         `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -1174,7 +1232,13 @@ export class ReplayIndex extends DurableObject<Env> {
       for (const flag of filter.settings) {
         // One IN per flag, so the row must carry ALL of them (a single
         // `flag IN (...)` would match any one of them).
-        where.push(`id IN (SELECT replay_id FROM replay_settings WHERE flag = ?)`);
+        // A correlated EXISTS, never `id IN (SELECT ...)`: the IN list is
+        // something SQLite can DRIVE the query from, and it did — every row
+        // carrying the flag (for "ranked", nearly the whole catalog) was read,
+        // looked up and sorted, so a one-day `settings=ranked&from=&to=` asked
+        // by an outside scraper cost ~225k rows. As a per-row check it costs
+        // one seek on each row the date range or the start order hands it.
+        where.push(`EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = replays.id AND s.flag = ?)`);
         args.push(flag);
       }
     }
@@ -1191,9 +1255,30 @@ export class ReplayIndex extends DurableObject<Env> {
       window = `LIMIT ? OFFSET ?`;
       args.push(limit, offset !== undefined && offset > 0 ? offset : 0);
     }
+    // The page is chosen FIRST (the MATERIALIZED CTE), and the per-row
+    // lookups below run over its rows only. Written as one flat SELECT they
+    // ran for every row the query touched — every row a filter matched before
+    // the sort, every row an OFFSET stepped over — five reads each where two
+    // would do.
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
+        `WITH page AS MATERIALIZED (
+           SELECT * FROM replays
+           ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+           -- NULLs sort last here because SQL says so — NULL is smaller than
+           -- every value, so DESC puts them at the end — and NOT because of a
+           -- leading start_unix-IS-NULL term, which used to be written out and
+           -- said the same thing at a price: an EXPRESSION as the first sort key
+           -- disqualifies replays_start, so every listing sorted the whole table
+           -- in a temp b-tree and a LIMIT saved nothing. Measured over 3000 rows
+           -- asked for 50: 6000 rows read, against 101 with the index driving.
+           ORDER BY start_unix DESC, id
+           ${window}
+         )
+         SELECT replays.id AS id, rid, replays.start_unix AS start_unix, replays.duration_sec AS duration_sec,
+                replays.map AS map, replays.game_size AS game_size, size_bytes, replays.settings AS settings,
+                replays.players AS players, replays.player_count AS player_count, uploader_ally, uploads, view,
+                widget_version, widget_sha, widget_date, placeholder,
                 -- Both jobs subqueries are PINNED to the (game_id, state)
                 -- index: left to itself the planner answered the progress
                 -- subselect's ORDER BY from jobs_state instead, which reads
@@ -1206,19 +1291,9 @@ export class ReplayIndex extends DurableObject<Env> {
                 (SELECT j.progress FROM jobs j INDEXED BY jobs_game
                  WHERE j.game_id = replays.id AND j.state = 'processing'
                  ORDER BY j.updated_unix DESC LIMIT 1) AS processing_progress,
-                (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name,
-                (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
-         FROM replays
-         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-         -- NULLs sort last here because SQL says so — NULL is smaller than
-         -- every value, so DESC puts them at the end — and NOT because of a
-         -- leading start_unix-IS-NULL term, which used to be written out and
-         -- said the same thing at a price: an EXPRESSION as the first sort key
-         -- disqualifies replays_start, so every listing sorted the whole table
-         -- in a temp b-tree and a LIMIT saved nothing. Measured over 3000 rows
-         -- asked for 50: 6000 rows read, against 101 with the index driving.
-         ORDER BY start_unix DESC, id
-         ${window}`,
+                g.lobby_name AS lobby_name, g.map_file AS map_file
+         FROM page AS replays LEFT JOIN games g ON g.id = replays.id
+         ORDER BY replays.start_unix DESC, replays.id`,
         ...args,
       )
       .toArray();
@@ -1377,16 +1452,24 @@ export class ReplayIndex extends DurableObject<Env> {
     // when the mirror is behind), past SQLite's per-statement bind-param cap;
     // each chunk's IN is PK-index-backed, so the reads stay ~the id count.
     const CHUNK = 90;
-    const known = new Set<string>();
-    for (let i = 0; i < ids.length; i += CHUNK) {
-      const batch = ids.slice(i, i + CHUNK);
+    const ask = [...new Set(ids)].filter((id) => !this.knownGames.has(id));
+    for (let i = 0; i < ask.length; i += CHUNK) {
+      const batch = ask.slice(i, i + CHUNK);
       for (const r of this.ctx.storage.sql
         .exec(`SELECT id FROM games WHERE id IN (${batch.map(() => "?").join(",")})`, ...batch)
         .toArray()) {
-        known.add(r.id as string);
+        this.rememberGame(r.id as string);
       }
     }
-    return ids.filter((id) => !known.has(id));
+    return ids.filter((id) => !this.knownGames.has(id));
+  }
+
+  private rememberGame(id: string): void {
+    this.knownGames.delete(id);
+    this.knownGames.add(id);
+    if (this.knownGames.size > KNOWN_GAMES_MAX) {
+      this.knownGames.delete(this.knownGames.values().next().value as string);
+    }
   }
 
   /** gamesLavaPending lists the lava sync's candidates: the mirror's
@@ -1442,13 +1525,11 @@ export class ReplayIndex extends DurableObject<Env> {
         `SELECT g.id AS id, g.start_unix AS start_unix,
                 g.end_unix AS end_unix,
                 g.lobby_name, g.lobby_details
-           FROM replay_settings rs JOIN games g ON g.id = rs.replay_id
-          WHERE rs.flag = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
-            AND g.lava_offered_unix IS NULL
+           FROM games g INDEXED BY games_lava_pending
+          WHERE g.lava = 1 AND g.lava_offered_unix IS NULL
+            AND g.start_unix IS NOT NULL
             AND g.end_unix >= ?
           ORDER BY g.start_unix ASC, g.id LIMIT ?`,
-        SETTINGS_LAVA_FLAG,
-        LAVA_GAME_SIZE,
         now - LAVA_OFFER_HORIZON_SEC,
         limit,
       )
@@ -1499,9 +1580,10 @@ export class ReplayIndex extends DurableObject<Env> {
     const now = Math.floor(Date.now() / 1000);
     for (const g of games) {
       sql.exec(
-        `INSERT INTO games (id, start_unix, duration_sec, end_unix, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO games (id, start_unix, duration_sec, end_unix, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix, lava)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
+           lava = excluded.lava,
            start_unix = excluded.start_unix,
            duration_sec = excluded.duration_sec,
            end_unix = excluded.end_unix,
@@ -1529,6 +1611,7 @@ export class ReplayIndex extends DurableObject<Env> {
         g.engineVersion,
         g.gameVersion,
         now,
+        isLavaShaped(g.gameSize, g.settings) ? 1 : null,
       );
       const owned = sql.exec(`SELECT 1 FROM replays WHERE id = ?`, g.id).toArray().length > 0;
       // Settings only: the backfill's modded-first ranking reads them, and
@@ -1536,6 +1619,7 @@ export class ReplayIndex extends DurableObject<Env> {
       // indexing it (48 rows written per game) is what once spent the whole
       // write allowance; see the replay_settings note in SCHEMA_DDL.
       if (!owned) this.indexSettings(g.id, g.settings);
+      this.rememberGame(g.id);
     }
     return games.length;
   }
@@ -2102,7 +2186,7 @@ export class ReplayIndex extends DurableObject<Env> {
    *   bounds what the open route can cost: a script asking for every game
    *   fills the cap and is refused past it, instead of queueing hours of
    *   engine time per minute (it happened to /api/admin/resim when that was
-   *   open). Counted over the pending rows of jobs_state, so the read is the
+   *   open). Counted over the pending rows of jobs_by_state, so the read is the
    *   size of the waiting queue, never of the table.
    *
    * A game already queued or running hands back that job ("duplicate"), so
@@ -2229,7 +2313,7 @@ export class ReplayIndex extends DurableObject<Env> {
   jobsPending(kind: JobKind): IngestJob[] {
     const window = kind === "resim" ? STALE_PROCESSING_RESIM_SEC : STALE_PROCESSING_SEC;
     const staleBefore = Math.floor(Date.now() / 1000) - window;
-    // TWO branches over jobs_kind (kind, state, updated_unix) rather than one
+    // TWO branches over jobs_by_kind (kind, state) rather than one
     // `state = 'pending' OR (state = 'processing' AND ...)`: the OR hides the
     // state column and SQLite answers it by reading the whole jobs table —
     // which two daemons poll every ten seconds, over a table that gains a row
@@ -2356,18 +2440,13 @@ export class ReplayIndex extends DurableObject<Env> {
   private lavaCandidate(now: number): { id: string; end: number } | null {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id, g.end_unix AS end_unix FROM games g
-          WHERE g.end_unix >= ?
-            AND g.game_size = ?
-            AND EXISTS (SELECT 1 FROM replay_settings s
-                        WHERE s.replay_id = g.id AND s.flag = ?)
+        `SELECT g.id AS id, g.end_unix AS end_unix FROM games g INDEXED BY games_lava_end
+          WHERE g.lava = 1 AND g.end_unix >= ?
             AND NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
             AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
           ORDER BY g.end_unix DESC, g.id
           LIMIT 1`,
         now - LAVA_WINDOW_SEC,
-        LAVA_GAME_SIZE,
-        SETTINGS_LAVA_FLAG,
       )
       .toArray();
     return rows.length === 0 ? null : { id: rows[0].id as string, end: rows[0].end_unix as number };
@@ -2375,19 +2454,15 @@ export class ReplayIndex extends DurableObject<Env> {
 
   /** lavaEnds maps each of gameIds that is an 8v8 lava game to when it ENDED
    * — what jobsOffer orders the waiting lava work by. One primary-key seek
-   * and one flag seek per id, over a pending list that is a handful long. */
+   * per id, over a pending list that is a handful long. */
   private lavaEnds(gameIds: string[]): Map<string, number> {
     const out = new Map<string, number>();
     for (const id of new Set(gameIds)) {
       const r = this.ctx.storage.sql
         .exec(
           `SELECT g.end_unix AS end_unix FROM games g
-            WHERE g.id = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
-              AND EXISTS (SELECT 1 FROM replay_settings s
-                          WHERE s.replay_id = g.id AND s.flag = ?)`,
+            WHERE g.id = ? AND g.lava = 1 AND g.start_unix IS NOT NULL`,
           id,
-          LAVA_GAME_SIZE,
-          SETTINGS_LAVA_FLAG,
         )
         .toArray();
       if (r.length > 0) out.set(id, r[0].end_unix as number);
@@ -2647,7 +2722,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * return one, on a 451-job table that only ever grows (the ROW BUDGET
    * pattern this codebase keeps refusing, this time on an admin click instead
    * of a timer). Split at exactly the CASE's boundary, each half is index
-   * work: the in-flight jobs come off jobs_state and are read IN FULL (bounded
+   * work: the in-flight jobs come off jobs_by_state and are read IN FULL (bounded
    * by work actually in flight, which drains — never by the table, which
    * doesn't), the settled ones walk the jobs_settled partial index in display
    * order and stop at the page edge, and the joins run only for rows actually
@@ -2849,15 +2924,17 @@ export class ReplayIndex extends DurableObject<Env> {
     this.metaPut("samples_pruned_before", before);
     if (before <= from) return 0;
     const cur = this.ctx.storage.sql.exec(
-      // One branch per terminal state so both are seeks on jobs_state
-      // (state, updated_unix); `state IN (...)` over a range is not.
+      // A range walk of jobs_settled (updated_unix over the settled rows),
+      // pinned: left alone the planner seeks jobs_by_state for the IN and
+      // reads every finished job. The partial clause is repeated TEXTUALLY,
+      // which is what makes the index usable at all. Only finished jobs (done/error): a disabled job that
+      // never ran is settled too, but it has no samples worth dropping early.
       `DELETE FROM job_samples WHERE job_id IN (
-         SELECT id FROM jobs WHERE state = 'done'  AND updated_unix >= ? AND updated_unix < ?
-         UNION ALL
-         SELECT id FROM jobs WHERE state = 'error' AND updated_unix >= ? AND updated_unix < ?
+         SELECT id FROM jobs INDEXED BY jobs_settled
+          WHERE (state NOT IN ('pending', 'processing') OR disabled != 0)
+            AND updated_unix >= ? AND updated_unix < ?
+            AND state IN ('done', 'error')
        )`,
-      from,
-      before,
       from,
       before,
     );
@@ -2938,7 +3015,23 @@ export class ReplayIndex extends DurableObject<Env> {
     // report is still taken: the work happened, and what came of it is worth
     // recording even though nobody wanted it any more.
     if (state === "processing" && this.jobIsDisabled(id)) return true;
-    const cur = this.ctx.storage.sql.exec(
+    // A HEARTBEAT (processing -> processing) writes only the columns that
+    // move. SQLite rewrites every index holding a column named in the SET
+    // list, changed or not, so the full update below — which names state —
+    // also rewrote jobs_by_state, jobs_by_kind and jobs_game on every beat:
+    // four rows written where one is the row. Beats are ~8640 a day per
+    // running job, which made them most of the daily write budget.
+    const beat = state === "processing" && error === null && errorKind === null
+      ? this.ctx.storage.sql.exec(
+          `UPDATE jobs SET stats = COALESCE(?, stats), progress = COALESCE(?, progress), updated_unix = ?
+           WHERE id = ? AND state = 'processing' AND error IS NULL AND error_kind IS NULL`,
+          stats === null ? null : JSON.stringify(stats),
+          progress === null ? null : JSON.stringify(progress),
+          now,
+          id,
+        ).rowsWritten
+      : 0;
+    const cur = beat > 0 ? { rowsWritten: beat } : this.ctx.storage.sql.exec(
       `UPDATE jobs SET state = ?, error = ?, error_kind = ?, stats = COALESCE(?, stats),
               progress = CASE WHEN ? = 'processing' THEN COALESCE(?, progress) ELSE NULL END,
               updated_unix = ?
@@ -3010,8 +3103,8 @@ export class ReplayIndex extends DurableObject<Env> {
 
   /** appJobsExpire fails the "app" jobs that stopped reporting (see
    * APP_JOB_STALE_SEC) and takes their games' placeholders out of the
-   * catalog. Called from the cron. A seek on jobs_kind (kind, state,
-   * updated_unix) bounded by the app jobs in flight. Returns how many. */
+   * catalog. Called from the cron. A seek on jobs_by_kind (kind, state)
+   * bounded by the app jobs in flight. Returns how many. */
   appJobsExpire(now = Math.floor(Date.now() / 1000)): number {
     const stale = this.ctx.storage.sql
       .exec(

@@ -2134,7 +2134,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           /api/app/jobs/<id> (Marcin: no authentication for now), which refuses anything but
                           an "app" job (403) — the guarded /api/jobs/<id> stays the daemons' door. Never offered
                           to a daemon (DAEMON_KINDS = upload|resim for GET /api/jobs and claims); the cron fails
-                          one silent for APP_JOB_STALE_SEC = 5 min (appJobsExpire, a jobs_kind seek); a Retry of
+                          one silent for APP_JOB_STALE_SEC = 5 min (appJobsExpire, a jobs_by_kind seek); a Retry of
                           one is an ordinary resim. jobs.install_id (schema 8, partial index jobs_install) ties
                           an install's app jobs and .brp uploads together: GET /api/admin/queue?install=<id>
                           (jobsByInstall), reached from a row's Install line on the queue page.
@@ -2186,7 +2186,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           "simulating, 43%, 12 minutes left" would be worse than one reading
                           nothing (`progress = CASE WHEN ? = 'processing' THEN COALESCE(?,
                           progress) ELSE NULL END`, so a beat that carries none keeps the last
-                          reading and an older daemon simply reports less). jobClaim clears it
+                          reading and an older daemon simply reports less). A HEARTBEAT on a
+                          job already processing takes a narrower UPDATE that names only stats,
+                          progress and updated_unix: SQLite rewrites every index holding a
+                          column the SET list names, changed or not, so the full update cost
+                          the row plus jobs_by_state/jobs_by_kind/jobs_game per beat (and the
+                          state indexes, then ending in updated_unix, moved on every beat) —
+                          most of the daily write budget. jobClaim clears it
                           too: taking over a stale job must not inherit the dead daemon's last
                           percentage. Fields: state (the phase in words — the only one that
                           means anything in every phase), frame/totalFrames/percent/etaSec/
@@ -2402,10 +2408,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           as the query, since the two drifting is what hid the stall) runs it
                           at once, plus one hourly sweep (LAVA_SYNC_MINUTE), which is both the
                           retry after a failed trigger and what drains a backlog — never every
-                          tick, because the candidate query (ReplayIndex.gamesLavaPending: the
-                          (flag, replay_id) index seek for 'lava' + a games PK seek each,
-                          rowcost-bounded) costs the count of lava-flagged games ever mirrored,
-                          and 1440 of those a day is the ROW BUDGET pattern to avoid.
+                          tick. The candidate query (ReplayIndex.gamesLavaPending) walks the
+                          PARTIAL index games_lava_pending (games.lava = 1 AND not offered;
+                          games.lava, schema 12, is the lava flag on an 8v8, written by
+                          gamesInsert), so it costs the games still to offer. It used to
+                          drive from replay_settings' 'lava' entries and read every lava game
+                          ever mirrored (~6k rows a call on the deployment).
                           LAVA_OFFER_HORIZON_SEC (7 days) bounds that query and the first run
                           after the column was added, when every lava game in the mirror is
                           unoffered and nearly all are long since stored; if the count ever
@@ -2675,7 +2683,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           can satisfy, so every read joined and sorted the WHOLE jobs table
                           (measured live: 2122 rows to return one, on 451 jobs that are never
                           deleted). It is now two indexed queries assembled in the method —
-                          the in-flight set read whole off jobs_state (bounded by work in
+                          the in-flight set read whole off jobs_by_state (bounded by work in
                           flight, which drains), the settled rows walked in display order off
                           the jobs_settled PARTIAL index (over exactly the rows heartbeats
                           never touch, so a beat costs it nothing) and stopped at the page
@@ -2683,6 +2691,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (jobs_count, incremented by jobInsert, sound because nothing ever
                           deletes a job row) and `active` free off the in-flight set already
                           in hand.
+                          THE CATALOG LIST picks its page first (a MATERIALIZED CTE over the
+                          filtered, ordered, LIMITed replays) and only then joins the per-row
+                          lookups (processing, progress, the games mirror's lobby_name/map_file),
+                          and its settings flags are correlated EXISTS checks, never
+                          `id IN (SELECT ...)`: the IN list became the query's DRIVER, so an
+                          outside scraper's one-day settings=ranked&from=&to= read every ranked
+                          row with its lookups (~225k rows a call on a ~45k-row catalog,
+                          2026-11-21). An OFFSET still steps over rows (~2 reads each).
                           SQL STATS (GET /api/admin/sqlstats): the LIVE counterpart of the rowcost
                           suite — the DO bills every statement's rowsRead/rowsWritten to the
                           public method running it (installSqlAccounting: an exec shim plus
@@ -2899,13 +2915,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           three were lava-map team games, the same thing to a spectator.
                           8v8 is the game_size SPEC, not player_count=16 (a 4v4v4v4 FFA is
                           16 players too). No ranking beyond recency inside it: every 8v8
-                          is sixteen players. The walk is games_end stopped at the
-                          window's edge, so it costs a DAY of BAR's output (~2200 rows,
-                          measured; rowcost.test.ts bounds it) whatever the mirror has
-                          grown to — a seek through every lava game ever mirrored would
-                          grow forever, which the ROW BUDGET rules out on the 10s poll
-                          path — and it stops at the FIRST match, so a lava game near the
-                          head costs a handful. It rests LAVA_COOLDOWN_SEC=5min on the
+                          is sixteen players. The walk is games_lava_end (a PARTIAL index
+                          on end_unix over games.lava = 1) stopped at the window's edge, so
+                          it costs the DAY's lava games, not the day's mirror (~2200 rows
+                          when it walked games_end; rowcost.test.ts bounds it), and it stops
+                          at the FIRST match. It rests LAVA_COOLDOWN_SEC=5min on the
                           EMPTY answer, longer than the ranked window's minute because
                           the empty answer is the common one here (an 8v8 lava game
                           finishes a couple of times an hour) and much more expensive
