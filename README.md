@@ -21,12 +21,11 @@ keyframes-first.
 
 ![barreplay architecture](docs/architecture.svg)
 
-**Games come from BAR.** Every minute the worker's cron reads BAR's public
-game list (`api.bar-rts.com`) and records the games that just finished in its
-games mirror. It also scrapes the Teiserver lobby pages, so a mirrored game
-gets its lobby name and the players' parties, and it hands lava games to
+**Games come from BAR.** The website, replay.fogofwar.dev, is a Cloudflare
+Worker. It keeps a list of every game BAR's servers publish, adds lobby names
+from Teiserver, and passes lava games to
 [lavabalance](https://lavabalance.fogofwar.dev), a sibling site that keeps
-OpenSkill ratings for that mode.
+ratings for that mode.
 
 **Re-simulation turns a game into a `.brp`.** Three things can run one:
 
@@ -48,29 +47,21 @@ of the engine that is several times faster and produces the same bytes (see
 [Engine patches](#engine-patches)).
 
 **Publishing.** `bringest -resim` writes the `.brp` straight to the R2 bucket
-under `replays/<YYYY-MM>/<gameId>.brp` and registers it in the catalog with
-`PUT /api/replays/<gameId>`. Uploads, from FogOfWar.exe or dropped on the
-landing page, go to `POST /api/upload`; the worker archives them and queues a
-job, and plain `bringest`, running on any machine without an engine, packs
-or checks them and publishes them the same way. Nothing in the bucket is ever
+and registers it with the website. Uploads, from FogOfWar.exe or dropped on
+the landing page, go to the website, which queues a job; plain `bringest`,
+running on any machine without an engine, publishes them the same way. Nothing in the bucket is ever
 overwritten: a second capture of a game becomes another revision.
 
-**Game summaries.** `internal/insights` reduces a `.brp` to a summary file
-published beside it (`<gameId>.insights10.json`): army value and income per
-side, battles, the win-probability line and its swings, eliminations, awards,
-a report per player. A summary is computed at publish time. When the viewer
-finds it missing or outdated, it asks the worker, whose SummaryHub Durable
-Object hands the request over a WebSocket to a plain `bringest`, which computes
-and publishes it while the reader waits.
+**Game summaries.** Each `.brp` gets a summary file published beside it:
+army value and income per side, battles, the win-probability line and its
+swings, eliminations, awards, a report per player. When the viewer finds one
+missing or outdated, plain `bringest` computes it while the reader waits.
 
-**The viewer** has no playback server. The browser reads the `.brp` with HTTP
-Range requests from `cdn-bar.fogofwar.dev`, the bucket on its own hostname,
-cached at Cloudflare's edge: first a small head with the meta, events and
-chat, then all keyframes as one stream (the whole timeline is scrubbable in
-seconds), then the delta chunks around the playhead. The worker serves the
-page, the catalog (`/api/replays`), the games list, the job queue, and a
-caching proxy to BAR's map API. The summary page is a separate library that
-lavabalance imports at run time from `/embed/summary.js`.
+**The viewer** has no playback server. The browser reads the `.brp` in
+pieces from `cdn-bar.fogofwar.dev`, the bucket on its own hostname: first a
+small head, then all keyframes (the whole timeline is scrubbable in seconds),
+then the rest around the playhead. lavabalance shows the same game summary
+on its own pages.
 
 ## Repository layout
 

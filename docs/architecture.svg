@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1340 980" width="1340" height="980" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 640" width="1080" height="640" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
   <title id="t">barreplay architecture</title>
-  <desc id="d">Engine hosts re-simulate BAR demos into .brp files and publish them to an R2 bucket; a Cloudflare Worker with two Durable Objects keeps the catalog, the job queue and the games mirror; browsers read the .brp through cdn-bar.fogofwar.dev.</desc>
+  <desc id="d">Re-simulation hosts turn BAR games into replay files and publish them to an R2 bucket; a Cloudflare Worker runs the website, the API and the job queue; browsers load replays through a CDN.</desc>
   <style>
     :root {
       --bg: #ffffff; --ink: #1f2328; --muted: #59636e; --line: #6e7781;
@@ -18,17 +18,15 @@
     }
     .bg { fill: var(--bg); }
     .frame { fill: none; stroke: var(--frame); stroke-width: 1.5; stroke-dasharray: 6 5; }
-    .ftitle { fill: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .ftitle { fill: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .06em; }
     .ext { fill: var(--ext); stroke: var(--ext-b); stroke-width: 1.5; }
     .go { fill: var(--go); stroke: var(--go-b); stroke-width: 1.5; }
     .cf { fill: var(--cf); stroke: var(--cf-b); stroke-width: 1.5; }
     .rd { fill: var(--rd); stroke: var(--rd-b); stroke-width: 1.5; }
-    .h { fill: var(--ink); font-size: 15px; font-weight: 700; }
-    .sub { fill: var(--muted); font-size: 12px; font-style: italic; }
-    .b { fill: var(--ink); font-size: 12.5px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .h { fill: var(--ink); font-size: 16px; font-weight: 700; }
+    .b { fill: var(--muted); font-size: 13.5px; }
     .ar { fill: none; stroke: var(--line); stroke-width: 1.6; }
-    .al { fill: var(--muted); font-size: 11.5px; }
+    .al { fill: var(--muted); font-size: 12px; }
     .lbg { fill: var(--tag); }
     .head { fill: var(--line); }
   </style>
@@ -38,189 +36,100 @@
     </marker>
   </defs>
 
-  <rect class="bg" width="1340" height="980"/>
+  <rect class="bg" width="1080" height="640"/>
 
-  <!-- ============ OUTSIDE SOURCES ============ -->
-  <text class="ftitle" x="40" y="34">Outside this repo</text>
-  <rect class="ext" x="40" y="50" width="460" height="100" rx="10"/>
-  <text class="h" x="56" y="76">Beyond All Reason's servers</text>
-  <text class="b" x="56" y="98"><tspan class="mono">api.bar-rts.com</tspan>: game list, replay details, demos (.sdfz)</text>
-  <text class="b" x="56" y="118">Recoil engine releases, rapid repo (game builds),</text>
-  <text class="b" x="56" y="136">map archives</text>
+  <!-- outside sources -->
+  <rect class="ext" x="40" y="30" width="300" height="72" rx="10"/>
+  <text class="h" x="58" y="60">Beyond All Reason servers</text>
+  <text class="b" x="58" y="84">game lists, demos</text>
 
-  <rect class="ext" x="700" y="50" width="180" height="100" rx="10"/>
-  <text class="h" x="716" y="76">Teiserver</text>
-  <text class="b" x="716" y="98">lobby web pages:</text>
-  <text class="b" x="716" y="116">lobby names, rosters,</text>
-  <text class="b" x="716" y="134">parties</text>
+  <rect class="ext" x="520" y="30" width="180" height="72" rx="10"/>
+  <text class="h" x="538" y="60">Teiserver</text>
+  <text class="b" x="538" y="84">game lobbies</text>
 
-  <!-- ============ GO HOSTS ============ -->
-  <rect class="frame" x="28" y="190" width="384" height="580" rx="14"/>
-  <text class="ftitle" x="44" y="214">Go programs (cmd/)</text>
+  <!-- Go programs -->
+  <rect class="frame" x="30" y="150" width="290" height="410" rx="14"/>
+  <text class="ftitle" x="46" y="174">GO PROGRAMS</text>
 
-  <rect class="go" x="40" y="228" width="360" height="132" rx="10"/>
-  <text class="h" x="56" y="254">bringest -resim</text>
-  <text class="sub" x="56" y="272">Linux host with the engine</text>
-  <text class="b" x="56" y="296">takes re-sim jobs; runs the patched Recoil</text>
-  <text class="b" x="56" y="314">engine headless with an injected Lua widget</text>
-  <text class="b" x="56" y="336" ><tspan class="mono">.sdfz → .brepstream → .brp</tspan></text>
+  <rect class="go" x="40" y="190" width="270" height="72" rx="10"/>
+  <text class="h" x="58" y="220">bringest -resim</text>
+  <text class="b" x="58" y="244">re-simulates games</text>
 
-  <rect class="go" x="40" y="390" width="360" height="118" rx="10"/>
-  <text class="h" x="56" y="416">FogOfWar.exe</text>
-  <text class="sub" x="56" y="434">Windows app on a player's PC</text>
-  <text class="b" x="56" y="458">the same re-sim on the player's machine,</text>
-  <text class="b" x="56" y="476">then uploads the .brp; downloaded from</text>
-  <text class="b" x="56" y="494">/setup (GitHub releases)</text>
+  <rect class="go" x="40" y="290" width="270" height="72" rx="10"/>
+  <text class="h" x="58" y="320">FogOfWar.exe</text>
+  <text class="b" x="58" y="344">re-simulates on a player's PC</text>
 
-  <rect class="go" x="40" y="538" width="360" height="132" rx="10"/>
-  <text class="h" x="56" y="564">bringest</text>
-  <text class="sub" x="56" y="582">any host, no engine needed</text>
-  <text class="b" x="56" y="606">publishes uploads: pack → .brp → R2 + catalog</text>
-  <text class="b" x="56" y="624">computes game summaries on demand while</text>
-  <text class="b" x="56" y="642">a reader waits</text>
+  <rect class="go" x="40" y="390" width="270" height="90" rx="10"/>
+  <text class="h" x="58" y="420">bringest</text>
+  <text class="b" x="58" y="444">publishes uploads,</text>
+  <text class="b" x="58" y="462">builds game summaries</text>
 
-  <text class="b" x="44" y="700" font-weight="600">Shared Go packages (stdlib only):</text>
-  <text class="b mono" x="44" y="720">demofile · engine · resim · capture</text>
-  <text class="b mono" x="44" y="738">snapshot (.brp codec) · packer · combat</text>
-  <text class="b mono" x="44" y="756">insights (summaries, win models)</text>
+  <!-- Cloudflare -->
+  <rect class="frame" x="410" y="150" width="290" height="410" rx="14"/>
+  <text class="ftitle" x="426" y="174">CLOUDFLARE</text>
 
-  <!-- ============ CLOUDFLARE ============ -->
-  <rect class="frame" x="508" y="190" width="384" height="710" rx="14"/>
-  <text class="ftitle" x="598" y="214">Cloudflare (worker/)</text>
+  <rect class="cf" x="420" y="190" width="270" height="262" rx="10"/>
+  <text class="h" x="438" y="220">replay.fogofwar.dev</text>
+  <text class="b" x="438" y="244">the website,</text>
+  <text class="b" x="438" y="262">a Cloudflare Worker</text>
 
-  <rect class="cf" x="520" y="228" width="360" height="330" rx="10"/>
-  <text class="h" x="536" y="254">Worker · replay.fogofwar.dev</text>
-  <text class="sub" x="536" y="272">Hono + Vite, TypeScript</text>
-  <text class="b" x="536" y="300">• the viewer: <tspan class="mono">index.html</tspan>, <tspan class="mono">app.js</tspan>, icons</text>
-  <text class="b" x="536" y="322">• <tspan class="mono">/api/replays</tspan> catalog, <tspan class="mono">/api/games</tspan> mirror</text>
-  <text class="b" x="536" y="344">• job queue: uploads, re-sims, app jobs</text>
-  <text class="b" x="536" y="366">• <tspan class="mono">/api/upload</tspan>, <tspan class="mono">/api/insights</tspan></text>
-  <text class="b" x="536" y="388">• <tspan class="mono">/api/bar/*</tspan>: caching proxy to the BAR API</text>
-  <text class="b" x="536" y="410">• <tspan class="mono">/embed/summary.js</tspan>, <tspan class="mono">/setup</tspan></text>
-  <text class="b" x="536" y="432">• admin routes behind Cloudflare Access</text>
-  <text class="b" x="536" y="460" font-weight="600">Cron, every minute:</text>
-  <text class="b" x="536" y="480">• mirror newly finished games</text>
-  <text class="b" x="536" y="500">• scrape Teiserver lobbies, match to games</text>
-  <text class="b" x="536" y="520">• hand lava games to lavabalance</text>
-  <text class="b" x="536" y="540">• prune old job samples (hourly)</text>
 
-  <rect class="cf" x="520" y="590" width="170" height="120" rx="10"/>
-  <text class="h" x="534" y="614">SummaryHub</text>
-  <text class="sub" x="534" y="632">Durable Object</text>
-  <text class="b" x="534" y="656">WebSockets to</text>
-  <text class="b" x="534" y="674">bringest; hands out</text>
-  <text class="b" x="534" y="692">summary requests</text>
+  <rect class="cf" x="420" y="478" width="270" height="72" rx="10"/>
+  <text class="h" x="438" y="508">R2 bucket</text>
+  <text class="b" x="438" y="532">replays and summaries</text>
 
-  <rect class="cf" x="710" y="590" width="170" height="120" rx="10"/>
-  <text class="h" x="724" y="614">ReplayIndex</text>
-  <text class="sub" x="724" y="632">Durable Object, SQLite</text>
-  <text class="b" x="724" y="656">catalog · jobs</text>
-  <text class="b" x="724" y="674">games mirror</text>
-  <text class="b" x="724" y="692">lobbies</text>
+  <!-- readers -->
+  <rect class="rd" x="790" y="190" width="250" height="72" rx="10"/>
+  <text class="h" x="808" y="220">lavabalance</text>
+  <text class="b" x="808" y="244">ratings site, embeds summaries</text>
 
-  <rect class="cf" x="520" y="770" width="360" height="118" rx="10"/>
-  <text class="h" x="536" y="796">R2 bucket <tspan class="mono" font-weight="400">barreplay-replays</tspan></text>
-  <text class="b mono" x="536" y="820">replays/&lt;YYYY-MM&gt;/&lt;gameId&gt;.brp</text>
-  <text class="b mono" x="536" y="838">replays/…/&lt;gameId&gt;.insights10.json</text>
-  <text class="b mono" x="536" y="856">streams/ (raw uploads)  maps/highres/</text>
-  <text class="b mono" x="536" y="874">engines/ (patched engine builds)</text>
+  <rect class="rd" x="790" y="300" width="250" height="90" rx="10"/>
+  <text class="h" x="808" y="330">Browser</text>
+  <text class="b" x="808" y="354">plays replays,</text>
+  <text class="b" x="808" y="372">shows summaries</text>
 
-  <!-- ============ READERS ============ -->
-  <text class="ftitle" x="1000" y="214">Readers</text>
+  <rect class="ext" x="790" y="478" width="250" height="72" rx="10"/>
+  <text class="h" x="808" y="508">cdn-bar.fogofwar.dev</text>
+  <text class="b" x="808" y="532">serves replay files</text>
 
-  <rect class="rd" x="1000" y="228" width="310" height="140" rx="10"/>
-  <text class="h" x="1016" y="254">lavabalance.fogofwar.dev</text>
-  <text class="sub" x="1016" y="272">separate site (mabn/claudebar)</text>
-  <text class="b" x="1016" y="298">OpenSkill ratings for lava games;</text>
-  <text class="b" x="1016" y="316">its game pages import</text>
-  <text class="b" x="1016" y="334"><tspan class="mono">/embed/summary.js</tspan> at run time</text>
+  <!-- arrows -->
+  <path class="ar" d="M175,102 V188" marker-end="url(#a)"/>
+  <rect class="lbg" x="182" y="122" width="52" height="18" rx="3"/>
+  <text class="al" x="186" y="135">demos</text>
 
-  <rect class="rd" x="1000" y="430" width="310" height="180" rx="10"/>
-  <text class="h" x="1016" y="456">Browser</text>
-  <text class="sub" x="1016" y="474">plain JS + canvas / WebGL</text>
-  <text class="b" x="1016" y="500">Replay tab: Range-reads one .brp,</text>
-  <text class="b" x="1016" y="518">keyframes first, deltas around the</text>
-  <text class="b" x="1016" y="536">playhead</text>
-  <text class="b" x="1016" y="560">Summary tab: the game summary</text>
-  <text class="b" x="1016" y="578">(battles, swings, awards), computed</text>
-  <text class="b" x="1016" y="596">on demand when missing</text>
+  <path class="ar" d="M340,66 H460 V188" marker-end="url(#a)"/>
+  <rect class="lbg" x="466" y="122" width="70" height="18" rx="3"/>
+  <text class="al" x="470" y="135">game list</text>
 
-  <rect class="ext" x="1000" y="770" width="310" height="118" rx="10"/>
-  <text class="h" x="1016" y="796">cdn-bar.fogofwar.dev</text>
-  <text class="b" x="1016" y="820">the bucket on its own hostname,</text>
-  <text class="b" x="1016" y="838">cached at Cloudflare's edge; no</text>
-  <text class="b" x="1016" y="856">Worker on this path</text>
+  <path class="ar" d="M630,102 V188" marker-end="url(#a)"/>
+  <rect class="lbg" x="636" y="122" width="60" height="18" rx="3"/>
+  <text class="al" x="640" y="135">lobbies</text>
 
-  <!-- ============ ARROWS ============ -->
-  <!-- BAR servers -> re-sim host -->
-  <path class="ar" d="M220,150 V226" marker-end="url(#a)"/>
-  <rect class="lbg" x="228" y="168" width="160" height="34" rx="3"/>
-  <text class="al" x="232" y="182">demo, engine, game, map</text>
-  <text class="al" x="232" y="198">(FogOfWar.exe: the same)</text>
+  <path class="ar" d="M312,226 H418" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="346" y="218">jobs</text>
 
-  <!-- BAR servers -> Worker -->
-  <path class="ar" d="M500,100 H580 V226" marker-end="url(#a)"/>
-  <rect class="lbg" x="588" y="160" width="100" height="34" rx="3"/>
-  <text class="al" x="592" y="174">games mirror,</text>
-  <text class="al" x="592" y="190">map + demo proxy</text>
+  <path class="ar" d="M312,320 H418" marker-end="url(#a)"/>
+  <text class="al" x="334" y="312">uploads</text>
 
-  <!-- Teiserver -> Worker -->
-  <path class="ar" d="M790,150 V226" marker-end="url(#a)"/>
-  <rect class="lbg" x="796" y="168" width="90" height="34" rx="3"/>
-  <text class="al" x="800" y="182">lobby scrape</text>
-  <text class="al" x="800" y="198">every 30 s</text>
+  <path class="ar" d="M312,416 H418" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="322" y="408">uploads,</text>
+  <text class="al" x="322" y="432">summaries</text>
 
-  <!-- resim <-> Worker -->
-  <path class="ar" d="M402,290 H518" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text class="al" x="414" y="282">re-sim jobs,</text>
-  <text class="al" x="414" y="306">progress, catalog</text>
 
-  <!-- FogOfWar -> Worker -->
-  <path class="ar" d="M402,450 H518" marker-end="url(#a)"/>
-  <text class="al" x="414" y="442">app jobs,</text>
-  <text class="al" x="414" y="466">.brp upload</text>
+  <path class="ar" d="M40,226 H18 V595 H555 V552" marker-end="url(#a)"/>
+  <path class="ar" d="M40,450 H18"/>
+  <rect class="lbg" x="140" y="586" width="120" height="18" rx="3"/>
+  <text class="al" x="146" y="599">publish replays</text>
 
-  <!-- bringest <-> Worker -->
-  <path class="ar" d="M402,555 H518" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text class="al" x="414" y="547">upload jobs,</text>
-  <text class="al" x="414" y="571">streams, catalog</text>
+  <path class="ar" d="M692,514 H788" marker-end="url(#a)"/>
 
-  <!-- bringest <-> SummaryHub -->
-  <path class="ar" d="M402,650 H518" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text class="al" x="414" y="642">WebSocket:</text>
-  <text class="al" x="414" y="666">summary requests</text>
+  <path class="ar" d="M915,476 V392" marker-end="url(#a)"/>
+  <rect class="lbg" x="922" y="424" width="80" height="18" rx="3"/>
+  <text class="al" x="926" y="437">replay files</text>
 
-  <!-- Worker -> DOs -->
-  <path class="ar" d="M605,560 V588" marker-start="url(#a)" marker-end="url(#a)"/>
-  <path class="ar" d="M795,560 V588" marker-start="url(#a)" marker-end="url(#a)"/>
+  <path class="ar" d="M692,226 H788" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="712" y="218">lava games</text>
 
-  <!-- Worker -> R2 (between the two DOs) -->
-  <path class="ar" d="M700,560 V768" marker-start="url(#a)" marker-end="url(#a)"/>
-  <rect class="lbg" x="705" y="726" width="132" height="18" rx="3"/>
-  <text class="al" x="708" y="740">archives raw uploads</text>
-
-  <!-- re-sim host + bringest publish straight to R2 (left lane) -->
-  <path class="ar" d="M40,330 H14 V945 H760 V890" marker-end="url(#a)"/>
-  <path class="ar" d="M40,630 H14"/>
-  <rect class="lbg" x="80" y="935" width="420" height="20" rx="3"/>
-  <text class="al" x="86" y="949">publish .brp and summaries straight to R2 (S3 API, append-only)</text>
-
-  <!-- R2 -> cdn-bar -->
-  <path class="ar" d="M882,830 H998" marker-end="url(#a)"/>
-
-  <!-- cdn-bar -> Browser -->
-  <path class="ar" d="M1155,770 V612" marker-end="url(#a)"/>
-  <rect class="lbg" x="1162" y="680" width="140" height="34" rx="3"/>
-  <text class="al" x="1166" y="694">.brp byte ranges,</text>
-  <text class="al" x="1166" y="710">summaries, map images</text>
-
-  <!-- Worker <-> Browser -->
-  <path class="ar" d="M882,500 H998" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text class="al" x="896" y="492">pages, /api,</text>
-  <text class="al" x="896" y="516">summaries</text>
-
-  <!-- Worker <-> lavabalance -->
-  <path class="ar" d="M882,300 H998" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text class="al" x="896" y="292">lava games,</text>
-  <text class="al" x="896" y="316">summary.js</text>
+  <path class="ar" d="M692,320 H788" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="712" y="312">pages, API</text>
 </svg>
