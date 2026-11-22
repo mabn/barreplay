@@ -14,7 +14,8 @@ inputs, and the deterministic Recoil (Spring) engine recomputes everything
 else. So barreplay **re-simulates** the replay in a headless engine, with a
 read-only Lua widget writing down the game state once a second. The result is
 a `.brp` file, a compact delta-coded binary the viewer streams
-keyframes-first.
+keyframes-first. The re-simulations run on a custom patched build of the
+engine, nearly four times faster than the stock one and with identical output.
 
 ## How it works
 
@@ -164,12 +165,12 @@ holds the series that apply onto that tag of
 [RecoilEngine](https://github.com/beyond-all-reason/RecoilEngine); the build
 recipe is [`docs/building-recoil.md`](docs/building-recoil.md).
 
-For engine 2026.07.04, on a 16-player, 50-minute game (re-simulated whole):
+![Patched engine vs stock engine](docs/engine-benchmark.svg)
 
-| Build | Re-sim time | Record |
-| --- | --- | --- |
-| stock | 38m17s | [`docs/engine-speed-plan.md`](docs/engine-speed-plan.md) |
-| patched, revision 5 (the speed work, PGO + LTO) | about 10 minutes | same; day by day in [`docs/worklog-engine-speed.md`](docs/worklog-engine-speed.md) |
+The patched build is revision 5 (`2026.7.4-barreplay.5`, built with PGO and
+LTO). [`docs/engine-speed-plan.md`](docs/engine-speed-plan.md) has the
+measurements, and [`docs/worklog-engine-speed.md`](docs/worklog-engine-speed.md)
+the work day by day.
 
 Memory is a separate axis ([`MEMORY.md`](patches/engine-2026.07.04/MEMORY.md)):
 lazy zeroing of the static memory pools and the on-demand bitmap allocator
