@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 640" width="1080" height="640" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="t">barreplay architecture</title>
+  <desc id="d">Re-simulation hosts turn BAR games into replay files and publish them to an R2 bucket; a Cloudflare Worker runs the website, the API and the job queue; browsers load replays through a CDN.</desc>
+  <style>
+    :root {
+      --bg: #ffffff; --ink: #1f2328; --muted: #59636e; --line: #6e7781;
+      --frame: #d0d7de; --ext: #f6f8fa; --ext-b: #afb8c1;
+      --go: #eef6ff; --go-b: #54aeff; --cf: #fff4e5; --cf-b: #f0a040;
+      --rd: #eefbf1; --rd-b: #4ac26b; --tag: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --ink: #e6edf3; --muted: #9198a1; --line: #8b949e;
+        --frame: #30363d; --ext: #161b22; --ext-b: #484f58;
+        --go: #0c2d4d; --go-b: #388bfd; --cf: #3a2410; --cf-b: #d18616;
+        --rd: #0f2e1b; --rd-b: #3fb950; --tag: #0d1117;
+      }
+    }
+    .bg { fill: var(--bg); }
+    .frame { fill: none; stroke: var(--frame); stroke-width: 1.5; stroke-dasharray: 6 5; }
+    .ftitle { fill: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .06em; }
+    .ext { fill: var(--ext); stroke: var(--ext-b); stroke-width: 1.5; }
+    .go { fill: var(--go); stroke: var(--go-b); stroke-width: 1.5; }
+    .cf { fill: var(--cf); stroke: var(--cf-b); stroke-width: 1.5; }
+    .rd { fill: var(--rd); stroke: var(--rd-b); stroke-width: 1.5; }
+    .h { fill: var(--ink); font-size: 16px; font-weight: 700; }
+    .b { fill: var(--muted); font-size: 13.5px; }
+    .ar { fill: none; stroke: var(--line); stroke-width: 1.6; }
+    .al { fill: var(--muted); font-size: 12px; }
+    .lbg { fill: var(--tag); }
+    .head { fill: var(--line); }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1080" height="640"/>
+
+  <!-- outside sources -->
+  <rect class="ext" x="40" y="30" width="300" height="72" rx="10"/>
+  <text class="h" x="58" y="60">Beyond All Reason servers</text>
+  <text class="b" x="58" y="84">game lists, demos</text>
+
+  <rect class="ext" x="520" y="30" width="180" height="72" rx="10"/>
+  <text class="h" x="538" y="60">Teiserver</text>
+  <text class="b" x="538" y="84">game lobbies</text>
+
+  <!-- Go programs -->
+  <rect class="frame" x="30" y="150" width="290" height="410" rx="14"/>
+  <text class="ftitle" x="46" y="174">GO PROGRAMS</text>
+
+  <rect class="go" x="40" y="190" width="270" height="72" rx="10"/>
+  <text class="h" x="58" y="220">bringest -resim</text>
+  <text class="b" x="58" y="244">re-simulates games</text>
+
+  <rect class="go" x="40" y="290" width="270" height="72" rx="10"/>
+  <text class="h" x="58" y="320">FogOfWar.exe</text>
+  <text class="b" x="58" y="344">re-simulates on a player's PC</text>
+
+  <rect class="go" x="40" y="390" width="270" height="90" rx="10"/>
+  <text class="h" x="58" y="420">bringest</text>
+  <text class="b" x="58" y="444">publishes uploads,</text>
+  <text class="b" x="58" y="462">builds game summaries</text>
+
+  <!-- Cloudflare -->
+  <rect class="frame" x="410" y="150" width="290" height="410" rx="14"/>
+  <text class="ftitle" x="426" y="174">CLOUDFLARE</text>
+
+  <rect class="cf" x="420" y="190" width="270" height="262" rx="10"/>
+  <text class="h" x="438" y="220">replay.fogofwar.dev</text>
+  <text class="b" x="438" y="244">the website,</text>
+  <text class="b" x="438" y="262">Cloudflare Worker + Durable Objects</text>
+
+
+  <rect class="cf" x="420" y="478" width="270" height="72" rx="10"/>
+  <text class="h" x="438" y="508">R2 bucket</text>
+  <text class="b" x="438" y="532">replays and summaries</text>
+
+  <!-- readers -->
+  <rect class="rd" x="790" y="190" width="250" height="72" rx="10"/>
+  <text class="h" x="808" y="220">lavabalance.fogofwar.dev</text>
+  <text class="b" x="808" y="244">ratings site, embeds summaries</text>
+
+  <rect class="rd" x="790" y="300" width="250" height="90" rx="10"/>
+  <text class="h" x="808" y="330">Browser</text>
+  <text class="b" x="808" y="354">plays replays,</text>
+  <text class="b" x="808" y="372">shows summaries</text>
+
+  <rect class="ext" x="790" y="478" width="250" height="72" rx="10"/>
+  <text class="h" x="808" y="508">cdn-bar.fogofwar.dev</text>
+  <text class="b" x="808" y="532">serves replay files</text>
+
+  <!-- arrows -->
+  <path class="ar" d="M175,102 V188" marker-end="url(#a)"/>
+  <rect class="lbg" x="182" y="122" width="52" height="18" rx="3"/>
+  <text class="al" x="186" y="135">demos</text>
+
+  <path class="ar" d="M340,66 H460 V188" marker-end="url(#a)"/>
+  <rect class="lbg" x="466" y="122" width="70" height="18" rx="3"/>
+  <text class="al" x="470" y="135">game list</text>
+
+  <path class="ar" d="M630,102 V188" marker-end="url(#a)"/>
+  <rect class="lbg" x="636" y="122" width="60" height="18" rx="3"/>
+  <text class="al" x="640" y="135">lobbies</text>
+
+  <path class="ar" d="M312,226 H418" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="346" y="218">jobs</text>
+
+  <path class="ar" d="M312,320 H418" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="322" y="312">games to run,</text>
+  <text class="al" x="322" y="336">uploads</text>
+
+  <path class="ar" d="M312,416 H418" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="322" y="408">uploads,</text>
+  <text class="al" x="322" y="432">summaries</text>
+
+
+  <path class="ar" d="M40,226 H18 V595 H555 V552" marker-end="url(#a)"/>
+  <path class="ar" d="M40,450 H18"/>
+  <rect class="lbg" x="140" y="586" width="120" height="18" rx="3"/>
+  <text class="al" x="146" y="599">publish replays</text>
+
+  <path class="ar" d="M692,514 H788" marker-end="url(#a)"/>
+
+  <path class="ar" d="M915,476 V392" marker-end="url(#a)"/>
+  <rect class="lbg" x="922" y="424" width="80" height="18" rx="3"/>
+  <text class="al" x="926" y="437">replay files</text>
+
+  <path class="ar" d="M692,226 H788" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="712" y="218">lava games</text>
+
+  <path class="ar" d="M692,320 H788" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="al" x="712" y="312">pages, API</text>
+</svg>

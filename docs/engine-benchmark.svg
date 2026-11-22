@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" width="760" height="200" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="t">Patched engine vs stock engine</title>
+  <desc id="d">Re-simulating a 16-player, 50-minute game takes 38 minutes 17 seconds on the stock Recoil 2026.07.04 engine and 9 minutes 56 seconds on the patched build, 3.85 times faster, with identical output.</desc>
+  <style>
+    :root { --bg: #ffffff; --ink: #1f2328; --muted: #59636e; --grid: #d8dee4; --stock: #8c959f; --patched: #1a7f37; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0d1117; --ink: #e6edf3; --muted: #9198a1; --grid: #30363d; --stock: #6e7681; --patched: #3fb950; }
+    }
+    .bg { fill: var(--bg); }
+    .t { fill: var(--ink); font-size: 15px; font-weight: 700; }
+    .l { fill: var(--ink); font-size: 13px; }
+    .v { fill: var(--ink); font-size: 13px; font-weight: 600; }
+    .m { fill: var(--muted); font-size: 12px; }
+    .g { stroke: var(--grid); stroke-width: 1; }
+    .stock { fill: var(--stock); }
+    .patched { fill: var(--patched); }
+  </style>
+  <rect class="bg" width="760" height="200"/>
+  <text class="t" x="20" y="28">Re-simulating a 16-player, 50-minute game</text>
+
+  <!-- axis: 0..40 min over x 170..650 (12 px per minute) -->
+  <line class="g" x1="170" y1="44" x2="170" y2="146"/>
+  <line class="g" x1="290" y1="44" x2="290" y2="146"/>
+  <line class="g" x1="410" y1="44" x2="410" y2="146"/>
+  <line class="g" x1="530" y1="44" x2="530" y2="146"/>
+  <line class="g" x1="650" y1="44" x2="650" y2="146"/>
+  <text class="m" x="170" y="162" text-anchor="middle">0</text>
+  <text class="m" x="290" y="162" text-anchor="middle">10 min</text>
+  <text class="m" x="410" y="162" text-anchor="middle">20 min</text>
+  <text class="m" x="530" y="162" text-anchor="middle">30 min</text>
+  <text class="m" x="650" y="162" text-anchor="middle">40 min</text>
+
+  <text class="l" x="158" y="76" text-anchor="end">stock engine</text>
+  <rect class="stock" x="170" y="56" width="459" height="30" rx="3"/>
+  <text class="v" x="637" y="76">38m17s</text>
+
+  <text class="l" x="158" y="124" text-anchor="end">patched engine</text>
+  <rect class="patched" x="170" y="104" width="119" height="30" rx="3"/>
+  <text class="v" x="297" y="124">9m56s, 3.85x faster</text>
+
+  <text class="m" x="20" y="188">Recoil 2026.07.04, same host. Both builds produce byte-identical replay files.</text>
+</svg>
