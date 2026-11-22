@@ -161,6 +161,9 @@ const GAMES_ID_WALK_MIN = 4;
 
 const LAVA_WINDOW_SEC = 24 * 3600;
 const LAVA_COOLDOWN_SEC = 300;
+/** How many mirrored ids gamesUnknown remembers: a few times the ~300 games
+ * the sync's 2h window (GAMES_MAX_PAGES x GAMES_PAGE_LIMIT) can hold. */
+const KNOWN_GAMES_MAX = 2000;
 
 /** The lava RETRY lookup (lavaRetryCandidate): how far back a failed job
  * still counts, and how long the lookup rests on an empty answer.
@@ -700,6 +703,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * every write to the row, so like sampleCounts it is a cache of something
    * the table already knows and costs nothing to lose. */
   private mapsCache: { at: number; maps: string[] } | null = null;
+  /** Ids gamesUnknown has found in the mirror (or gamesInsert has written),
+   * newest last. A mirror row is never deleted, so a remembered id stays
+   * true; the games sync hands over the same ~2h window of ids every minute,
+   * and remembering them is what keeps that tick from re-reading ~200 rows to
+   * learn nothing. Bounded (KNOWN_GAMES_MAX) and lost on eviction, after which
+   * the next tick simply reads them once again. */
+  private knownGames = new Set<string>();
 
   /** What each method has cost in SQLite rows since this instance started —
    * the live counterpart of tests/do/rowcost.test.ts, served by
@@ -1403,16 +1413,24 @@ export class ReplayIndex extends DurableObject<Env> {
     // when the mirror is behind), past SQLite's per-statement bind-param cap;
     // each chunk's IN is PK-index-backed, so the reads stay ~the id count.
     const CHUNK = 90;
-    const known = new Set<string>();
-    for (let i = 0; i < ids.length; i += CHUNK) {
-      const batch = ids.slice(i, i + CHUNK);
+    const ask = [...new Set(ids)].filter((id) => !this.knownGames.has(id));
+    for (let i = 0; i < ask.length; i += CHUNK) {
+      const batch = ask.slice(i, i + CHUNK);
       for (const r of this.ctx.storage.sql
         .exec(`SELECT id FROM games WHERE id IN (${batch.map(() => "?").join(",")})`, ...batch)
         .toArray()) {
-        known.add(r.id as string);
+        this.rememberGame(r.id as string);
       }
     }
-    return ids.filter((id) => !known.has(id));
+    return ids.filter((id) => !this.knownGames.has(id));
+  }
+
+  private rememberGame(id: string): void {
+    this.knownGames.delete(id);
+    this.knownGames.add(id);
+    if (this.knownGames.size > KNOWN_GAMES_MAX) {
+      this.knownGames.delete(this.knownGames.values().next().value as string);
+    }
   }
 
   /** gamesLavaPending lists the lava sync's candidates: the mirror's
@@ -1562,6 +1580,7 @@ export class ReplayIndex extends DurableObject<Env> {
       // indexing it (48 rows written per game) is what once spent the whole
       // write allowance; see the replay_settings note in SCHEMA_DDL.
       if (!owned) this.indexSettings(g.id, g.settings);
+      this.rememberGame(g.id);
     }
     return games.length;
   }

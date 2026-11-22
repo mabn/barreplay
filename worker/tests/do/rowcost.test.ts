@@ -320,6 +320,11 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     for (let n = 1; n <= 100; n++) probe.push(`u${String(n).padStart(6, "0")}`); // new
     index.gamesUnknown(probe);
     out.gamesUnknown = tally();
+    // ...and the NEXT minute's tick, which hands over the same window plus a
+    // game or two: the ids already found in the mirror are remembered, so
+    // only the ids not seen there yet are looked up.
+    index.gamesUnknown([...probe, "u000101"]);
+    out.gamesUnknownNext = tally();
 
     // The lava sync's candidate query (trigger + hourly, never per-minute):
     // driven by replay_settings' (flag, replay_id) index, so its cost is the
@@ -385,6 +390,7 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // gamesUnknown over a 200-id window: a seek per id (the 100 that exist), not
   // a scan of the 5000-row mirror — chunked so it also fits the bind cap.
   expect(costs.gamesUnknown, report).toBeLessThan(400);
+  expect(costs.gamesUnknownNext, report).toBeLessThan(150);
   // A seek into the settings index for the lava flag + a row per lava game —
   // never a scan of the 5000-row mirror or of the 5000 'ranked' entries.
   expect(costs.gamesLavaPending, report).toBeLessThan(50);
