@@ -17,7 +17,7 @@
 // one has appeared (or an index has stopped being used), not that something
 // got a little slower.
 import { env, runInDurableObject } from "cloudflare:test";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { emptyFilter } from "../../src/worker/replayentry";
 
 import type { ReplayIndex } from "../../src/worker/replayindex";
@@ -429,10 +429,22 @@ test("the recurring writes stay a handful of rows", async () => {
     ]);
     out.gamesInsert = written();
 
-    index.jobAnnounce("wg1", "resim", "wj1");
+    index.jobAnnounce("wj1", "wg1", "resim");
     out.jobAnnounce = written();
-    index.jobUpdate("wj1", "processing", null, null, { state: "simulating", percent: 10 });
-    out.healthcheck = written();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(NOW * 1000);
+    try {
+      index.jobUpdate("wj1", "processing", null, null, { state: "simulating", percent: 10 });
+      out.healthcheck = written();
+      // The NEXT beat, ten seconds on: the steady state, ~8640 a day per
+      // running job. Only updated_unix and progress move, so no index that
+      // names neither may be rewritten — jobs_state and jobs_kind used to end
+      // in updated_unix and cost four index writes a beat between them.
+      clock.mockReturnValue((NOW + 10) * 1000);
+      index.jobUpdate("wj1", "processing", null, null, { state: "simulating", percent: 11 });
+      out.healthcheckNext = written();
+    } finally {
+      clock.mockRestore();
+    }
     return out;
   });
 
@@ -441,8 +453,11 @@ test("the recurring writes stay a handful of rows", async () => {
   // settings rows. The roster is NOT indexed — at 16 names x 3 rows each it
   // was the whole budget.
   expect(costs.gamesInsert, report).toBeLessThan(20);
-  // A daemon heartbeat: the job row update + one sample row.
-  expect(costs.healthcheck, report).toBeLessThan(15);
+  // The FIRST beat moves the job into processing and puts the game into the
+  // catalog as a placeholder row (with its index entries): once per job.
+  expect(costs.healthcheck, report).toBeLessThan(30);
+  // The steady beat: the jobs row and one sample row (plus its key).
+  expect(costs.healthcheckNext, report).toBeLessThan(4);
 });
 
 /** The lava RETRY lookup (jobsOffer -> lavaRetryCandidate) walks FAILED jobs

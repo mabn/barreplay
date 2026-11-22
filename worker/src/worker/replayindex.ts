@@ -313,7 +313,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -342,7 +342,13 @@ const SCHEMA_DDL = `
         created_unix INTEGER NOT NULL,
         updated_unix INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state, updated_unix);
+      -- (state) alone, NOT (state, updated_unix): a running job's
+      -- updated_unix moves with every 10-second heartbeat, and an index ending
+      -- in it is rewritten on each one — with jobs_kind's twin, four of the six
+      -- rows a beat wrote, and the beats were most of the daily write budget.
+      -- Everything that seeks by state reads a small in-flight set whole, and
+      -- the one range over updated_unix (jobSamplePrune) walks jobs_settled.
+      CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 
       -- Every healthcheck a running job sent, kept as history. The jobs row's
       -- progress column holds only the newest reading and is cleared when the
@@ -479,7 +485,10 @@ const INDEX_DDL = `
       CREATE INDEX IF NOT EXISTS replays_map   ON replays (map);
       CREATE INDEX IF NOT EXISTS replays_count ON replays (player_count);
       CREATE INDEX IF NOT EXISTS replays_dur   ON replays (duration_sec);
-      CREATE INDEX IF NOT EXISTS jobs_kind     ON jobs (kind, state, updated_unix);
+      CREATE INDEX IF NOT EXISTS jobs_by_kind  ON jobs (kind, state);
+      -- Their predecessors ended in updated_unix (see jobs_by_state).
+      DROP INDEX IF EXISTS jobs_state;
+      DROP INDEX IF EXISTS jobs_kind;
       -- Every catalog read asks "is a job processing this game", once per row.
       CREATE INDEX IF NOT EXISTS jobs_game     ON jobs (game_id, state);
 
@@ -2119,7 +2128,7 @@ export class ReplayIndex extends DurableObject<Env> {
    *   bounds what the open route can cost: a script asking for every game
    *   fills the cap and is refused past it, instead of queueing hours of
    *   engine time per minute (it happened to /api/admin/resim when that was
-   *   open). Counted over the pending rows of jobs_state, so the read is the
+   *   open). Counted over the pending rows of jobs_by_state, so the read is the
    *   size of the waiting queue, never of the table.
    *
    * A game already queued or running hands back that job ("duplicate"), so
@@ -2246,7 +2255,7 @@ export class ReplayIndex extends DurableObject<Env> {
   jobsPending(kind: JobKind): IngestJob[] {
     const window = kind === "resim" ? STALE_PROCESSING_RESIM_SEC : STALE_PROCESSING_SEC;
     const staleBefore = Math.floor(Date.now() / 1000) - window;
-    // TWO branches over jobs_kind (kind, state, updated_unix) rather than one
+    // TWO branches over jobs_by_kind (kind, state) rather than one
     // `state = 'pending' OR (state = 'processing' AND ...)`: the OR hides the
     // state column and SQLite answers it by reading the whole jobs table —
     // which two daemons poll every ten seconds, over a table that gains a row
@@ -2664,7 +2673,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * return one, on a 451-job table that only ever grows (the ROW BUDGET
    * pattern this codebase keeps refusing, this time on an admin click instead
    * of a timer). Split at exactly the CASE's boundary, each half is index
-   * work: the in-flight jobs come off jobs_state and are read IN FULL (bounded
+   * work: the in-flight jobs come off jobs_by_state and are read IN FULL (bounded
    * by work actually in flight, which drains — never by the table, which
    * doesn't), the settled ones walk the jobs_settled partial index in display
    * order and stop at the page edge, and the joins run only for rows actually
@@ -2866,15 +2875,17 @@ export class ReplayIndex extends DurableObject<Env> {
     this.metaPut("samples_pruned_before", before);
     if (before <= from) return 0;
     const cur = this.ctx.storage.sql.exec(
-      // One branch per terminal state so both are seeks on jobs_state
-      // (state, updated_unix); `state IN (...)` over a range is not.
+      // A range walk of jobs_settled (updated_unix over the settled rows),
+      // pinned: left alone the planner seeks jobs_by_state for the IN and
+      // reads every finished job. The partial clause is repeated TEXTUALLY,
+      // which is what makes the index usable at all. Only finished jobs (done/error): a disabled job that
+      // never ran is settled too, but it has no samples worth dropping early.
       `DELETE FROM job_samples WHERE job_id IN (
-         SELECT id FROM jobs WHERE state = 'done'  AND updated_unix >= ? AND updated_unix < ?
-         UNION ALL
-         SELECT id FROM jobs WHERE state = 'error' AND updated_unix >= ? AND updated_unix < ?
+         SELECT id FROM jobs INDEXED BY jobs_settled
+          WHERE (state NOT IN ('pending', 'processing') OR disabled != 0)
+            AND updated_unix >= ? AND updated_unix < ?
+            AND state IN ('done', 'error')
        )`,
-      from,
-      before,
       from,
       before,
     );
@@ -2955,7 +2966,23 @@ export class ReplayIndex extends DurableObject<Env> {
     // report is still taken: the work happened, and what came of it is worth
     // recording even though nobody wanted it any more.
     if (state === "processing" && this.jobIsDisabled(id)) return true;
-    const cur = this.ctx.storage.sql.exec(
+    // A HEARTBEAT (processing -> processing) writes only the columns that
+    // move. SQLite rewrites every index holding a column named in the SET
+    // list, changed or not, so the full update below — which names state —
+    // also rewrote jobs_by_state, jobs_by_kind and jobs_game on every beat:
+    // four rows written where one is the row. Beats are ~8640 a day per
+    // running job, which made them most of the daily write budget.
+    const beat = state === "processing" && error === null && errorKind === null
+      ? this.ctx.storage.sql.exec(
+          `UPDATE jobs SET stats = COALESCE(?, stats), progress = COALESCE(?, progress), updated_unix = ?
+           WHERE id = ? AND state = 'processing' AND error IS NULL AND error_kind IS NULL`,
+          stats === null ? null : JSON.stringify(stats),
+          progress === null ? null : JSON.stringify(progress),
+          now,
+          id,
+        ).rowsWritten
+      : 0;
+    const cur = beat > 0 ? { rowsWritten: beat } : this.ctx.storage.sql.exec(
       `UPDATE jobs SET state = ?, error = ?, error_kind = ?, stats = COALESCE(?, stats),
               progress = CASE WHEN ? = 'processing' THEN COALESCE(?, progress) ELSE NULL END,
               updated_unix = ?
@@ -3027,8 +3054,8 @@ export class ReplayIndex extends DurableObject<Env> {
 
   /** appJobsExpire fails the "app" jobs that stopped reporting (see
    * APP_JOB_STALE_SEC) and takes their games' placeholders out of the
-   * catalog. Called from the cron. A seek on jobs_kind (kind, state,
-   * updated_unix) bounded by the app jobs in flight. Returns how many. */
+   * catalog. Called from the cron. A seek on jobs_by_kind (kind, state)
+   * bounded by the app jobs in flight. Returns how many. */
   appJobsExpire(now = Math.floor(Date.now() / 1000)): number {
     const stale = this.ctx.storage.sql
       .exec(
