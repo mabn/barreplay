@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 300" width="1220" height="300" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="t">How a game becomes a replay</title>
+  <desc id="d">Two paths re-simulate a BAR demo into a .brp: bringest -resim on an engine host, or FogOfWar.exe on a player's PC, whose upload the website queues for bringest to publish. Every .brp goes to the R2 bucket and is played in the browser.</desc>
+  <style>
+    :root {
+      --bg: #ffffff; --ink: #1f2328; --muted: #59636e; --line: #6e7781;
+      --ext: #f6f8fa; --ext-b: #afb8c1;
+      --go: #eef6ff; --go-b: #54aeff; --cf: #fff4e5; --cf-b: #f0a040;
+      --rd: #eefbf1; --rd-b: #4ac26b; --brp: #fbefff; --brp-b: #c297ff;
+      --lane: #f6f8fa;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --ink: #e6edf3; --muted: #9198a1; --line: #8b949e;
+        --ext: #161b22; --ext-b: #484f58;
+        --go: #0c2d4d; --go-b: #388bfd; --cf: #3a2410; --cf-b: #d18616;
+        --rd: #0f2e1b; --rd-b: #3fb950; --brp: #2a1745; --brp-b: #a371f7;
+        --lane: #161b22;
+      }
+    }
+    .bg { fill: var(--bg); }
+    .lane { fill: var(--lane); }
+    .lt { fill: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .06em; }
+    .ext { fill: var(--ext); stroke: var(--ext-b); stroke-width: 1.5; }
+    .go { fill: var(--go); stroke: var(--go-b); stroke-width: 1.5; }
+    .cf { fill: var(--cf); stroke: var(--cf-b); stroke-width: 1.5; }
+    .rd { fill: var(--rd); stroke: var(--rd-b); stroke-width: 1.5; }
+    .brp { fill: var(--brp); stroke: var(--brp-b); stroke-width: 1.5; }
+    .h { fill: var(--ink); font-size: 15px; font-weight: 700; }
+    .b { fill: var(--muted); font-size: 13px; }
+    .ar { fill: none; stroke: var(--line); stroke-width: 1.6; }
+    .al { fill: var(--muted); font-size: 12px; }
+    .head { fill: var(--line); }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1220" height="300"/>
+
+  <!-- BAR demo, shared by both paths -->
+  <rect class="ext" x="20" y="115" width="170" height="70" rx="10"/>
+  <text class="h" x="36" y="143">BAR demo</text>
+  <text class="b" x="36" y="165">.sdfz, inputs only</text>
+
+  <!-- lanes -->
+  <rect class="lane" x="230" y="20" width="630" height="118" rx="12"/>
+  <text class="lt" x="244" y="40">RE-SIM ON AN ENGINE HOST</text>
+  <rect class="lane" x="230" y="162" width="630" height="118" rx="12"/>
+  <text class="lt" x="244" y="182">RE-SIM ON A PLAYER'S PC</text>
+
+  <!-- lane 1 -->
+  <rect class="go" x="250" y="52" width="586" height="70" rx="10"/>
+  <text class="h" x="266" y="80">bringest -resim</text>
+  <text class="b" x="266" y="102">replays the demo in the engine and publishes the result</text>
+
+  <!-- lane 2 -->
+  <rect class="go" x="250" y="194" width="170" height="70" rx="10"/>
+  <text class="h" x="266" y="222">FogOfWar.exe</text>
+  <text class="b" x="266" y="244">replays the demo</text>
+
+  <rect class="cf" x="458" y="194" width="170" height="70" rx="10"/>
+  <text class="h" x="474" y="222">Website</text>
+  <text class="b" x="474" y="244">queues the upload</text>
+
+  <rect class="go" x="666" y="194" width="170" height="70" rx="10"/>
+  <text class="h" x="682" y="222">bringest</text>
+  <text class="b" x="682" y="244">publishes it</text>
+
+  <path class="ar" d="M420,229 H456" marker-end="url(#a)"/>
+  <path class="ar" d="M628,229 H664" marker-end="url(#a)"/>
+
+  <!-- demo into both lanes -->
+  <path class="ar" d="M190,140 H215 V87 H248" marker-end="url(#a)"/>
+  <path class="ar" d="M190,160 H215 V229 H248" marker-end="url(#a)"/>
+
+  <!-- both into .brp -->
+  <rect class="brp" x="900" y="115" width="110" height="70" rx="10"/>
+  <text class="h" x="918" y="143">.brp</text>
+  <text class="b" x="918" y="165">the replay</text>
+
+  <path class="ar" d="M836,87 H875 V140 H898" marker-end="url(#a)"/>
+  <path class="ar" d="M836,229 H875 V160 H898" marker-end="url(#a)"/>
+
+  <!-- publish and view -->
+  <rect class="cf" x="1050" y="40" width="150" height="70" rx="10"/>
+  <text class="h" x="1066" y="68">R2 bucket</text>
+  <text class="b" x="1066" y="90">replay + summary</text>
+
+  <rect class="rd" x="1050" y="190" width="150" height="70" rx="10"/>
+  <text class="h" x="1066" y="218">Browser</text>
+  <text class="b" x="1066" y="240">plays it</text>
+
+  <path class="ar" d="M1010,150 H1030 V75 H1048" marker-end="url(#a)"/>
+  <path class="ar" d="M1125,110 V188" marker-end="url(#a)"/>
+</svg>

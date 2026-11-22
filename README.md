@@ -1,8 +1,7 @@
 # barreplay
 
 **Live site: <https://replay.fogofwar.dev>.** Browse and play back Beyond All
-Reason games, and read a summary of each one. To add games yourself, download
-the [FogOfWar app](https://replay.fogofwar.dev/setup).
+Reason games, and read a summary of each one.
 
 barreplay recovers **unit positions** from Beyond All Reason (BAR) games and
 plays them back in the browser: a top-down map with every unit, its health,
@@ -27,7 +26,11 @@ from Teiserver, and passes lava games to
 [lavabalance](https://lavabalance.fogofwar.dev), a sibling site that keeps
 ratings for that mode.
 
-**Re-simulation turns a game into a `.brp`.** Three things can run one:
+**Re-simulation turns a game into a `.brp`.** There are two paths:
+
+![How a game becomes a replay](docs/dataflow.svg)
+
+Three things can run a re-simulation:
 
 - **`bringest -resim`**, a daemon on a Linux machine with the engine. It asks
   the worker for work: games an admin queued, games a visitor asked for from
