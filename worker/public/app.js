@@ -5852,7 +5852,6 @@ let queueSupported = true; // cleared by a 404: a backend won't grow the route
 // When set, the queue shows only the jobs of one FogOfWar.exe install (an
 // "Install" line in a row's details sets it; the pager's "show all" clears it).
 let queueInstall = null;
-const queueRelisted = new Set(); // games we already re-listed the catalog for
 const queueOpen = new Set();     // job ids whose processing details are expanded
 // Whether the game-time column shows when each game STARTED or ENDED. A
 // viewing preference, kept per browser (best-effort), not in the URL.
@@ -5903,23 +5902,10 @@ async function refreshQueue() {
   queueReadAt = Date.now();
   renderQueue();
 
-  // The Game cells link to the catalog, which loads lazily (ensureHomeData) and
-  // may not be here yet — every job would look unregistered. Its arrival, not a
-  // second fetch, is what fills those links in; ensureHomeData is memoized, so
-  // this just waits on the load showHome already started.
-  if (!homeDataLoaded) {
-    ensureHomeData().then(() => renderQueue());
-    return;
-  }
-  // A job that finished AFTER that load published a replay the list has never
-  // seen, so re-list once per such game (the set keeps a never-registered
-  // upload from re-listing on every read).
-  const fresh = page.jobs.filter(j => j.state === 'done' &&
-    !queueRelisted.has(j.gameId) && !replayList.some(e => e.id === j.gameId));
-  if (fresh.length) {
-    fresh.forEach(j => queueRelisted.add(j.gameId));
-    reloadList().then(() => renderQueue()); // now with its replay link
-  }
+  // No catalog read here: each row says itself whether its game is published
+  // (QueueJob.published). This used to wait for the replay list and then
+  // re-read it whenever a finished job's game was not on its first page —
+  // nearly every landing-page load, so /api/replays went out twice.
 }
 
 // ---- a job's processing record ---------------------------------------------
