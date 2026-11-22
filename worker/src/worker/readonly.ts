@@ -3,7 +3,7 @@
 // A local worker cannot bind production's Durable Object directly — a DO
 // binding only ever reaches objects of a DEPLOYED script, and remote bindings
 // do not cover DOs. Cloudflare's answer is a proxy: a small Worker deployed in
-// the same account (src/prodproxy/index.ts, wrangler.prodproxy.jsonc) that
+// the same account (src/prodproxy/index.ts, cloudflare.config.ts mode prodproxy) that
 // binds the production DO (by script_name) and bucket, and that the local
 // worker reaches through a REMOTE SERVICE BINDING. This file is both halves of
 // the wire between them:

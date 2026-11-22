@@ -8,15 +8,20 @@
 //     (https://<account>.r2.cloudflarestorage.com) with aws4fetch signing,
 //     many in flight. One process, no per-object startup cost: a whole replay
 //     uploads in a couple of seconds.
-//   - wrangler (fallback, and always for --local): `wrangler r2 object put`
-//     per object, parallelized. Each spawn pays ~2s of node+wrangler startup,
-//     which is why serial uploads felt slow; concurrency hides most of it.
-//     The local dev simulator stays SERIAL: concurrent wrangler processes
-//     against the same miniflare state flake with "put: Unspecified error"
-//     (workerd r2-rpc 500s) — observed at concurrency 2.
+//   - cf (--local only): `cf r2 objects put --local` per object, into the
+//     local state `cf dev` serves (.cloudflare/state). SERIAL: concurrent CLI
+//     processes against the same simulator state flaked with 500s when this
+//     was wrangler, and nothing is gained by racing a local disk.
 //
-// The account id comes from CLOUDFLARE_ACCOUNT_ID or wrangler.jsonc. Callers
-// pass objects as bytes or file paths; file paths are only read when needed.
+// Real R2 has NO CLI fallback any more. Wrangler's `r2 object put` was one,
+// but `cf r2 objects put` (the Cloudflare REST endpoint) cannot set
+// Cache-Control, and an object stored without it is uncacheable at the
+// cdn-bar edge — every read a billed GetObject. So without R2 credentials a
+// real upload is refused, not quietly published uncacheable.
+//
+// The account id comes from CLOUDFLARE_ACCOUNT_ID or cloudflare.config.ts.
+// Callers pass objects as bytes or file paths; file paths are only read when
+// needed.
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,9 +38,9 @@ export interface R2Object {
 
 export interface UploadOptions {
   bucket: string;
-  /** Target the local wrangler dev simulator instead of real R2. */
+  /** Target the local `cf dev` simulator instead of real R2. */
   local: boolean;
-  /** Max uploads in flight; defaults per transport (16 S3, 8 wrangler, 1 local). */
+  /** Max uploads in flight; defaults per transport (16 S3, 1 local). */
   concurrency?: number;
   /** Progress line per object (defaults to stderr). */
   log?: (line: string) => void;
@@ -46,7 +51,7 @@ export interface UploadOptions {
  * the object the Worker's live listing keys on, so a replay can never appear
  * in the picker before the rest of its files exist. Within a wave, order is
  * start order subject to concurrency. Returns the transport used. */
-export async function uploadObjects(objects: R2Object[], opts: UploadOptions): Promise<"s3" | "wrangler"> {
+export async function uploadObjects(objects: R2Object[], opts: UploadOptions): Promise<"s3" | "cf --local"> {
   const log = opts.log ?? ((line: string) => console.error(line));
   const heads = objects.filter((o) => o.key.endsWith(".brw"));
   const bodies = objects.filter((o) => !o.key.endsWith(".brw"));
@@ -62,7 +67,14 @@ export async function uploadObjects(objects: R2Object[], opts: UploadOptions): P
     return "s3";
   }
 
-  // wrangler path: bodies must be files on disk.
+  if (!opts.local) {
+    throw new Error(
+      "R2 upload needs R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY (Cloudflare dash -> R2 -> Manage R2 API Tokens): " +
+        "the cf CLI cannot store the Cache-Control the CDN needs, so there is no CLI fallback",
+    );
+  }
+
+  // cf --local path: bodies must be files on disk.
   const tmp = mkdtempSync(join(tmpdir(), "r2put-"));
   try {
     const put = async (o: R2Object) => {
@@ -71,26 +83,20 @@ export async function uploadObjects(objects: R2Object[], opts: UploadOptions): P
         file = join(tmp, o.key.split("/").join("_"));
         writeFileSync(file, o.bytes!);
       }
-      // Explicit --remote/--local: wrangler's own default for `r2 object put`
-      // is LOCAL, so a bare put would silently write to disk, not R2.
-      // --content-type/--cache-control keep this transport's objects identical
-      // to the S3 one's; the bucket is served directly at its own hostname,
-      // where stored metadata is all a reader gets.
       const meta = objectHTTPMeta(o.key);
-      const args = ["wrangler", "r2", "object", "put", `${opts.bucket}/${o.key}`, "--file", file,
-        "--content-type", meta.contentType, "--cache-control", meta.cacheControl,
-        opts.local ? "--local" : "--remote"];
+      const args = ["cf", "r2", "objects", "put", o.key, "--bucket-name", opts.bucket, "--file", file,
+        "--content-type", meta.contentType, "--local", "--quiet"];
       try {
         await run("npx", args);
       } catch {
-        await run("npx", args); // one retry: transient network / simulator hiccups
+        await run("npx", args); // one retry: transient simulator hiccups
       }
       log(`  put ${o.key}`);
     };
-    const limit = opts.concurrency ?? (opts.local ? 1 : 8);
+    const limit = opts.concurrency ?? 1;
     await pool(bodies, limit, put);
     await pool(heads, limit, put);
-    return "wrangler";
+    return "cf --local";
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -118,14 +124,14 @@ function objectHTTPMeta(key: string): { contentType: string; cacheControl: strin
 }
 
 // s3Client returns a signing client when R2 API credentials and an account id
-// are available, else null (callers fall back to wrangler).
+// are available, else null.
 function s3Client(): { aws: AwsClient; endpoint: string } | null {
   const id = process.env.R2_ACCESS_KEY_ID;
   const secret = process.env.R2_SECRET_ACCESS_KEY;
   if (!id || !secret) return null;
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? accountFromWranglerConfig();
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID ?? configConst("ACCOUNT_ID");
   if (!account) {
-    console.error("warning: R2 credentials set but no account id (CLOUDFLARE_ACCOUNT_ID or wrangler.jsonc); using wrangler");
+    console.error("warning: R2 credentials set but no account id (CLOUDFLARE_ACCOUNT_ID or cloudflare.config.ts)");
     return null;
   }
   return {
@@ -134,10 +140,14 @@ function s3Client(): { aws: AwsClient; endpoint: string } | null {
   };
 }
 
-function accountFromWranglerConfig(): string | null {
+/** configConst reads `const NAME = "value";` out of cloudflare.config.ts —
+ * the account id and bucket name live there once, for this, the Worker and
+ * the Go publishers (internal/packer/r2.go reads the same lines). Read as text
+ * rather than imported: evaluating the config would need cf's loader. */
+export function configConst(name: string): string | null {
   try {
-    const jsonc = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-    return /"account_id"\s*:\s*"([0-9a-f]+)"/.exec(jsonc)?.[1] ?? null;
+    const ts = readFileSync(new URL("../cloudflare.config.ts", import.meta.url), "utf8");
+    return new RegExp(`^const ${name} = "([^"]+)";`, "m").exec(ts)?.[1] ?? null;
   } catch {
     return null;
   }
@@ -190,6 +200,6 @@ function run(cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["ignore", "ignore", "inherit"] });
     child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`${args.slice(0, 4).join(" ")} exited ${code}`))));
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`${args.slice(0, 5).join(" ")} exited ${code}`))));
   });
 }

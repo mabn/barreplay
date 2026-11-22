@@ -166,7 +166,7 @@ func putIfAbsent(ctx context.Context, o UploadOptions, native *R2Client, key str
 			if ctx.Err() != nil {
 				return false, true, err
 			}
-			// Dev server down: uploadDir falls back to wrangler for the rest,
+			// Dev server down: uploadDir falls back to cf --local for the rest,
 			// and this object goes with it.
 			fmt.Fprintf(os.Stderr, "conditional PUT via the dev worker failed (%v); uploading without it\n", err)
 			return false, false, nil

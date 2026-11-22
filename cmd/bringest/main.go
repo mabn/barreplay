@@ -279,9 +279,9 @@ func run() int {
 
 // loadEnvFile seeds the environment from ./.env. It reports what it did
 // because the failure it exists to prevent is silent: without the R2
-// credentials the upload falls back to the worker's wrangler tooling, which
-// fails with an unrelated-looking CLOUDFLARE_API_TOKEN error, so "did my
-// secrets actually get loaded?" must be answerable from the log alone.
+// credentials every -upload r2 publish is refused (packer.ErrNoR2Credentials),
+// so "did my secrets actually get loaded?" must be answerable from the log
+// alone.
 // Names only — never values, which are secrets.
 // It returns its report rather than printing it: the log file that should also
 // receive these lines is named by a flag, and the flags cannot be parsed until
@@ -298,7 +298,7 @@ func loadEnvFile() []string {
 	}
 	if os.Getenv("R2_ACCESS_KEY_ID") == "" || os.Getenv("R2_SECRET_ACCESS_KEY") == "" {
 		msgs = append(msgs, fmt.Sprintf("bringest: warning: R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY not set"+
-			" (no %s in %s?); -upload r2 will fall back to the worker's wrangler tooling",
+			" (no %s in %s?); -upload r2 publishes will be refused",
 			envPath, mustGetwd()))
 	}
 	return msgs

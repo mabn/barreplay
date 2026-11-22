@@ -5,7 +5,7 @@
 // captures into it, then sync the whole directory up to R2.
 //
 //	barreplay-static -out ./static ./snapshots/*.brp
-//	# then: wrangler r2 object put / rclone sync ./static -> the bucket
+//	# then: rclone sync ./static -> the bucket (with R2 API credentials)
 package main
 
 import (

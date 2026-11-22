@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -45,6 +46,7 @@ function assetRev(): Plugin {
     // index.html resolves as a real static asset (served by the asset layer,
     // not the Worker).
     generateBundle() {
+      if (this.environment.name !== "client") return; // not into the Worker's bundle
       const rev = revOf();
       for (const s of SUBRESOURCES) {
         this.emitFile({ type: "asset", fileName: s.name(rev), source: readAsset(s.src) });
@@ -71,11 +73,15 @@ function assetRev(): Plugin {
 // which is the escape hatch if the bucket hostname ever misbehaves).
 const DATA_BASE = process.env.DATA_BASE ?? "https://cdn-bar.fogofwar.dev";
 
-// BARREPLAY_PROD=1 (`npm run dev:prod`) runs the same app against PRODUCTION
-// data, read-only, through the deployed proxy Worker: wrangler.proddev.jsonc
-// in place of wrangler.jsonc (see src/worker/readonly.ts), and the production
-// data origin. Only `vite dev` honours it; a build always uses wrangler.jsonc.
-const PROD_DEV = process.env.BARREPLAY_PROD === "1";
+// The proddev mode (`npm run dev:prod`, i.e. `cf dev --mode proddev`) runs the
+// same app against PRODUCTION data, read-only, through the deployed proxy
+// Worker: cloudflare.config.ts's proddev Worker (see src/worker/readonly.ts),
+// and the production data origin.
+const PROD_DEV_MODE = "proddev";
+
+// The read-only production proxy itself (`cf deploy --mode prodproxy`): a bare
+// Worker, no viewer.
+const PROD_PROXY_MODE = "prodproxy";
 
 // dataBase stamps index.html's __DATA_ORIGIN__ placeholder. Only a BUILD gets the real
 // origin: under `vite dev` the local worker serves the preview bucket's pieces
@@ -83,10 +89,12 @@ const PROD_DEV = process.env.BARREPLAY_PROD === "1";
 // production data against a locally-edited UI.
 function dataBase(): Plugin {
   let isBuild = false;
+  let prodDev = false;
   return {
     name: "data-base",
     configResolved(cfg) {
       isBuild = cfg.command === "build";
+      prodDev = cfg.mode === PROD_DEV_MODE;
     },
     transformIndexHtml(html) {
       // `npm run dev:prod` reads production on purpose, so it takes the real
@@ -94,7 +102,7 @@ function dataBase(): Plugin {
       // as in production, instead of being streamed through the read-only
       // proxy over the remote binding (which dropped connections on the big
       // .brp reads). The bucket's CORS policy allows the dev origins on 5173.
-      return html.replaceAll("__DATA_ORIGIN__", isBuild || PROD_DEV ? DATA_BASE : "");
+      return html.replaceAll("__DATA_ORIGIN__", isBuild || prodDev ? DATA_BASE : "");
     },
   };
 }
@@ -130,7 +138,7 @@ const summaryName = (code: string) => `summary.${createHash("sha256").update(cod
 // change on their side. /embed/summary.js is the one stable name: a two-line
 // module, served no-cache, that re-exports the fingerprinted bundle beside it
 // (embed/summary.<rev>.js, immutable). Both live under /embed/, which
-// wrangler.jsonc hands to the asset layer so public/_headers can give them
+// cloudflare.config.ts hands to the asset layer so public/_headers can give them
 // their CORS and cache rules (a cross-origin module import needs the former).
 const EMBED_LOADER = "embed/summary.js";
 const embedLoader = (bundle: string) =>
@@ -155,6 +163,7 @@ function summaryBundle(): Plugin {
       return html.replaceAll("__SUMMARY_MODULE__", "/" + summaryName(built));
     },
     async generateBundle() {
+      if (this.environment.name !== "client") return; // not into the Worker's bundle
       built ??= await bundleSummary();
       this.emitFile({ type: "asset", fileName: summaryName(built), source: built });
       embed ??= await bundleSummary("embed.ts");
@@ -182,15 +191,60 @@ function summaryBundle(): Plugin {
   };
 }
 
-// The Cloudflare plugin runs the Worker (src/worker/index.ts, per wrangler.jsonc) inside
-// the real workerd runtime during `vite dev`, and builds both the client bundle and the
-// Worker on `vite build`. No React/JSX plugin: the UI is plain TypeScript + Canvas/DOM.
+// syncAssets copies the vendored icons and the uploader widget into public/
+// (tools/sync-assets.mjs; the copies are gitignored) before anything serves or
+// builds public/. It is a plugin rather than an npm pre-script so that a bare
+// `cf dev`, `cf build` or `cf deploy` — which run Vite directly, never the npm
+// scripts — still ships the icons: without it a fresh clone deploys a viewer
+// whose every /icons/* request 404s.
+function syncAssets(): Plugin {
+  let done = false;
+  return {
+    name: "sync-assets",
+    config() {
+      if (done) return;
+      done = true;
+      execFileSync(process.execPath, [fileURLToPath(new URL("./tools/sync-assets.mjs", import.meta.url))], { stdio: "inherit" });
+    },
+  };
+}
 
-export default defineConfig(({ command }) => ({
-  plugins: [
-    assetRev(),
-    dataBase(),
-    summaryBundle(),
-    cloudflare(PROD_DEV && command === "serve" ? { configPath: "./wrangler.proddev.jsonc" } : {}),
-  ],
-}));
+// The read-only proxy (`--mode prodproxy`) is a bare Worker: it serves no
+// page, so it must not build or upload the viewer. The plugin builds a client
+// whenever index.html or public/ exists in the root (both do, they are the
+// viewer's) and offers no switch, so this marks the client environment built
+// before the plugin's own buildApp hook runs: only the Worker is built and
+// nothing lands in the assets output. The Vite root must stay this directory,
+// since that is where the plugin reads cloudflare.config.ts.
+function noClientBuild(): Plugin {
+  return {
+    name: "no-client-build",
+    buildApp: {
+      order: "pre",
+      async handler(builder) {
+        builder.environments.client.isBuilt = true;
+      },
+    },
+  };
+}
+const PROXY_BUILD = { publicDir: false as const, plugins: [noClientBuild(), cloudflare()] };
+
+// The Cloudflare plugin (2.x, the one `cf` builds with) runs the Worker
+// configured in cloudflare.config.ts inside the real workerd runtime during
+// `vite dev`, and builds both the client bundle and the Worker on `vite build`
+// into .cloudflare/output, which `cf deploy` uploads. Which Worker is the MODE's
+// choice (see cloudflare.config.ts). No React/JSX plugin: the UI is plain
+// TypeScript + Canvas/DOM.
+export default defineConfig(({ mode }) =>
+  mode === PROD_PROXY_MODE
+    ? PROXY_BUILD
+    : {
+        plugins: [
+          syncAssets(),
+          assetRev(),
+          dataBase(),
+          summaryBundle(),
+          cloudflare(),
+        ],
+      },
+);

@@ -175,16 +175,18 @@ func TestPutRetriesOnceAndFailsClosed(t *testing.T) {
 	}
 }
 
-// Credentials + account/bucket resolution: env vars win, wrangler.jsonc is
-// the fallback, and missing pieces mean "use the node tooling" (nil).
+// Credentials + account/bucket resolution: env vars win, the worker's
+// cloudflare.config.ts constants are the fallback, and missing pieces mean no
+// native client (nil).
 func TestR2ClientFromEnv(t *testing.T) {
 	dir := t.TempDir()
-	jsonc := `{
-  // comment to prove this is jsonc
-  "account_id": "abc123",
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "prod-bucket", "preview_bucket_name": "preview-bucket" }]
-}`
-	if err := os.WriteFile(filepath.Join(dir, "wrangler.jsonc"), []byte(jsonc), 0o644); err != nil {
+	config := `import { defineConfig } from "cf/config";
+// const ACCOUNT_ID = "not-this-commented-one";
+const ACCOUNT_ID = "abc123";
+const REPLAY_BUCKET = "prod-bucket";
+export default defineConfig({ accountId: ACCOUNT_ID });
+`
+	if err := os.WriteFile(filepath.Join(dir, "cloudflare.config.ts"), []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -194,14 +196,14 @@ func TestR2ClientFromEnv(t *testing.T) {
 	t.Setenv("R2_BUCKET", "")
 	t.Setenv("R2_ENDPOINT", "")
 	if c := r2ClientFromEnv(dir); c != nil {
-		t.Error("no credentials must mean nil (node-tooling fallback)")
+		t.Error("no credentials must mean nil")
 	}
 
 	t.Setenv("R2_ACCESS_KEY_ID", "id")
 	t.Setenv("R2_SECRET_ACCESS_KEY", "secret")
 	c := r2ClientFromEnv(dir)
 	if c == nil {
-		t.Fatal("credentials + wrangler.jsonc should build a client")
+		t.Fatal("credentials + cloudflare.config.ts should build a client")
 	}
 	if c.Endpoint != "https://abc123.r2.cloudflarestorage.com" || c.Bucket != "prod-bucket" {
 		t.Errorf("endpoint/bucket = %s / %s", c.Endpoint, c.Bucket)
@@ -209,7 +211,7 @@ func TestR2ClientFromEnv(t *testing.T) {
 
 	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "override")
 	t.Setenv("R2_BUCKET", "other-bucket")
-	c = r2ClientFromEnv(t.TempDir()) // no wrangler.jsonc needed when env is complete
+	c = r2ClientFromEnv(t.TempDir()) // no config file needed when env is complete
 	if c == nil || c.Endpoint != "https://override.r2.cloudflarestorage.com" || c.Bucket != "other-bucket" {
 		t.Errorf("env overrides not honored: %+v", c)
 	}
@@ -344,8 +346,37 @@ func TestUploadStaticLocalWorkerRoute(t *testing.T) {
 	}
 }
 
-// A local publish with no reachable dev worker falls back toward the wrangler
-// tooling (which surfaces the worker-project requirement).
+// An "r2" publish without R2 credentials is refused before anything is
+// packed into a bundle or sent: the only CLI left (cf) cannot store the
+// Cache-Control the CDN needs.
+func TestUploadStaticR2NeedsCredentials(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "somegameid.brepstream")
+	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brpPath, _, err := Pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("R2_ACCESS_KEY_ID", "")
+	t.Setenv("R2_SECRET_ACCESS_KEY", "")
+	err = UploadStatic(context.Background(), brpPath, UploadOptions{
+		Target:    "r2",
+		WorkerDir: dir,
+		IndexURL:  "http://127.0.0.1:1", // must never be reached
+		Rev:       "1a2b3c4d",
+	})
+	if !errors.Is(err, ErrNoR2Credentials) {
+		t.Fatalf("err = %v, want ErrNoR2Credentials", err)
+	}
+	if err := UploadPieces(context.Background(), UploadOptions{Target: "r2", WorkerDir: dir}, dir, "x"); !errors.Is(err, ErrNoR2Credentials) {
+		t.Fatalf("UploadPieces err = %v, want ErrNoR2Credentials", err)
+	}
+}
+
+// A local publish with no reachable dev worker falls back toward the cf
+// --local tooling (which surfaces the worker-project requirement).
 func TestUploadStaticLocalFallsBack(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "somegameid.brepstream")
@@ -365,7 +396,7 @@ func TestUploadStaticLocalFallsBack(t *testing.T) {
 		Rev:       "1a2b3c4d",
 	})
 	if err == nil || !strings.Contains(err.Error(), "worker project") {
-		t.Fatalf("err = %v, want the wrangler-fallback worker-project error", err)
+		t.Fatalf("err = %v, want the cf-fallback worker-project error", err)
 	}
 }
 

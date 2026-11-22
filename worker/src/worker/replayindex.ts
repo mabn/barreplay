@@ -455,7 +455,7 @@ const SCHEMA_DDL = `
       -- The teiserver web session behind the lobby poll (teiserver.ts): the
       -- cookie jar as JSON, exactly one row, so a cron tick reuses the
       -- Guardian token instead of logging in every minute. The CREDENTIALS
-      -- are not here — they stay wrangler secrets; this is only the session
+      -- are not here — they stay Worker secrets; this is only the session
       -- they buy, which teiserver invalidates on its own schedule.
       CREATE TABLE IF NOT EXISTS teiserver_session (
         id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -2487,11 +2487,14 @@ export class ReplayIndex extends DurableObject<Env> {
    *
    * THE WALK is jobs_failed, newest failure first, stopped at the window's
    * edge: its cost is the failures of two weeks (a few hundred) and a few
-   * seeks each, and it rests per memory size on the empty answer. */
+   * seeks each, and it rests per memory size on the empty answer. The index
+   * is NAMED (INDEXED BY) because SQLite never chose it: every runtime
+   * measured walked jobs_by_kind's (kind, state) entries — every failed
+   * re-sim ever, not two weeks of them — and sorted them. */
   private lavaRetryCandidate(now: number, memBytes: number): string | null {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id FROM jobs j JOIN games g ON g.id = j.game_id
+        `SELECT g.id AS id FROM jobs j INDEXED BY jobs_failed JOIN games g ON g.id = j.game_id
           WHERE j.state = 'error'
             AND j.created_unix >= ?
             AND j.kind = 'resim'

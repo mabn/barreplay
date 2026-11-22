@@ -2,13 +2,13 @@
 // (see src/worker/readonly.ts for the whole picture, and the README's
 // "Local development against production data").
 //
-// Deployed on its own (`npm run deploy:prodproxy`, wrangler.prodproxy.jsonc)
+// Deployed on its own (`npm run deploy:prodproxy`, cloudflare.config.ts mode prodproxy)
 // as the Worker "replay-prod-readonly". It binds production's ReplayIndex
 // Durable Object (script_name "replay") and the production bucket, and
 // answers only the reads handleReadOnly allows. It has NO public route — no
 // workers.dev hostname, no custom domain — so the only way in is a service
 // binding from this account, which is what a local dev server holding your
-// `wrangler login` uses.
+// `cf auth login` uses.
 import { handleReadOnly } from "../worker/readonly";
 
 interface ProxyEnv {

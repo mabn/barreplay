@@ -16,7 +16,7 @@ function fakeBundle(): string {
   const root = mkdtempSync(join(tmpdir(), "bundle-"));
   for (const f of [
     "index.json", // must never be uploaded
-    ".wrangler/state.sqlite", // must never be swept in
+    ".cloudflare/state/state.sqlite", // must never be swept in
     "replays/aaa.brw",
     "replays/aaa.keys",
     "replays/aaa.resources",
