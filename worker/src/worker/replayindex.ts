@@ -1174,7 +1174,13 @@ export class ReplayIndex extends DurableObject<Env> {
       for (const flag of filter.settings) {
         // One IN per flag, so the row must carry ALL of them (a single
         // `flag IN (...)` would match any one of them).
-        where.push(`id IN (SELECT replay_id FROM replay_settings WHERE flag = ?)`);
+        // A correlated EXISTS, never `id IN (SELECT ...)`: the IN list is
+        // something SQLite can DRIVE the query from, and it did — every row
+        // carrying the flag (for "ranked", nearly the whole catalog) was read,
+        // looked up and sorted, so a one-day `settings=ranked&from=&to=` asked
+        // by an outside scraper cost ~225k rows. As a per-row check it costs
+        // one seek on each row the date range or the start order hands it.
+        where.push(`EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = replays.id AND s.flag = ?)`);
         args.push(flag);
       }
     }
@@ -1191,9 +1197,30 @@ export class ReplayIndex extends DurableObject<Env> {
       window = `LIMIT ? OFFSET ?`;
       args.push(limit, offset !== undefined && offset > 0 ? offset : 0);
     }
+    // The page is chosen FIRST (the MATERIALIZED CTE), and the per-row
+    // lookups below run over its rows only. Written as one flat SELECT they
+    // ran for every row the query touched — every row a filter matched before
+    // the sort, every row an OFFSET stepped over — five reads each where two
+    // would do.
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
+        `WITH page AS MATERIALIZED (
+           SELECT * FROM replays
+           ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+           -- NULLs sort last here because SQL says so — NULL is smaller than
+           -- every value, so DESC puts them at the end — and NOT because of a
+           -- leading start_unix-IS-NULL term, which used to be written out and
+           -- said the same thing at a price: an EXPRESSION as the first sort key
+           -- disqualifies replays_start, so every listing sorted the whole table
+           -- in a temp b-tree and a LIMIT saved nothing. Measured over 3000 rows
+           -- asked for 50: 6000 rows read, against 101 with the index driving.
+           ORDER BY start_unix DESC, id
+           ${window}
+         )
+         SELECT replays.id AS id, rid, replays.start_unix AS start_unix, replays.duration_sec AS duration_sec,
+                replays.map AS map, replays.game_size AS game_size, size_bytes, replays.settings AS settings,
+                replays.players AS players, replays.player_count AS player_count, uploader_ally, uploads, view,
+                widget_version, widget_sha, widget_date, placeholder,
                 -- Both jobs subqueries are PINNED to the (game_id, state)
                 -- index: left to itself the planner answered the progress
                 -- subselect's ORDER BY from jobs_state instead, which reads
@@ -1206,19 +1233,9 @@ export class ReplayIndex extends DurableObject<Env> {
                 (SELECT j.progress FROM jobs j INDEXED BY jobs_game
                  WHERE j.game_id = replays.id AND j.state = 'processing'
                  ORDER BY j.updated_unix DESC LIMIT 1) AS processing_progress,
-                (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name,
-                (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
-         FROM replays
-         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-         -- NULLs sort last here because SQL says so — NULL is smaller than
-         -- every value, so DESC puts them at the end — and NOT because of a
-         -- leading start_unix-IS-NULL term, which used to be written out and
-         -- said the same thing at a price: an EXPRESSION as the first sort key
-         -- disqualifies replays_start, so every listing sorted the whole table
-         -- in a temp b-tree and a LIMIT saved nothing. Measured over 3000 rows
-         -- asked for 50: 6000 rows read, against 101 with the index driving.
-         ORDER BY start_unix DESC, id
-         ${window}`,
+                g.lobby_name AS lobby_name, g.map_file AS map_file
+         FROM page AS replays LEFT JOIN games g ON g.id = replays.id
+         ORDER BY replays.start_unix DESC, replays.id`,
         ...args,
       )
       .toArray();

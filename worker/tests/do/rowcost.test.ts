@@ -521,3 +521,56 @@ test("expiring silent app jobs costs the app jobs in flight, not the queue", asy
   // the install's own jobs, not the 20k-row table.
   expect(costs.installPage, report).toBeLessThan(2200);
 });
+
+/** A filtered catalog read costs the rows its narrowest filter leaves, not the
+ * catalog. The case that bit: an outside scraper asking every few hours for
+ * `settings=ranked&from=<day>&to=<day+1>&minDuration=1200&limit=100`. The flag
+ * test was an `id IN (SELECT ... replay_settings WHERE flag = ?)`, which SQLite
+ * DROVE the query from — every ranked row in the catalog (nearly all of it),
+ * each with the four per-row lookups, then sorted — so a one-day question read
+ * ~225k rows on a ~45k-row catalog. The date range is the selective part here,
+ * and replays_start can answer it. */
+const CATALOG = 6000;
+const CATALOG_STEP = 600; // a replay every 10 minutes: 144 a day, ~42 days
+
+test("a filtered catalog page reads its date range, not every flagged row", async () => {
+  const costs = await measured((index, tally) => {
+    const sql = (index as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+    const seq = `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${CATALOG}) SELECT n FROM seq`;
+    const roster = `'[{"ally":0,"count":8,"players":[{"name":"p' || n || '","os":25}]}]'`;
+    sql.exec(`INSERT INTO replays (id, start_unix, duration_sec, map, game_size, size_bytes,
+                player_count, players, settings, updated_unix, placeholder)
+      SELECT printf('r%06d', n), ${NOW} - n*${CATALOG_STEP}, 600 + (n % 4) * 400, 'Map ' || (n % 40),
+             '8v8', 8000000, 16, ${roster}, '{"ranked":true}', ${NOW}, 0
+      FROM (${seq})`);
+    sql.exec(`INSERT INTO replay_settings (replay_id, flag) SELECT printf('r%06d', n), 'ranked' FROM (${seq})`);
+    // The mirror rows the per-row lookups join to.
+    sql.exec(`INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset,
+                player_count, players, settings, engine_version, game_version, synced_unix, end_unix)
+      SELECT printf('r%06d', n), ${NOW} - n*${CATALOG_STEP}, 900, 'Map', 'map', '8v8', 'team', 16,
+             ${roster}, '{"ranked":true}', 'e', 'v', ${NOW}, ${NOW}
+      FROM (${seq})`);
+    tally();
+    const out: Record<string, number> = {};
+
+    // The scraper's request, one day ten days back.
+    const day = { ...emptyFilter(), from: NOW - 11 * 86400, to: NOW - 10 * 86400,
+                  minDuration: 1200, settings: ["ranked"] };
+    const page = index.list(day, 101, 0);
+    out.scraperDay = tally();
+    expect(page.length, "the day holds 144 replays, half of them 20 minutes or longer").toBe(72);
+
+    // The flag alone, as the landing page's settings chip asks for it: the
+    // walk goes in start order and stops at the page edge.
+    index.list({ ...emptyFilter(), settings: ["ranked"] }, 51, 0);
+    out.settingsOnly = tally();
+    return out;
+  });
+
+  const report = JSON.stringify(costs, null, 2);
+  // A day is 144 rows; each costs its index entry, the row and its flag seek,
+  // and the 72 listed ones their four lookups. Before the fix: every one of
+  // the 6000 flagged rows, with the lookups (~30000).
+  expect(costs.scraperDay, report).toBeLessThan(1200);
+  expect(costs.settingsOnly, report).toBeLessThan(600);
+});
