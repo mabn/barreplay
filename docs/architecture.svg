@@ -71,7 +71,7 @@
   <rect class="cf" x="420" y="190" width="270" height="262" rx="10"/>
   <text class="h" x="438" y="220">replay.fogofwar.dev</text>
   <text class="b" x="438" y="244">the website,</text>
-  <text class="b" x="438" y="262">a Cloudflare Worker</text>
+  <text class="b" x="438" y="262">Cloudflare Worker + Durable Objects</text>
 
 
   <rect class="cf" x="420" y="478" width="270" height="72" rx="10"/>
