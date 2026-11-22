@@ -180,6 +180,8 @@ test("the lava priority lookup costs a day of the mirror, not the mirror", async
     // game near the head costs a handful of rows).
     sql.exec(`INSERT INTO replay_settings (replay_id, flag)
       VALUES (printf('g%06d', ${LAVA_AT}), 'lava')`);
+    // ...and the games.lava mark gamesInsert writes for such a game.
+    sql.exec(`UPDATE games SET lava = 1 WHERE id = printf('g%06d', ${LAVA_AT})`);
     tally();
     const found = index.jobsOffer("resim", "job-lava-found");
     out.lavaScanFound = tally();
@@ -190,15 +192,12 @@ test("the lava priority lookup costs a day of the mirror, not the mirror", async
   });
 
   const report = JSON.stringify(costs, null, 2);
-  // A day of games, and NOT the 5000-row mirror behind them (measured: 2566
-  // for the empty scan — which includes the ranked window's own scan behind it
-  // — and 2106 to reach a lava game at the window's edge). What the bound
-  // asserts is that the walk STOPS at that edge; the number does not grow as
-  // the mirror does, which is the whole reason the window is measured in time
-  // rather than in rank. At LAVA_COOLDOWN_SEC that is ~750k rows a day in the
-  // idle case — see ROW BUDGET in CLAUDE.md.
-  expect(costs.lavaScanEmpty, report).toBeLessThan(4000);
-  expect(costs.lavaScanFound, report).toBeLessThan(4000);
+  // The lava-shaped games of the day (games_lava_end), not the day's whole
+  // mirror. Measured before games.lava: 2566 for the empty scan and 2106 to
+  // reach a lava game at the window's edge; now 405 — nearly all of it the
+  // ranked window's own scan behind the empty answer — and 5.
+  expect(costs.lavaScanEmpty, report).toBeLessThan(600);
+  expect(costs.lavaScanFound, report).toBeLessThan(50);
 });
 
 test("the polled and cron reads do not scan the tables they read from", async () => {
@@ -338,6 +337,14 @@ test("the polled and cron reads do not scan the tables they read from", async ()
         settings: { lava: true, mods: true }, engineVersion: "e", gameVersion: "v",
       },
     ]);
+    // ...plus the history: thousands of lava games mirrored and offered long
+    // ago (the deployment had ~6k), which the old flag-driven query read on
+    // every call to find the few still pending.
+    const sql = (index as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+    sql.exec(`INSERT INTO replay_settings (replay_id, flag)
+      SELECT id, 'lava' FROM games WHERE id LIKE 'g%' AND rowid <= 3000`);
+    sql.exec(`UPDATE games SET lava = 1, lava_offered_unix = ${NOW - 86400}
+      WHERE id LIKE 'g%' AND rowid <= 3000`);
     tally();
     index.gamesLavaPending(30, NOW);
     out.gamesLavaPending = tally();

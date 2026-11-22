@@ -164,6 +164,16 @@ const LAVA_COOLDOWN_SEC = 300;
 /** How many mirrored ids gamesUnknown remembers: a few times the ~300 games
  * the sync's 2h window (GAMES_MAX_PAGES x GAMES_PAGE_LIMIT) can hold. */
 const KNOWN_GAMES_MAX = 2000;
+/** How far back the one-time games.lava backfill reaches (DERIVED_VERSION 4):
+ * twice the lava sync's horizon. */
+const LAVA_BACKFILL_SEC = 14 * 24 * 3600;
+/** isLavaShaped is what games.lava stores: the lava flag on an 8v8 roster —
+ * what lavabalance requires of every game it stores, and the re-sim's first
+ * priority. Same reading of a flag as indexSettings. */
+function isLavaShaped(gameSize: string | null, settings: Record<string, boolean | string> | null): boolean {
+  const v = settings?.[SETTINGS_LAVA_FLAG];
+  return gameSize === LAVA_GAME_SIZE && (v === true || (typeof v === "string" && v !== ""));
+}
 
 /** The lava RETRY lookup (lavaRetryCandidate): how far back a failed job
  * still counts, and how long the lookup rests on an empty answer.
@@ -308,15 +318,16 @@ function progressPercent(progressJSON: unknown): number | null {
  * current one). v1 backfilled rows that predate the derived data; v2 seeded
  * unique_values('maps') from the catalog's existing rows; v3 added the
  * jobs_count seed (and re-runs the v2 seed, which never deployed on its own —
- * both are idempotent recomputes). */
-const DERIVED_VERSION = 3;
+ * both are idempotent recomputes); v4 backfilled games.lava over the last two
+ * weeks. */
+const DERIVED_VERSION = 4;
 
 /** Version of the SCHEMA itself, stamped into the schema_version table by the
  * migration that produced it. schemaCurrent reads this one row to decide
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -519,6 +530,13 @@ const INDEX_DDL = `
       CREATE INDEX IF NOT EXISTS games_map_end    ON games (map, end_unix DESC, id);
       CREATE INDEX IF NOT EXISTS games_count_end  ON games (player_count, end_unix DESC, id);
       CREATE INDEX IF NOT EXISTS games_durmin_end ON games ((duration_sec / 60), end_unix DESC, id);
+      -- The two lava lookups (see the games.lava column): PARTIAL, over the
+      -- lava-shaped games only — a few dozen a day out of ~2000.
+      -- lavaCandidate: the newest ended. gamesLavaPending: the not yet
+      -- offered, oldest started first; a game leaves it when marked offered.
+      CREATE INDEX IF NOT EXISTS games_lava_end ON games (end_unix DESC, id) WHERE lava = 1;
+      CREATE INDEX IF NOT EXISTS games_lava_pending ON games (start_unix, id)
+        WHERE lava = 1 AND lava_offered_unix IS NULL;
       DROP INDEX IF EXISTS games_backfill_end;
       DROP INDEX IF EXISTS games_backfill;
       DROP INDEX IF EXISTS games_start;
@@ -608,6 +626,15 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // NOT in gamesInsert's upsert list: a later re-sync of the game knows
   // nothing about lobbies and must not erase what the match wrote.
   ["games", "lobby_name TEXT"],
+  // 1 for a LAVA-SHAPED game (the lava flag on an 8v8 roster: the re-sim's
+  // first priority and the lava sync's candidates), NULL otherwise. Stored so
+  // the two lookups can walk a partial index over just those games: deriving
+  // it per query from replay_settings read every lava game ever mirrored
+  // (gamesLavaPending, ~6k rows a call) or a whole day of the mirror
+  // (lavaCandidate, ~2k rows every five minutes) to find a handful.
+  // Written by gamesInsert; rows mirrored before it are backfilled for the
+  // windows the lookups read (ensureDerived, DERIVED_VERSION 4).
+  ["games", "lava INTEGER"],
   ["games", "lobby_id INTEGER"],
   // The full lobby detail at observation time (teiserver.ts LobbyDetails
   // JSON: locked/passworded/counts from the index page, the per-player
@@ -876,6 +903,18 @@ export class ReplayIndex extends DurableObject<Env> {
       this.rebuildMapsList();
       const jobs = this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM jobs`).toArray();
       this.metaPut(JOBS_COUNT_KEY, Number(jobs[0].n));
+      // v4: games.lava for rows mirrored before the column, over the windows
+      // the lava lookups read (lavaCandidate's day, the lava sync's week)
+      // with margin. Older games are never asked about, so leaving them NULL
+      // costs nothing and keeps this pass to a few hundred rows written.
+      this.ctx.storage.sql.exec(
+        `UPDATE games SET lava = 1
+          WHERE end_unix >= ? AND game_size = ? AND lava IS NULL
+            AND EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = games.id AND s.flag = ?)`,
+        Math.floor(Date.now() / 1000) - LAVA_BACKFILL_SEC,
+        LAVA_GAME_SIZE,
+        SETTINGS_LAVA_FLAG,
+      );
       this.ctx.storage.sql.exec(
         `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -1486,13 +1525,11 @@ export class ReplayIndex extends DurableObject<Env> {
         `SELECT g.id AS id, g.start_unix AS start_unix,
                 g.end_unix AS end_unix,
                 g.lobby_name, g.lobby_details
-           FROM replay_settings rs JOIN games g ON g.id = rs.replay_id
-          WHERE rs.flag = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
-            AND g.lava_offered_unix IS NULL
+           FROM games g INDEXED BY games_lava_pending
+          WHERE g.lava = 1 AND g.lava_offered_unix IS NULL
+            AND g.start_unix IS NOT NULL
             AND g.end_unix >= ?
           ORDER BY g.start_unix ASC, g.id LIMIT ?`,
-        SETTINGS_LAVA_FLAG,
-        LAVA_GAME_SIZE,
         now - LAVA_OFFER_HORIZON_SEC,
         limit,
       )
@@ -1543,9 +1580,10 @@ export class ReplayIndex extends DurableObject<Env> {
     const now = Math.floor(Date.now() / 1000);
     for (const g of games) {
       sql.exec(
-        `INSERT INTO games (id, start_unix, duration_sec, end_unix, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO games (id, start_unix, duration_sec, end_unix, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix, lava)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
+           lava = excluded.lava,
            start_unix = excluded.start_unix,
            duration_sec = excluded.duration_sec,
            end_unix = excluded.end_unix,
@@ -1573,6 +1611,7 @@ export class ReplayIndex extends DurableObject<Env> {
         g.engineVersion,
         g.gameVersion,
         now,
+        isLavaShaped(g.gameSize, g.settings) ? 1 : null,
       );
       const owned = sql.exec(`SELECT 1 FROM replays WHERE id = ?`, g.id).toArray().length > 0;
       // Settings only: the backfill's modded-first ranking reads them, and
@@ -2401,18 +2440,13 @@ export class ReplayIndex extends DurableObject<Env> {
   private lavaCandidate(now: number): { id: string; end: number } | null {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id, g.end_unix AS end_unix FROM games g
-          WHERE g.end_unix >= ?
-            AND g.game_size = ?
-            AND EXISTS (SELECT 1 FROM replay_settings s
-                        WHERE s.replay_id = g.id AND s.flag = ?)
+        `SELECT g.id AS id, g.end_unix AS end_unix FROM games g INDEXED BY games_lava_end
+          WHERE g.lava = 1 AND g.end_unix >= ?
             AND NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
             AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
           ORDER BY g.end_unix DESC, g.id
           LIMIT 1`,
         now - LAVA_WINDOW_SEC,
-        LAVA_GAME_SIZE,
-        SETTINGS_LAVA_FLAG,
       )
       .toArray();
     return rows.length === 0 ? null : { id: rows[0].id as string, end: rows[0].end_unix as number };
@@ -2420,19 +2454,15 @@ export class ReplayIndex extends DurableObject<Env> {
 
   /** lavaEnds maps each of gameIds that is an 8v8 lava game to when it ENDED
    * — what jobsOffer orders the waiting lava work by. One primary-key seek
-   * and one flag seek per id, over a pending list that is a handful long. */
+   * per id, over a pending list that is a handful long. */
   private lavaEnds(gameIds: string[]): Map<string, number> {
     const out = new Map<string, number>();
     for (const id of new Set(gameIds)) {
       const r = this.ctx.storage.sql
         .exec(
           `SELECT g.end_unix AS end_unix FROM games g
-            WHERE g.id = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
-              AND EXISTS (SELECT 1 FROM replay_settings s
-                          WHERE s.replay_id = g.id AND s.flag = ?)`,
+            WHERE g.id = ? AND g.lava = 1 AND g.start_unix IS NOT NULL`,
           id,
-          LAVA_GAME_SIZE,
-          SETTINGS_LAVA_FLAG,
         )
         .toArray();
       if (r.length > 0) out.set(id, r[0].end_unix as number);
