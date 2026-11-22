@@ -80,7 +80,7 @@
 
   <!-- readers -->
   <rect class="rd" x="790" y="190" width="250" height="72" rx="10"/>
-  <text class="h" x="808" y="220">lavabalance</text>
+  <text class="h" x="808" y="220">lavabalance.fogofwar.dev</text>
   <text class="b" x="808" y="244">ratings site, embeds summaries</text>
 
   <rect class="rd" x="790" y="300" width="250" height="90" rx="10"/>
