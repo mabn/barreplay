@@ -124,16 +124,16 @@ func runWindows(ctx context.Context, o windowsOptions) error {
 		if err != nil {
 			return err
 		}
-		same, sa, sb, err := sameFile(a, b)
+		ok, how, err := gateCompare(a, b)
 		if err != nil {
 			return err
 		}
-		if !same {
+		if !ok {
 			keepWork = true
 			return fmt.Errorf("GATE FAILED on %s: the Windows build's capture differs from the stock Linux engine's "+
-				"(sha256 %s vs %s; both kept under %s). Do not publish this build", id, sb, sa, work)
+				"(%s; both kept under %s). Do not publish this build", id, how, work)
 		}
-		fmt.Fprintf(os.Stderr, "gate %s: identical (sha256 %s)\n", id, sa)
+		fmt.Fprintf(os.Stderr, "gate %s: %s\n", id, how)
 	}
 
 	// 4. Upload.

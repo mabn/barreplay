@@ -60,6 +60,7 @@ var patchedBuilds = map[string]PatchedBuild{
 			"1e7b3c417aab1afe34878cad9a557368ee0c7132c72a52d84b71314437df9c01", // .2
 			"2ea1aecf0528606631625c636fe3eb31905cab145371800ca1a42d8cdb4e9d74", // .3 (PGO+LTO)
 		}},
+	"2026.09.03": {Rev: 1, SHA256: "cbcbc25a5e400152f86a1347aa46feb2141c1e26365a8622f68134a225e67bde"}, // 2026.9.3-barreplay.1 (2026.07.04's revision 5 rebased, PGO+LTO)
 }
 
 // PatchedBuildBaseURL is where published patched engines are read back from:
@@ -74,6 +75,7 @@ var patchedBuildsWindows = map[string]PatchedBuild{
 		Superseded: []string{
 			"e1b0328e1bab7055727664db35e63a23e0c8f85a95d1db0ece0d6abec2305098", // .3
 		}},
+	"2026.09.03": {Rev: 1, SHA256: "15f8b24acb310aaad12870d73929bcbaf173ae483c9016544da2d8042876cccf"}, // 2026.9.3-barreplay.1 windows-amd64
 }
 
 // patchedBuildFor picks this platform's pin for version.

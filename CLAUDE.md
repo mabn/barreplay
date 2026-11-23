@@ -452,7 +452,7 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           DownloadProgress (byte counts for any engine download), and the
                           Windows patched build: PatchedBuildKey's engines/<v>/windows-amd64/
                           spring-headless-patched-<semver>.exe.gz, pinned in
-                          patchedBuildsWindows (2026.07.04 rev 5 pinned; a version with no pin
+                          patchedBuildsWindows (2026.07.04 rev 5 and 2026.09.03 rev 1 pinned; a version with no pin
                           runs stock on Windows).
 cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim host to
                           download (see the -patched-engine note above), the WHOLE job in one
@@ -462,7 +462,11 @@ cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim 
                           engine, `strip --strip-debug` a copy into the engine dir (the
                           engine finds base/ relative to itself), re-simulate the replay on
                           THAT copy — the exact file the pin vouches for — and require
-                          byte-identical .brp files, then PutIfAbsent a gzip to
+                          byte-identical .brp files (or, on a SANDBOXED BAR build,
+                          where the stock widget's hits name no attacker and the
+                          patched engine's event log supplies them, captures that
+                          differ only in that: compare.go, docs/building-recoil.md
+                          "Sandboxed BAR builds"), then PutIfAbsent a gzip to
                           engines/<version>/spring-headless-patched-<semver>.gz (native R2
                           credentials only; ./.env is read; an existing object must hold the
                           same binary) and print the patchedBuilds line and the

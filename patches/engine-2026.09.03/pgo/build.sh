@@ -26,10 +26,11 @@
 # CLEAN build dir: ninja does not track .gcda files, and under LTO the profile
 # is applied when each object is compiled, not at the link.
 #
-# Training of the current profile (revision 5: the speed work, the switch
-# words at their defaults): the medium gate replay 4936896a…, the
-# sandboxed-BAR game c04fd06a…, and verylarge1 6a37d06a… up to frame 65580
-# (docs/worklog-engine-speed.md, speed/tools/scripts/pgotrain2.sh).
+# Training of the current profile (revision 1 of this series, the switch
+# words at their defaults, -worker-threads 7): the 2026.09.03 gate replay
+# 0488036b… whole, then the 62-minute 16-player Isthmus d788036b… (a
+# 2026.09.03 game) up to its late window, frames 72000-73800 (the bench
+# harness's BARREPLAY_BENCH_START/N stop it there).
 set -euo pipefail
 SRC=$(cd "$1" && pwd); WORK=$(mkdir -p "$2" && cd "$2" && pwd); MODE=${3:-use}
 HERE=$(cd "$(dirname "$0")" && pwd)

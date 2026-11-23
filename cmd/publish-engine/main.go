@@ -22,7 +22,8 @@
 //     code, data and function names stay) into a copy beside the stock
 //     binary, where the engine finds its base/ content.
 //  4. Re-simulates the same replay on that stripped copy and requires the two
-//     .brp files to be byte-identical. Both runs use THIS checkout's widget
+//     .brp files to be byte-identical — or, on a sandboxed BAR build, to
+//     differ only by what the engine event log adds (compare.go). Both runs use THIS checkout's widget
 //     and codec, so the comparison is about the engine alone — fixed
 //     reference hashes would go stale with every capture-format change.
 //  5. Uploads a gzip of the stripped binary to
@@ -213,16 +214,16 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		same, a, b, err := sameFile(stock[id], p)
+		ok, how, err := gateCompare(stock[id], p)
 		if err != nil {
 			return err
 		}
-		if !same {
+		if !ok {
 			keepWork = true
 			return fmt.Errorf("GATE FAILED on %s: the patched build's capture differs from the stock engine's "+
-				"(sha256 %s vs %s; both kept under %s). Do not publish this build", id, b, a, work)
+				"(%s; both kept under %s). Do not publish this build", id, how, work)
 		}
-		fmt.Fprintf(os.Stderr, "gate %s: identical (sha256 %s)\n", id, a)
+		fmt.Fprintf(os.Stderr, "gate %s: %s\n", id, how)
 	}
 
 	// 5. Upload.
@@ -324,6 +325,9 @@ func resimulate(ctx context.Context, client *barapi.Client, gameID, dataDir, out
 		EngineBinary:  bin,
 		ProgressEvery: 10 * time.Second,
 		Stats:         stats,
+		// no listening socket: the gate then runs beside another engine on the
+		// host (a bringest -resim on its own data dir holds the default port)
+		OnlyLocal: true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("re-simulating %s: %w", gameID, err)

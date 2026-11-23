@@ -4,9 +4,9 @@
 # It is the 2026.07.04 series at its revision 5 (../engine-2026.07.04/series
 # explains what is in it and why some patches are listed), rebased onto the
 # 2026.09.03 tag: the same patches in the same order, every one byte-identical
-# to its 2026.07.04 file except the five whose context moved under them, which
+# to its 2026.07.04 file except the six whose context moved under them, which
 # were regenerated from the rebased commits (speed/0019 P2, 0069 P4, 0082 N2:
-# #include lines; 0135 H109: a Tracy zone upstream removed; 0146 H120: the
+# #include lines; 0099 H100: EnTT 3.16's view storage; 0135 H109: a Tracy zone upstream removed; 0146 H120: the
 # start-underground test upstream rewrote, beside which H120 now sits).
 # Build with -DSYNCCHECK=OFF (pgo/build.sh and windows/build.sh pass it).
 # Any change here or to a listed patch is a new revision of the patched build:
