@@ -1,0 +1,119 @@
+From ef6a51161bf24aee74a0e04bc252d5fe2a9d0b58 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 13:05:42 +0000
+Subject: [PATCH 75/78] [barreplay] P5 v2: visual sfx (wakes, smoke, bubbles,
+ CEGs: unsynced particles only) deferred to the segment's end instead of a
+ barrier
+
+---
+ rts/Sim/Units/Scripts/BrCobPar.cpp   | 17 +++++++++++++++--
+ rts/Sim/Units/Scripts/BrCobPar.h     |  4 ++++
+ rts/Sim/Units/Scripts/UnitScript.cpp |  7 +++++++
+ 3 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.cpp b/rts/Sim/Units/Scripts/BrCobPar.cpp
+index d26ad78..99a5295 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.cpp
++++ b/rts/Sim/Units/Scripts/BrCobPar.cpp
+@@ -16,6 +16,7 @@
+ #include "CobFile.h"
+ #include "CobInstance.h"
+ #include "CobOpCodes.h"
++#include "UnitScript.h"
+ #include "CobThread.h"
+ #include "UnitScriptEngine.h"
+ #include "Sim/Misc/GlobalSynced.h"
+@@ -179,6 +180,16 @@ namespace BrP5 {
+ 						if (!SetId(ConstantBelow(code, ins, isTarget, beg, j, 2)))
+ 							res = FS_UNSAFE;
+ 					} break;
++					case EMIT_SFX: {
++						// a constant visual type (wakes, smoke, bubbles, CEGs: unsynced
++						// particles and the unsynced RNG only) is deferred; firing or
++						// detonating a weapon is synced
++						const int v = ConstantBelow(code, ins, isTarget, beg, j, 1);
++						// (CobDefines.h, which clashes with CobOpCodes.h: SFX_CEG 1024,
++						// SFX_FIRE_WEAPON 2048, SFX_DETONATE_WEAPON 4096, SFX_GLOBAL 16384)
++						if (v < 0 || ((v & 16384) == 0 && (v & 1024) == 0 && (v & (2048 | 4096)) != 0))
++							res = FS_UNSAFE;
++					} break;
+ 					default: {
+ 						if (!SafeOp(op))
+ 							res = FS_UNSAFE;
+@@ -206,8 +217,8 @@ namespace BrP5 {
+ 
+ 	// ---- the schedule ---------------------------------------------------------
+ 	namespace {
+-		enum : uint8_t { OP_SLEEP, OP_REMOVE, OP_QREMOVE, OP_ANIM_ADD, OP_ANIM_DEL };
+-		struct Op { uint8_t kind; int a; int b; CUnitScript* s; };
++		enum : uint8_t { OP_SLEEP, OP_REMOVE, OP_QREMOVE, OP_ANIM_ADD, OP_ANIM_DEL, OP_SFX };
++		struct Op { uint8_t kind; int a; int b; CUnitScript* s; float3 p, d, r; };
+ 
+ 		struct Item {
+ 			int id;
+@@ -351,6 +362,7 @@ namespace BrP5 {
+ 						case OP_QREMOVE:  { engine->QueueRemoveThread(op.a); } break;
+ 						case OP_ANIM_ADD: { unitScriptEngine->AddInstance(op.s); } break;
+ 						case OP_ANIM_DEL: { unitScriptEngine->RemoveInstance(op.s); } break;
++						case OP_SFX:      { op.s->EmitAbsSFX(op.a, op.p, op.d, op.r); } break;
+ 					}
+ 				}
+ 				items[k].ops.clear();
+@@ -398,6 +410,7 @@ namespace BrP5 {
+ 	void DeferRemoveThread(int threadID) { tlItem->ops.push_back({OP_REMOVE, threadID, 0, nullptr}); }
+ 	void DeferQueueRemove(int threadID) { tlItem->ops.push_back({OP_QREMOVE, threadID, 0, nullptr}); }
+ 	void DeferAnimating(CUnitScript* script, bool add) { tlItem->ops.push_back({uint8_t(add? OP_ANIM_ADD: OP_ANIM_DEL), 0, 0, script}); }
++	void DeferSfx(CUnitScript* script, int sfxType, const float3& absPos, const float3& absDir, const float3& relDir) { tlItem->ops.push_back({OP_SFX, sfxType, 0, script, absPos, absDir, relDir}); }
+ 
+ 	void SerialPoint()
+ 	{
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.h b/rts/Sim/Units/Scripts/BrCobPar.h
+index 5f4b943..1e18232 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.h
++++ b/rts/Sim/Units/Scripts/BrCobPar.h
+@@ -26,6 +26,8 @@
+ 
+ #include <vector>
+ 
++#include "System/float3.h"
++
+ class CCobEngine;
+ class CCobThread;
+ class CCobFile;
+@@ -44,6 +46,8 @@ namespace BrP5 {
+ 	void DeferRemoveThread(int threadID);
+ 	void DeferQueueRemove(int threadID);
+ 	void DeferAnimating(CUnitScript* script, bool add);
++	// a visual sfx (unsynced particles only), emitted when the segment ends
++	void DeferSfx(CUnitScript* script, int sfxType, const float3& absPos, const float3& absDir, const float3& relDir);
+ 
+ 	// RAND and START inside a segment: wait for every earlier tick
+ 	void SerialPoint();
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index 28a1575..a8ef4a1 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -2,6 +2,7 @@
+ 
+ /* heavily based on CobInstance.cpp */
+ #include "UnitScript.h"
++#include "BrCobPar.h"
+ 
+ #include "CobDefines.h"
+ #include "CobFile.h"
+@@ -709,6 +710,12 @@ bool CUnitScript::EmitRelSFX(int sfxType, const float3& relPos, const float3& re
+ bool CUnitScript::EmitAbsSFX(int sfxType, const float3& absPos, const float3& absDir, const float3& relDir)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] P5 (BrCobPar.h): only visual types reach here from a tick on
++	// a worker; their particles are made when the segment ends, in tick order
++	if (BrP5::deferring) {
++		BrP5::DeferSfx(this, sfxType, absPos, absDir, relDir);
++		return true;
++	}
+ 	// skip adding (non-CEG) particles when we have too many
+ 	if (sfxType < SFX_CEG && projectileHandler.GetParticleSaturation() > 1.0f)
+ 		return false;
+-- 
+2.53.0
+

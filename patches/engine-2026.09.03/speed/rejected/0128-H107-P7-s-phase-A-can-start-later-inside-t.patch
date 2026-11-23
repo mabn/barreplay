@@ -1,0 +1,69 @@
+From 7b2213cf6aa1842daf9a60ade35938f76528aadc Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 05:01:59 +0000
+Subject: [PATCH] [barreplay] H107: P7's phase A can start later inside the
+ script tick: after the COB tick (toggle2 0x20000000) or after the animations'
+ parallel section (0x40000000)
+
+In speed59's profile the main thread ticks most animations itself (3.4%) and
+half of P5's COB ticks: P7's phase A holds the workers through both.
+---
+ rts/Game/Game.cpp                          | 7 ++++++-
+ rts/Sim/Units/Scripts/UnitScriptEngine.cpp | 9 +++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index a6c1639..0963a6e 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -2023,7 +2023,12 @@ void CGame::SimFrame() {
+ 			static constexpr int tickMs = 1000 / GAME_SPEED;
+ 
+ 			SCOPED_TIMER("Sim::Script");
+-			BrP7::Begin(); // [barreplay] P7: LOS phase A on the workers during the script tick
++			// [barreplay] P7: LOS phase A on the workers during the script tick;
++			// H107 (toggle2 0x20000000 / 0x40000000) starts it later inside the
++			// tick (after the COB tick / after the animation section), so those
++			// get the workers first (CUnitScriptEngine::Tick)
++			if ((g_brToggles2 & 0x60000000) == 0)
++				BrP7::Begin();
+ 			unitScriptEngine->Tick(tickMs);
+ 
+ 			unitHandler.UpdatePostAnimation();
+diff --git a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+index 7614483..bedd7ab 100644
+--- a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
++++ b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "UnitScriptEngine.h"
+ #include "BrCobPar.h"
++#include "Sim/Misc/BrLosOverlap.h"
+ 
+ #include "CobEngine.h"
+ #include "CobFileHandler.h"
+@@ -139,6 +140,10 @@ void CUnitScriptEngine::Tick(int deltaTime)
+ 	SCOPED_TIMER("CUnitScriptEngine::Tick");
+ 
+ 	cobEngine->Tick(deltaTime);
++	// [barreplay] H107: P7's phase A starts here (0x20000000) instead of before
++	// the tick, leaving the workers to the COB tick (P5)
++	if ((g_brToggles2 & 0x60000000) == 0x20000000)
++		BrP7::Begin();
+ 
+ 	// tick all (COB or LUS) script instances that have registered themselves as animating
+ 	{
+@@ -149,6 +154,10 @@ void CUnitScriptEngine::Tick(int deltaTime)
+ 			animating[i]->TickAllAnims(deltaTime);
+ 		});
+ 	}
++	// [barreplay] H107 (0x40000000): or here, after the animations' parallel
++	// section, leaving it the workers too
++	if ((g_brToggles2 & 0x40000000) != 0)
++		BrP7::Begin();
+ 	{
+ 		ZoneScopedN("CUnitScriptEngine::Tick(ST)");
+ 
+-- 
+2.53.0
+

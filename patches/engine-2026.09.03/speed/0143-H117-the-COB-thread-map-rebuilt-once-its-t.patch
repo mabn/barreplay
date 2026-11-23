@@ -1,0 +1,106 @@
+From 9d45615907b9ebffe75e224160c0f2ada8ed8e03 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:48:01 +0000
+Subject: [PATCH 143/149] [barreplay] H117: the COB thread map rebuilt once its
+ tombstones pile up (toggle3 0x800)
+
+Thread ids only grow and an erase leaves a tombstone that only an insert
+reusing it removes, so in a long game the open-addressing table has almost no
+never-used bucket left: every insert of a new id (CCobEngine::AddThread, 0.9% of
+the main thread in speed62's late window, all of it in find_or_allocate's probe
+loop) and every lookup of an absent id scans the whole probe length. Once the
+erases since the last rebuild exceed the live threads + 1024, the live threads
+are re-inserted into a fresh table at the end of the tick. The map is only
+looked up and inserted into (iterated in sync dumps and saves), and nothing
+holds a thread's address across ticks, so moving them changes nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/Scripts/CobEngine.cpp | 28 ++++++++++++++++++++++++++++
+ rts/Sim/Units/Scripts/CobEngine.h   |  3 +++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/rts/Sim/Units/Scripts/CobEngine.cpp b/rts/Sim/Units/Scripts/CobEngine.cpp
+index d46cc4a..338f661 100644
+--- a/rts/Sim/Units/Scripts/CobEngine.cpp
++++ b/rts/Sim/Units/Scripts/CobEngine.cpp
+@@ -37,6 +37,8 @@ CR_REG_METADATA(CCobEngine::SleepingThread, (
+ 	CR_MEMBER(wt)
+ ))
+ 
++extern unsigned g_brToggles3; // [barreplay] H117
++
+ static const char* const numCobThreadsPlot = "CobThreads";
+ 
+ int CCobEngine::AddThread(CCobThread&& thread)
+@@ -63,6 +65,7 @@ bool CCobEngine::RemoveThread(int threadID) {
+ 
+ 	if (it != threadInstances.end()) {
+ 		threadInstances.erase(it);
++		brErasedSinceRebuild += 1; // [barreplay] H117
+ 		TracyPlot(numCobThreadsPlot, static_cast<int64_t>(threadInstances.size()));
+ 		return true;
+ 	}
+@@ -207,6 +210,29 @@ void CCobEngine::TickRunningThreads()
+ 	std::swap(runningThreadIDs, waitingThreadIDs);
+ }
+ 
++// [barreplay] H117 (toggle3 0x800): the thread map's ids only grow and an
++// erase leaves a tombstone that only an insert reusing it removes, so in a long
++// game the table has almost no never-used bucket left, and every insert of a
++// new id (AddThread, 0.9% of the main thread in speed62's late window) and
++// every lookup of an absent one scans the whole probe length. Re-inserting the
++// live threads into a fresh table clears them. The map is only looked up and
++// inserted into (iterated in sync dumps and saves only, which no result
++// depends on), and nothing holds a thread's address across ticks (curThread
++// is null here), so moving the threads changes nothing.
++void CCobEngine::BrMaybeRebuildThreadMap()
++{
++	if (brErasedSinceRebuild <= int(threadInstances.size()) + 1024)
++		return;
++	brErasedSinceRebuild = 0;
++	if ((g_brToggles3 & 0x800) == 0 || curThread != nullptr)
++		return;
++	decltype(threadInstances) fresh;
++	fresh.reserve(std::max<size_t>(threadInstances.size() * 2, 2048));
++	for (auto& p: threadInstances)
++		fresh[p.first] = std::move(p.second);
++	threadInstances = std::move(fresh);
++}
++
+ void CCobEngine::Tick(int deltaTime)
+ {
+ 	ZoneScoped;
+@@ -239,6 +265,7 @@ void CCobEngine::Tick(int deltaTime)
+ 		BrP5::RunPhase(this, brDueThreadIDs, true);
+ 		ProcessQueuedThreads();
+ 		BrP5::EndTick();
++		BrMaybeRebuildThreadMap();
+ 		return;
+ 	}
+ 
+@@ -247,6 +274,7 @@ void CCobEngine::Tick(int deltaTime)
+ 
+ 	WakeSleepingThreads();
+ 	ProcessQueuedThreads();
++	BrMaybeRebuildThreadMap();
+ }
+ 
+ 
+diff --git a/rts/Sim/Units/Scripts/CobEngine.h b/rts/Sim/Units/Scripts/CobEngine.h
+index 3ebe4fc..df35b19 100644
+--- a/rts/Sim/Units/Scripts/CobEngine.h
++++ b/rts/Sim/Units/Scripts/CobEngine.h
+@@ -85,6 +85,9 @@ public:
+ 	}
+ 
+ 	bool RemoveThread(int threadID);
++	// [barreplay] H117: see CobEngine.cpp
++	void BrMaybeRebuildThreadMap();
++	int brErasedSinceRebuild = 0;
+ 	int AddThread(CCobThread&& thread);
+ 	int GenThreadID() { return (threadCounter++); }
+ 
+-- 
+2.53.0
+

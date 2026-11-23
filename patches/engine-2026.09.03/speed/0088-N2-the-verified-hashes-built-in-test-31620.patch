@@ -1,0 +1,43 @@
+From ebda0dfff80db1a6f3e715d940856039f1b4c129 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 17:49:51 +0000
+Subject: [PATCH 88/90] [barreplay] N2: the verified hashes built in
+ (test-31620's wrapper and four handlers; Explosion's and the wrapper's also
+ test-31030's)
+
+---
+ rts/Lua/BrNativeHandler.cpp | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Lua/BrNativeHandler.cpp b/rts/Lua/BrNativeHandler.cpp
+index a633dc2..3e39f37 100644
+--- a/rts/Lua/BrNativeHandler.cpp
++++ b/rts/Lua/BrNativeHandler.cpp
+@@ -20,9 +20,21 @@ namespace BrN2 {
+ 		// the handler functions' upvalues: the tracy stubs, or none
+ 		const bool HANDLER_TRACY[CI_N] = {true, true, false, true};
+ 
+-		// the (wrapper, handler) bytecode hashes known to be the code this
+-		// replicates; BARREPLAY_N2_HASHES adds more (hex, comma separated)
+-		const uint64_t KNOWN_HASHES[] = {0};
++		// the bytecode hashes of the code this replicates, each read against
++		// the source: BAR test-31620's luarules/gadgets.lua (the installed
++		// wrapper of UpdateCallIn, and the four handlers' while-loops over
++		// list[i] with the tracy calls through upvalues). test-31030's handlers
++		// hash differently (ipairs, tracy through the global) and are not
++		// this code. BARREPLAY_N2_HASHES adds more (hex, comma separated), for
++		// learning what a new build logs; a hash goes here only once its
++		// source has been read against these functions.
++		const uint64_t KNOWN_HASHES[] = {
++			0x01272659fbb8cef7ull, // installed = function(...) (UpdateCallIn; also test-31030's)
++			0x66262d25769a33feull, // gadgetHandler:Explosion (also test-31030's)
++			0x812ad0ef31180830ull, // gadgetHandler:UnitPreDamaged
++			0x61eea1fdec328703ull, // gadgetHandler:UnitDamaged
++			0xf4541253c9e2c2d0ull, // gadgetHandler:ProjectileDestroyed
++		};
+ 
+ 		struct Entry {
+ 			const void* installed = nullptr; // the validated global (kept alive by installedRef)
+-- 
+2.53.0
+

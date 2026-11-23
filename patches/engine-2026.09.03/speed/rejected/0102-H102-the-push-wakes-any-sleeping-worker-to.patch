@@ -1,0 +1,55 @@
+From bf1170015c873656da05421d11137bd9d2abc1fe Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 13:46:54 +0000
+Subject: [PATCH 102/108] [barreplay] H102: the push wakes any sleeping worker
+ (toggle2 0x8000); worker 1 spins 1 ms (toggle2 0x10000)
+
+Scheduling only. In the late window only 2.6 of 6 workers are present on
+average during the weapon-vectors section.
+---
+ rts/System/Threading/ThreadPool.cpp | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/rts/System/Threading/ThreadPool.cpp b/rts/System/Threading/ThreadPool.cpp
+index 2282d9d..1089a1b 100644
+--- a/rts/System/Threading/ThreadPool.cpp
++++ b/rts/System/Threading/ThreadPool.cpp
+@@ -282,15 +282,21 @@ static void WorkerLoop(int tid, bool async)
+ 	// unless every worker sleeps: a parallel section then starts with one or
+ 	// two workers awake, and the main thread does a third of it. Scheduling
+ 	// only; every section's result is the same whoever runs its chunks.
++	// [barreplay] H102 (toggle2 0x10000): worker 1 alone spins up to 1 ms
++	// (pausing between polls) instead of 30 us, so a pushed section usually
++	// finds one worker awake, which takes the first chunk and wakes the rest
++	// at its own cost (DoTask); H96 spun every worker and they contended for
++	// the queue with the main thread.
+ 	while (!exitFlags[tid]) {
+ 		const unsigned brMode = (::g_brToggles2 >> 8) & 3;
+-		const auto spinlockEnd = spring_now() + ((brMode == 0)? ourSpinTime: spring_time::fromMicroSecs((brMode == 1)? 2000: 20000));
++		const bool brSpin1 = (tid == 1) && ((::g_brToggles2 & 0x10000) != 0);
++		const auto spinlockEnd = spring_now() + ((brMode == 0)? (brSpin1? spring_time::fromMicroSecs(1000): ourSpinTime): spring_time::fromMicroSecs((brMode == 1)? 2000: 20000));
+ 		const auto sleepCap = (brMode == 0)? maxSleepTime: spring_time::fromMicroSecs(500);
+ 		      auto sleepTime   = spring_time::fromMicroSecs(1);
+ 
+ 		while (!DoTask(tid, async) && !exitFlags[tid]) {
+ 			if (spring_now() < spinlockEnd) {
+-				if (brMode != 0)
++				if (brMode != 0 || brSpin1)
+ 					_mm_pause();
+ 				continue;
+ 			}
+@@ -396,7 +402,10 @@ void PushTaskGroup(ITaskGroup* taskGroup)
+ 	if (taskGroup->IsAsyncTask())
+ 		return;
+ 
+-	NotifyWorkerThreads(false, false);
++	// [barreplay] H102 (toggle2 0x8000): wake whoever sleeps, not only when
++	// every worker does; a section otherwise starts without the sleepers
++	// whenever one worker is still busy, and they join on their own timers
++	NotifyWorkerThreads((::g_brToggles2 & 0x8000) != 0, false);
+ 	#else
+ 	NotifyWorkerThreads(false, taskGroup->IsAsyncTask());
+ 	#endif
+-- 
+2.53.0
+

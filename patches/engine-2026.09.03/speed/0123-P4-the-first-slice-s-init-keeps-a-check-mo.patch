@@ -1,0 +1,30 @@
+From 1ca986dc32387979627f948480b869e98126f909 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 02:18:27 +0000
+Subject: [PATCH] [barreplay] P4: the first slice's init keeps a check mode the
+ bench harness turned on after a restore
+
+A checkpoint dumped with P4 off has not initialized P4 yet; its first slice
+then ran after the park and reset the check flag from the environment, so a
+p4check trial ran unchecked.
+---
+ rts/Sim/Weapons/BrPipeTarget.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index f576f53..147bbaa 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -247,7 +247,8 @@ namespace BrP4 {
+ 		if (!inited) {
+ 			inited = true;
+ 			tasks.reset(new Task[MAX_TASKS]);
+-			check = (getenv("BARREPLAY_P4_CHECK") != nullptr);
++			// (a bench trial may have turned it on before the first slice: SetCheck)
++			check = check || (getenv("BARREPLAY_P4_CHECK") != nullptr);
+ 			if (const char* st = getenv("BARREPLAY_P4_STATS")) {
+ 				statsOn = true;
+ 				statsEvery = std::max(1, atoi(st));
+-- 
+2.53.0
+

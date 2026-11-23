@@ -1,0 +1,43 @@
+From 6ba093d1c857b363a998545f3075603c900517ef Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 23:03:05 +0000
+Subject: [PATCH] [barreplay] P9: BrCollisionSync in the .cpp (CUnit is
+ incomplete in the header)
+
+---
+ rts/Sim/MoveTypes/MoveType.cpp | 5 +++++
+ rts/Sim/MoveTypes/MoveType.h   | 2 +-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/MoveTypes/MoveType.cpp b/rts/Sim/MoveTypes/MoveType.cpp
+index 7cbdcaa..615db41 100644
+--- a/rts/Sim/MoveTypes/MoveType.cpp
++++ b/rts/Sim/MoveTypes/MoveType.cpp
+@@ -104,6 +104,11 @@ uint8_t AMoveType::BrCollisionPrecheck()
+ 	return quadField.BrQuadsChanged(owner)? 2: 1;
+ }
+ 
++void AMoveType::BrCollisionSync()
++{
++	oldCollisionUpdatePos = owner->pos;
++}
++
+ void AMoveType::UpdateGroundBlockMap() {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (owner->pos != oldSlowUpdatePos) {
+diff --git a/rts/Sim/MoveTypes/MoveType.h b/rts/Sim/MoveTypes/MoveType.h
+index dfd9cf2..bba6f4a 100644
+--- a/rts/Sim/MoveTypes/MoveType.h
++++ b/rts/Sim/MoveTypes/MoveType.h
+@@ -58,7 +58,7 @@ public:
+ 	// comparison (own fields and reads only, any thread): 0 the position did
+ 	// not change, 1 it changed within the same quads, 2 the quads changed
+ 	uint8_t BrCollisionPrecheck();
+-	void BrCollisionSync() { oldCollisionUpdatePos = owner->pos; }
++	void BrCollisionSync();
+ 	void UpdateGroundBlockMap();
+ 
+ 	virtual bool IsSkidding() const { return false; }
+-- 
+2.53.0
+

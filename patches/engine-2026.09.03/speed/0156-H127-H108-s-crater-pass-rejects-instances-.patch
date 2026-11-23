@@ -1,0 +1,65 @@
+From 163e18af817933eb1c748d6bf95aaae9ab1fa527 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 00:58:15 +0000
+Subject: [PATCH 156/156] [barreplay] H127: H108's crater pass rejects
+ instances outside every crater's reach at once (toggle3 0x800000)
+
+speed62: the craters' LOS update (ILosType::UpdateHeightMapSynced) is 1.2% of
+the main thread, every used instance of every type tested against every
+crater of the frame. CheckOverlap accepts only a centre within hw + radius of
+x1 * SQUARE_SIZE and hh + radius of y1 * SQUARE_SIZE (it measures from the
+rectangle's x1/y1, not its middle), so the box spanning every rectangle's
+[x1 * SQUARE_SIZE - hw, x1 * SQUARE_SIZE + hw] and the same in y, widened by
+the instance's radius, holds every centre any crater accepts: an instance
+outside it overlaps none, and inside it the tests run as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Misc/LosHandler.cpp | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 8010eb6..8dbd278 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "LosHandler.h"
+ #include <immintrin.h>
++#include <limits>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h" // g_brToggles, BrChunkMax
+ #include "BrLosOverlap.h"
+ 
+@@ -1531,7 +1532,29 @@ void ILosType::BrUpdateHeightMapSyncedBatch(const std::vector<SRectangle>& rects
+ 
+ 		return (Square(circleDistance.x) + Square(circleDistance.y)) <= Square(radius);
+ 	};
++	// [barreplay] H127 (toggle3 0x800000): every rectangle at once first.
++	// CheckOverlap accepts only a centre within hw + radius of x1 * SQUARE_SIZE
++	// (and hh + radius of y1 * SQUARE_SIZE): it measures from the rectangle's
++	// x1/y1, not its middle. So the box spanning every rectangle's
++	// [x1 * SQUARE_SIZE - hw, x1 * SQUARE_SIZE + hw] (and the same in y),
++	// widened by the radius, holds every centre any rectangle accepts, and an
++	// instance outside it overlaps none; inside, the tests run as before.
++	const bool brH127 = (g_brToggles3 & 0x800000) != 0;
++	int brLoX = std::numeric_limits<int>::max(), brHiX = std::numeric_limits<int>::min();
++	int brLoY = std::numeric_limits<int>::max(), brHiY = std::numeric_limits<int>::min();
++	for (const SRectangle& r: rects) {
++		const int hw = r.GetWidth() * (SQUARE_SIZE / 2);
++		const int hh = r.GetHeight() * (SQUARE_SIZE / 2);
++		brLoX = std::min(brLoX, r.x1 * SQUARE_SIZE - hw); brHiX = std::max(brHiX, r.x1 * SQUARE_SIZE + hw);
++		brLoY = std::min(brLoY, r.y1 * SQUARE_SIZE - hh); brHiY = std::max(brHiY, r.y1 * SQUARE_SIZE + hh);
++	}
+ 	auto AnyOverlap = [&](const SLosInstance* li) -> bool {
++		if (brH127) {
++			const int2 pos = li->basePos * mipDiv;
++			const int radius = li->radius * mipDiv;
++			if (pos.x < brLoX - radius || pos.x > brHiX + radius || pos.y < brLoY - radius || pos.y > brHiY + radius)
++				return false;
++		}
+ 		for (const SRectangle& r: rects)
+ 			if (CheckOverlap(li, r))
+ 				return true;
+-- 
+2.53.0
+

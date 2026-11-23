@@ -1,0 +1,30 @@
+From 5fa13e36a26d96952c9be235709359168ede098a Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 13:44:20 +0000
+Subject: [PATCH 101/108] [barreplay] H99: never destroy the GC thread's mutex
+ and condition variable (the process hung at exit)
+
+---
+ rts/Game/Game.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index f8080ad..1869537 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1744,8 +1744,10 @@ static void BrCollapseHugePages()
+ // thread exists from frame 0 whatever the toggles, so a checkpoint holds it
+ // and a trial pins it with the workers rather than on the main thread's core.
+ namespace BrH99 {
+-	std::mutex mtx;
+-	std::condition_variable cv;
++	// never destroyed: the thread still waits on them when the process exits,
++	// and destroying a condition variable with a waiter blocks (the exit hung)
++	std::mutex& mtx = *new std::mutex();
++	std::condition_variable& cv = *new std::condition_variable();
+ 	bool request = false;
+ 	bool done = true;
+ 	bool started = false;
+-- 
+2.53.0
+

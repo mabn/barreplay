@@ -1,0 +1,249 @@
+From a13fdc4d1b8729ac93795bc365cdcc6d13f0d52b Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 18:36:58 +0000
+Subject: [PATCH 131/149] [barreplay] a third toggle word (BARREPLAY_TOGGLES3,
+ t3= in park.go); H108: the LOS part of a frame's map-damage craters in one
+ pass per sensor type (toggle3 0x1)
+
+Each crater scanned every cached and used LOS instance of every type
+(ILosType::UpdateHeightMapSynced, 1.3% of the main thread in speed59's late
+window). The batch deletes and queues the same instances; only the order of
+queueing and deleting can differ, and the queue is drained whole into an
+update whose map changes are integer sums.
+---
+ rts/Map/BasicMapDamage.cpp                    | 23 +++++-
+ rts/Net/NetCommands.cpp                       |  6 +-
+ rts/Sim/Misc/LosHandler.cpp                   | 81 +++++++++++++++++++
+ rts/Sim/Misc/LosHandler.h                     |  5 ++
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h     |  1 +
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   |  7 ++
+ 6 files changed, 120 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Map/BasicMapDamage.cpp b/rts/Map/BasicMapDamage.cpp
+index be251eb..7dbb4b7 100644
+--- a/rts/Map/BasicMapDamage.cpp
++++ b/rts/Map/BasicMapDamage.cpp
+@@ -225,6 +225,11 @@ void CBasicMapDamage::Explosion(const float3& pos, float strength, float radius,
+ 	}
+ }
+ 
++// [barreplay] H108: the frame's crater rectangles for the LOS handler
++static bool brBatchLos = false;
++static std::vector<SRectangle> brLosRects;
++extern unsigned g_brToggles3;
++
+ void CBasicMapDamage::RecalcArea(int x1, int x2, int y1, int y2)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+@@ -242,7 +247,11 @@ void CBasicMapDamage::RecalcArea(int x1, int x2, int y1, int y2)
+ 	readMap->UpdateHeightMapSynced(updRect);
+ 	featureHandler.TerrainChanged(x1, y1, x2, y2);
+ 	smoothGround.MapChanged(x1, y1, x2, y2);
+-	{
++	// [barreplay] H108: inside the map-damage update, the LOS part waits for
++	// the frame's other craters (CLosHandler::BrUpdateHeightMapSyncedBatch)
++	if (brBatchLos) {
++		brLosRects.push_back(updRect);
++	} else {
+ 		SCOPED_TIMER("Sim::BasicMapDamage::Los");
+ 		losHandler->UpdateHeightMapSynced(updRect);
+ 	}
+@@ -257,6 +266,10 @@ void CBasicMapDamage::Update()
+ {
+ 	SCOPED_TIMER("Sim::BasicMapDamage");
+ 
++	// [barreplay] H108 (toggle3 0x1)
++	brBatchLos = (g_brToggles3 & 0x1) != 0;
++	brLosRects.clear();
++
+ 	for (unsigned int i = explUpdateQueueIdx, n = explosionUpdateQueue.size(); i < n; i++) {
+ 		Explo& e = explosionUpdateQueue[i];
+ 
+@@ -295,6 +308,14 @@ void CBasicMapDamage::Update()
+ 		RecalcArea(e.x1 - 1, e.x2 + 1, e.y1 - 1, e.y2 + 1);
+ 	}
+ 
++	if (brBatchLos) {
++		brBatchLos = false;
++		if (!brLosRects.empty()) {
++			SCOPED_TIMER("Sim::BasicMapDamage::Los");
++			losHandler->BrUpdateHeightMapSyncedBatch(brLosRects);
++		}
++	}
++
+ 
+ 	// pop explosions that are no longer being processed
+ 	while (explUpdateQueueIdx < explosionUpdateQueue.size()) {
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 60025ef..1aa95d5 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -103,6 +103,8 @@ namespace {
+ 						g_brToggles = unsigned(strtoul(word + 2, nullptr, 16));
+ 					if (strncmp(word, "t2=", 3) == 0)
+ 						g_brToggles2 = unsigned(strtoul(word + 3, nullptr, 16));
++					if (strncmp(word, "t3=", 3) == 0)
++						g_brToggles3 = unsigned(strtoul(word + 3, nullptr, 16));
+ 					// "p4check": P4's (and P10's) check mode for this trial
+ 					if (strcmp(word, "p4check") == 0)
+ 						BrP4::SetCheck(true);
+@@ -813,9 +815,9 @@ void CGame::ClientReadNet()
+ 							BrP5::BenchLine(p5line, sizeof(p5line));
+ 							// the bench line last: bench-ckpt reads the result's last line
+ 							if (g_brBench.out) {
+-								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x toggles2=%x %s%s%s%s", g_brToggles, g_brToggles2, pline, gline, p4line, p5line); fputs(line, f); fclose(f); }
++								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x toggles2=%x toggles3=%x %s%s%s%s", g_brToggles, g_brToggles2, g_brToggles3, pline, gline, p4line, p5line); fputs(line, f); fclose(f); }
+ 							}
+-							fprintf(stderr, "toggles=%x toggles2=%x %s%s%s%s", g_brToggles, g_brToggles2, pline, gline, p4line, p5line);
++							fprintf(stderr, "toggles=%x toggles2=%x toggles3=%x %s%s%s%s", g_brToggles, g_brToggles2, g_brToggles3, pline, gline, p4line, p5line);
+ 							fputs(line, stderr); fflush(stderr);
+ 							// An instrumented (-fprofile-generate) build writes its
+ 							// profile at exit, which _exit skips: dump it first, so a
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index f040851..b75eef3 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -1337,6 +1337,87 @@ void CLosHandler::UpdateHeightMapSynced(SRectangle rect)
+ }
+ 
+ 
++// [barreplay] H108 (toggle3 0x1): a frame's map-damage craters at once. Each
++// crater used to scan every cached and every used instance of every type.
++// One pass over each instead deletes the cached instances overlapping any
++// crater and queues for recalculation the used ones overlapping any, which are
++// the same two sets the craters one by one produce: nothing between them reads
++// or changes an instance (the height map, features, the smooth mesh and the
++// pathing are updated in between, none of which looks at LOS), a crater only
++// deletes instances nobody holds and only queues instances somebody does, and
++// a deleted instance is never queued. What can differ is only the order in
++// which instances are queued and deleted, and the queue is drained whole into
++// the update, whose map additions and removals are integer sums.
++void ILosType::BrUpdateHeightMapSyncedBatch(const std::vector<SRectangle>& rects)
++{
++	RECOIL_DETAILED_TRACY_ZONE;
++	if (algoType == LOS_ALGO_CIRCLE || rects.empty())
++		return;
++
++	// UpdateHeightMapSynced's CheckOverlap, for one rectangle
++	auto CheckOverlap = [&](const SLosInstance* li, const SRectangle& rect) -> bool {
++		int2 pos = li->basePos * mipDiv;
++		const int radius = li->radius * mipDiv;
++
++		const int hw = rect.GetWidth() * (SQUARE_SIZE / 2);
++		const int hh = rect.GetHeight() * (SQUARE_SIZE / 2);
++
++		int2 circleDistance;
++		circleDistance.x = std::abs(pos.x - rect.x1 * SQUARE_SIZE) - hw;
++		circleDistance.y = std::abs(pos.y - rect.y1 * SQUARE_SIZE) - hh;
++
++		if (circleDistance.x > radius) { return false; }
++		if (circleDistance.y > radius) { return false; }
++		if (circleDistance.x <= 0) { return true; }
++		if (circleDistance.y <= 0) { return true; }
++
++		return (Square(circleDistance.x) + Square(circleDistance.y)) <= Square(radius);
++	};
++	auto AnyOverlap = [&](const SLosInstance* li) -> bool {
++		for (const SRectangle& r: rects)
++			if (CheckOverlap(li, r))
++				return true;
++		return false;
++	};
++
++	for (auto it = losCache.begin(); it != losCache.end();) {
++		SLosInstance* li = *it;
++		if (li->refCount > 0 || !AnyOverlap(li)) {
++			++it;
++			continue;
++		}
++
++		it = losCache.erase(it);
++		li->isCached = false;
++		DeleteInstance(li);
++	}
++
++	for (auto& p: instanceHashes) {
++		for (SLosInstance* li: p.second) {
++			if (li->status & SLosInstance::TLosStatus::RECALC)
++				continue;
++			if (!AnyOverlap(li))
++				continue;
++
++			UpdateInstanceStatus(li, SLosInstance::TLosStatus::RECALC);
++		}
++	}
++}
++
++void CLosHandler::BrUpdateHeightMapSyncedBatch(const std::vector<SRectangle>& rects)
++{
++	RECOIL_DETAILED_TRACY_ZONE;
++	BrP7::RevertAll();
++	if ((g_brToggles & 0x40000000) != 0 && ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection()) {
++		for_mt(0, losTypes.size(), [&](const int idx) {
++			losTypes[idx]->BrUpdateHeightMapSyncedBatch(rects);
++		});
++		return;
++	}
++	for (ILosType* lt: losTypes)
++		lt->BrUpdateHeightMapSyncedBatch(rects);
++}
++
+ bool CLosHandler::InLos(const CUnit* unit, int allyTeam) const
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index e6dcbb9..09145a1 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -178,6 +178,9 @@ public:
+ 	static size_t cacheRefs;
+ 
+ 	spring::unordered_map<int, std::vector<SLosInstance*> > instanceHashes;
++public:
++	// [barreplay] H108: UpdateHeightMapSynced for several rectangles at once
++	void BrUpdateHeightMapSyncedBatch(const std::vector<SRectangle>& rects);
+ 
+ 	std::vector<CLosMap> losMaps;
+ 	std::deque<SLosInstance> instances;
+@@ -309,6 +312,8 @@ public:
+ public:
+ 	void Update() override;
+ 	void UpdateHeightMapSynced(SRectangle rect);
++	// [barreplay] H108: the map-damage update's craters of a frame, at once
++	void BrUpdateHeightMapSyncedBatch(const std::vector<SRectangle>& rects);
+ 
+ public:
+ 	ILosType los;
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+index 74d30bc..1113163 100644
+--- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -19,6 +19,7 @@ class CUnit;
+ extern unsigned g_brToggles;
+ // BARREPLAY_TOGGLES2 / "t2=<hex>": the second word of switches
+ extern unsigned g_brToggles2;
++extern unsigned g_brToggles3;
+ 
+ // [barreplay] H76 (toggle 0x200): the largest chunk a for_mt_chunk call of the
+ // unit loops hands one thread. for_mt_chunk cuts its range into one chunk per
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 60c9b57..2e4a04c 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -53,6 +53,13 @@ static unsigned BrReadToggles2Env() {
+ }
+ unsigned g_brToggles2 = BrReadToggles2Env();
+ 
++// the third word (BARREPLAY_TOGGLES3, go file "t3=<hex>"): the second is full too
++static unsigned BrReadToggles3Env() {
++	const char* s = std::getenv("BARREPLAY_TOGGLES3");
++	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): 0u;
++}
++unsigned g_brToggles3 = BrReadToggles3Env();
++
+ // [barreplay] P1: the general move-type loop, run on all threads with exactly
+ // the sequential result.
+ //
+-- 
+2.53.0
+

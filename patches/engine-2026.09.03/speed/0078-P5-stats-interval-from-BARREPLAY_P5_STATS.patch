@@ -1,0 +1,45 @@
+From 46fdb00b645a1d03a596dc3e64097b1980c0c9d0 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 13:39:05 +0000
+Subject: [PATCH 78/78] [barreplay] P5 stats interval from BARREPLAY_P5_STATS
+
+---
+ rts/Sim/Units/Scripts/BrCobPar.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.cpp b/rts/Sim/Units/Scripts/BrCobPar.cpp
+index 6b5eda2..271fb9a 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.cpp
++++ b/rts/Sim/Units/Scripts/BrCobPar.cpp
+@@ -251,6 +251,7 @@ namespace BrP5 {
+ 
+ 		int nWorkers = -1;
+ 		bool statsOn = false;
++		int statsEvery = 900; // BARREPLAY_P5_STATS=<frames>
+ 		struct Stats {
+ 			long long phases = 0, ticks = 0, par = 0, segs = 0, segTicks = 0, serialPoints = 0;
+ 			std::atomic<long long> byWorkers{0};
+@@ -438,7 +439,10 @@ namespace BrP5 {
+ 			nWorkers = 6;
+ 			if (const char* w = getenv("BARREPLAY_P5_WORKERS"))
+ 				nWorkers = std::max(0, atoi(w));
+-			statsOn = (getenv("BARREPLAY_P5_STATS") != nullptr);
++			if (const char* sv = getenv("BARREPLAY_P5_STATS")) {
++				statsOn = true;
++				statsEvery = std::max(1, atoi(sv));
++			}
+ 			if (const char* m = getenv("BARREPLAY_P5_MINSEG"))
+ 				minSeg = std::max(1, atoi(m));
+ 			if (const char* p = getenv("BARREPLAY_P5_PHASES"))
+@@ -541,7 +545,7 @@ namespace BrP5 {
+ 		ThreadPool::SetInlineOnly(false);
+ 		(void) mt;
+ 
+-		if (statsOn && (gs->frameNum - st.lastFrame) >= 900) {
++		if (statsOn && (gs->frameNum - st.lastFrame) >= statsEvery) {
+ 			st.lastFrame = gs->frameNum;
+ 			LOG("[BR_P5] f=%d phases=%lld ticks=%lld parallel=%lld (%.1f%%) segments=%lld (%.1f ticks each) serialPoints=%lld byMain=%lld byWorkers=%lld waitMcycles=%.1f startMcycles=%.1f",
+ 				gs->frameNum, st.phases, st.ticks, st.par, 100.0 * st.par / std::max(1LL, st.ticks), st.segs, double(st.segTicks) / std::max(1LL, st.segs), st.serialPoints,
+-- 
+2.53.0
+

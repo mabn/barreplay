@@ -1,0 +1,111 @@
+From 2c3dae87bc9856186268ec3aba48fbe5a458eb48 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 15:47:01 +0000
+Subject: [PATCH 83/90] [barreplay] N2: the depth decrement as a subtraction, #
+ of a non-table through Lua's own operator
+
+---
+ rts/Lua/BrNativeHandler.cpp | 44 +++++++++++++++++++++++++++----------
+ 1 file changed, 32 insertions(+), 12 deletions(-)
+
+diff --git a/rts/Lua/BrNativeHandler.cpp b/rts/Lua/BrNativeHandler.cpp
+index 7c6e9b4..541fd96 100644
+--- a/rts/Lua/BrNativeHandler.cpp
++++ b/rts/Lua/BrNativeHandler.cpp
+@@ -34,8 +34,10 @@ namespace BrN2 {
+ 		struct State {
+ 			lua_State* L = nullptr;
+ 			Entry ci[CI_N];
+-			int mulRef = LUA_NOREF; // a * b and a + b with Lua's semantics, for non-numbers
++			int mulRef = LUA_NOREF; // a * b, a + b and a - b with Lua's semantics, for non-numbers
+ 			int addRef = LUA_NOREF;
++			int subRef = LUA_NOREF;
++			int lenRef = LUA_NOREF; // #t for a non-table
+ 		};
+ 		std::vector<uint64_t> allowed;
+ 		char stateKey; // the registry key of a state's State (light userdata)
+@@ -236,18 +238,21 @@ namespace BrN2 {
+ 			ArithSlow(L, st.mulRef, "local a, b = ... return a * b", a, b);
+ 		}
+ 
+-		// callinDepth = callinDepth + 1, callinDepth = callinDepth - 1 (the
+-		// wrapper's upvalue arithmetic; x - 1 and x + -1 are the same float)
+-		void AddDepth(lua_State* L, State& st, const Entry& e, int inst, float d) {
++		// callinDepth = callinDepth + 1 (up) / callinDepth = callinDepth - 1
++		// (the wrapper's upvalue arithmetic)
++		void StepDepth(lua_State* L, State& st, const Entry& e, int inst, bool up) {
+ 			lua_getupvalue(L, inst, e.uvDepth);
+ 			if (lua_type(L, -1) == LUA_TNUMBER) {
+ 				const lua_Number v = lua_tonumber(L, -1);
+ 				lua_pop(L, 1);
+-				lua_pushnumber(L, v + d);
++				lua_pushnumber(L, up? (v + lua_Number(1)): (v - lua_Number(1)));
+ 			} else {
+ 				const int v = lua_gettop(L);
+-				lua_pushnumber(L, d);
+-				ArithSlow(L, st.addRef, "local a, b = ... return a + b", v, v + 1);
++				lua_pushnumber(L, lua_Number(1));
++				if (up)
++					ArithSlow(L, st.addRef, "local a, b = ... return a + b", v, v + 1);
++				else
++					ArithSlow(L, st.subRef, "local a, b = ... return a - b", v, v + 1);
+ 				lua_replace(L, v);
+ 				lua_settop(L, v);
+ 			}
+@@ -322,10 +327,25 @@ namespace BrN2 {
+ 			lua_pushnil(L);
+ 		}
+ 
+-		void HandlerExplosion(lua_State* L, int nargs, int list, int key) {
++		void HandlerExplosion(lua_State* L, State& st, int nargs, int list, int key) {
+ 			// for i = #list, 1, -1 do local g = list[i]; if g:Explosion(...) then return true end end; return false
++			lua_Number n;
++			if (lua_istable(L, list)) {
++				n = lua_Number(lua_objlen(L, list)); // OP_LEN on a table: luaH_getn
++			} else {
++				// anything else: Lua's own # (strings, metamethods, the error)
++				if (st.lenRef == LUA_NOREF) {
++					luaL_loadstring(L, "local t = ... return #t");
++					st.lenRef = luaL_ref(L, LUA_REGISTRYINDEX);
++				}
++				lua_rawgeti(L, LUA_REGISTRYINDEX, st.lenRef);
++				lua_pushvalue(L, list);
++				lua_call(L, 1, 1);
++				n = lua_tonumber(L, -1);
++				lua_pop(L, 1);
++			}
+ 			bool res = false;
+-			for (lua_Number i = lua_Number(lua_objlen(L, list)); i >= 1; i = i - 1) {
++			for (lua_Number i = n; i >= 1; i = i - 1) {
+ 				lua_pushnumber(L, i);
+ 				lua_gettable(L, list);
+ 				const int g = lua_gettop(L);
+@@ -364,7 +384,7 @@ namespace BrN2 {
+ 			const int key = lua_gettop(L);
+ 
+ 			// callinDepth = callinDepth + 1
+-			AddDepth(L, st, e, inst, 1.0f);
++			StepDepth(L, st, e, inst, true);
+ 
+ 			// local res1, res2 = selffunc(self, ...): the handler
+ 			// (its tracy stubs do nothing; the handler reads self.<X>List first)
+@@ -376,14 +396,14 @@ namespace BrN2 {
+ 			switch (ci) {
+ 				case CI_UnitPreDamaged:      { HandlerPreDamaged(L, st, nargs, list, key); } break;
+ 				case CI_UnitDamaged:         { HandlerDamaged(L, nargs, list, key, 10); } break;
+-				case CI_Explosion:           { HandlerExplosion(L, nargs, list, key); } break;
++				case CI_Explosion:           { HandlerExplosion(L, st, nargs, list, key); } break;
+ 				case CI_ProjectileDestroyed: { HandlerDamaged(L, nargs, list, key, 3); } break;
+ 				default: { lua_pushnil(L); lua_pushnil(L); } break;
+ 			}
+ 			const int res = lua_gettop(L) - 1;
+ 
+ 			// callinDepth = callinDepth - 1
+-			AddDepth(L, st, e, inst, -1.0f);
++			StepDepth(L, st, e, inst, false);
+ 
+ 			// if reorderNeeded and callinDepth == 0 then self:PerformReorders() end
+ 			lua_getupvalue(L, inst, e.uvReorder);
+-- 
+2.53.0
+

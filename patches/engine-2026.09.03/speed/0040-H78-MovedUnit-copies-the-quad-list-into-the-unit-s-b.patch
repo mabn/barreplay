@@ -1,0 +1,42 @@
+From 82f60d9f1d5b5e37d94270397657905dc460cfde Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 16:49:33 +0000
+Subject: [PATCH 40/43] H78: MovedUnit copies the quad list into the unit's
+ buffer (toggle 0x800)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Misc/QuadField.cpp | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 348b178..4a3dbb4 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ 
+ #include "QuadField.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Map/ReadMap.h"
+ #include "Sim/Misc/CollisionVolume.h"
+ #include "Sim/Misc/GlobalSynced.h"
+@@ -453,7 +454,14 @@ void CQuadField::MovedUnit(CUnit* unit)
+ 		spring::VectorInsertUnique(baseQuads[qi].teamUnits[unit->allyteam], unit, false);
+ 	}
+ 
+-	unit->quads = std::move(*qfQuery.quads);
++	// [barreplay] H78 (toggle 0x800): copy into the unit's own buffer instead of
++	// taking the pooled query vector's, which left the pool an empty vector to
++	// allocate again and freed the unit's old buffer: a malloc and a free per
++	// unit changing quads. Same contents either way.
++	if ((g_brToggles & 0x800) != 0)
++		unit->quads.assign(qfQuery.quads->begin(), qfQuery.quads->end());
++	else
++		unit->quads = std::move(*qfQuery.quads);
+ }
+ 
+ void CQuadField::RemoveUnit(CUnit* unit)
+-- 
+2.53.0
+

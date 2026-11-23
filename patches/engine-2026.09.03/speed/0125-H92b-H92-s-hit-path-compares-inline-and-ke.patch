@@ -1,0 +1,102 @@
+From b1c3104554dc5441069a798f6a14a1029ae7c4c4 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 04:36:40 +0000
+Subject: [PATCH] [barreplay] H92b: H92's hit path compares inline and keeps
+ the ground clamp's answer while the height map's version is unchanged
+ (toggle2 0x8000000)
+
+The hit path was 1.4% of the main thread (beam lasers' own vector update):
+nine out-of-line memcmp calls and a height lookup per hit.
+---
+ rts/Sim/Weapons/Weapon.cpp | 31 +++++++++++++++++++++++++++----
+ rts/Sim/Weapons/Weapon.h   |  4 ++++
+ 2 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index d0a0bed..36f968f 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "Weapon.h"
++#include "Map/ReadMap.h"
+ #include <cstring>
+ #include "Rendering/Models/LocalModelPiece.hpp"
+ 
+@@ -285,7 +286,13 @@ void CWeapon::UpdateWeaponErrorVector()
+ 		errorVector = newErrorVector;
+ }
+ 
+-static inline bool BrSame(const float3& a, const float3& b) { return (std::memcmp(&a, &b, sizeof(float3)) == 0); }
++// bitwise, like memcmp == 0, but inline (GCC called memcmp for 12 bytes)
++static inline bool BrSame(const float3& a, const float3& b) {
++	uint32_t x[3], y[3];
++	std::memcpy(x, &a, sizeof(x));
++	std::memcpy(y, &b, sizeof(y));
++	return ((x[0] ^ y[0]) | (x[1] ^ y[1]) | (x[2] ^ y[2])) == 0;
++}
+ 
+ void CWeapon::UpdateWeaponVectors()
+ {
+@@ -307,8 +314,19 @@ void CWeapon::UpdateWeaponVectors()
+ 			&& BrSame(relAimFromPos, brVec.relAimFrom) && BrSame(relWeaponMuzzlePos, brVec.relMuzzle) && BrSame(aimFromPos, brVec.aimFrom)
+ 			&& BrSame(weaponMuzzlePos, brVec.muzzle) && BrSame(weaponDir, brVec.dir)) {
+ 			aimFromPos = brVec.rawAimFrom;
+-			if (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z)) {
+-				aimFromPos = owner->pos + UpVector * 10;
++			// [barreplay] H92b (toggle2 0x8000000): the clamp below reads only
++			// rawAimFrom (unchanged here) and the synced height map, whose every
++			// write bumps g_brHeightMapVersion (H88), so the last answer holds
++			// while the version does
++			if ((g_brToggles2 & 0x8000000) != 0 && brVec.clampValid && brVec.hmv == g_brHeightMapVersion) {
++				if (brVec.clamped)
++					aimFromPos = owner->pos + UpVector * 10;
++			} else {
++				brVec.clamped = (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z));
++				brVec.hmv = g_brHeightMapVersion;
++				brVec.clampValid = true;
++				if (brVec.clamped)
++					aimFromPos = owner->pos + UpVector * 10;
+ 			}
+ 			brVec.aimFrom = aimFromPos;
+ 			return;
+@@ -325,7 +343,9 @@ void CWeapon::UpdateWeaponVectors()
+ 	const float3 rawAimFrom = aimFromPos;
+ 
+ 	// hope that we are underground because we are a popup weapon and will come above ground later
+-	if (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z)) {
++	const unsigned brHmv = g_brHeightMapVersion; // [barreplay] H92b
++	const bool brClamped = (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z));
++	if (brClamped) {
+ 		aimFromPos = owner->pos + UpVector * 10;
+ 	}
+ 
+@@ -343,6 +363,9 @@ void CWeapon::UpdateWeaponVectors()
+ 			brVec.front = owner->frontdir;
+ 			brVec.right = owner->rightdir;
+ 			brVec.up = owner->updir;
++			brVec.clamped = brClamped;
++			brVec.hmv = brHmv;
++			brVec.clampValid = true;
+ 			brVec.rawAimFrom = rawAimFrom;
+ 			brVec.relAimFrom = relAimFromPos;
+ 			brVec.relMuzzle = relWeaponMuzzlePos;
+diff --git a/rts/Sim/Weapons/Weapon.h b/rts/Sim/Weapons/Weapon.h
+index 52ee906..a6f33c4 100644
+--- a/rts/Sim/Weapons/Weapon.h
++++ b/rts/Sim/Weapons/Weapon.h
+@@ -227,6 +227,10 @@ public:
+ 		float3 rawAimFrom; // before the ground clamp
+ 		float3 relAimFrom, relMuzzle, aimFrom, muzzle, dir;
+ 		bool valid = false;
++		// H92b: the ground clamp's answer for rawAimFrom at height-map version hmv
++		bool clampValid = false;
++		bool clamped = false;
++		unsigned hmv = 0;
+ 	} brVec;
+ 	float3 mainDir;                         // main aiming-direction of weapon
+ 	float3 wantedDir;                       // norm(currentTargetPos - weaponMuzzlePos)
+-- 
+2.53.0
+

@@ -1,0 +1,222 @@
+From 201d5f11c26f020b467de6ff37b2731264202937 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 05:37:15 +0000
+Subject: [PATCH] [barreplay] P11: the animation tick's parallel section and
+ in-order pass as one pipeline (toggle2 0x80000000)
+
+The workers tick the scripts' animations in list order while the main thread's
+in-order pass runs behind them; each script is ticked before its
+TickAnimFinished. A Lua unit script's AnimFinished first has every script
+ticked (its Lua may touch any). From 512 animating scripts
+(BARREPLAY_P11_MINSCRIPTS).
+---
+ rts/Sim/Units/Scripts/LuaUnitScript.cpp    |   5 +
+ rts/Sim/Units/Scripts/UnitScript.h         |   4 +
+ rts/Sim/Units/Scripts/UnitScriptEngine.cpp | 129 ++++++++++++++++++++-
+ 3 files changed, 137 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/Scripts/LuaUnitScript.cpp b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+index 5246065..3529649 100644
+--- a/rts/Sim/Units/Scripts/LuaUnitScript.cpp
++++ b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+@@ -946,9 +946,14 @@ float CLuaUnitScript::TargetWeight(int weaponNum, const CUnit* targetUnit)
+ }
+ 
+ 
++void BrP11EnsureAll(); // [barreplay] P11 (UnitScriptEngine.cpp)
++
+ void CLuaUnitScript::AnimFinished(AnimType type, int piece, int axis)
+ {
+ 	ZoneScoped;
++	// [barreplay] P11: the Lua below may touch any script: every animation of
++	// the frame is ticked first
++	BrP11EnsureAll();
+ 	switch (type) {
+ 	case ATurn:
+ 		Call(LUAFN_TurnFinished, piece + 1, axis + 1); break;
+diff --git a/rts/Sim/Units/Scripts/UnitScript.h b/rts/Sim/Units/Scripts/UnitScript.h
+index 28105b6..560c680 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.h
++++ b/rts/Sim/Units/Scripts/UnitScript.h
+@@ -228,6 +228,10 @@ public:
+ public:
+ 	const auto& GetLiveAnims() const { return anims; }
+ 	const auto& GetDoneAnims() const { return doneAnims; }
++
++	// [barreplay] P11 (UnitScriptEngine.cpp): this frame's pipeline slot
++	int brP11Frame = -1;
++	int brP11Idx = -1;
+ };
+ 
+ #endif // UNIT_SCRIPT_H
+diff --git a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+index bedd7ab..98a5dc8 100644
+--- a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
++++ b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+@@ -3,6 +3,11 @@
+ /* heavily based on CobEngine.cpp */
+ 
+ #include "UnitScriptEngine.h"
++#include "System/Threading/ThreadPool.h"
++#include "Sim/Misc/GlobalSynced.h"
++#include <immintrin.h>
++#include <memory>
++#include <atomic>
+ #include "BrCobPar.h"
+ #include "Sim/Misc/BrLosOverlap.h"
+ 
+@@ -135,6 +140,120 @@ void CUnitScriptEngine::RemoveInstance(CUnitScript* instance)
+ 	spring::VectorErase(animating, instance);
+ }
+ 
++// [barreplay] P11 (toggle2 0x80000000): the animations' parallel section and
++// the in-order pass after it as one pipeline. The workers tick the scripts'
++// animations (TickAllAnims) in list order while the main thread runs the pass
++// behind them; each script is ticked (by whoever claims it first, else waited
++// for) before its TickAnimFinished. Stock ticks them all before the pass, so a
++// script ticked later must not have been touched by the pass meanwhile: the
++// pass touches only its current script (COB's AnimFinished only schedules a
++// thread for the next tick), except a Lua unit script's AnimFinished, which runs
++// Lua and therefore first has every script ticked (BrP11EnsureAll). A script
++// the pass appends this frame was not ticked in stock either and is not here.
++// From 512 animating scripts (BARREPLAY_P11_MINSCRIPTS).
++namespace BrP11 {
++	std::atomic<bool> active{false};
++	namespace {
++		std::vector<CUnitScript*> snap;
++		std::unique_ptr<std::atomic<uint8_t>[]> state; // 0 waiting, 1 ticking, 2 done
++		size_t cap = 0;
++		std::atomic<int> nextChunk{0};
++		int numChunks = 0;
++		int tickDelta = 0;
++		int frame = -1;
++		constexpr int CHUNK = 16;
++
++		void TickIdx(size_t k, bool main) {
++			if (state[k].load(std::memory_order_acquire) == 2)
++				return;
++			uint8_t z = 0;
++			if (state[k].compare_exchange_strong(z, 1, std::memory_order_acq_rel)) {
++				snap[k]->TickAllAnims(tickDelta);
++				state[k].store(2, std::memory_order_release);
++				return;
++			}
++			if (!main)
++				return;
++			while (state[k].load(std::memory_order_acquire) != 2)
++				_mm_pause();
++		}
++		void WorkerLoop() {
++			for (int c; (c = nextChunk.fetch_add(1, std::memory_order_acq_rel)) < numChunks; ) {
++				const size_t b = size_t(c) * CHUNK, e = std::min(snap.size(), b + CHUNK);
++				for (size_t k = b; k < e; ++k)
++					TickIdx(k, false);
++			}
++		}
++		auto workerFn = [](const int) { WorkerLoop(); };
++		std::shared_ptr<ForTaskGroup<decltype(workerFn)>> taskGroup;
++	}
++
++	size_t MinScripts() {
++		static const size_t m = []() { const char* v = getenv("BARREPLAY_P11_MINSCRIPTS"); return (v != nullptr)? size_t(atoi(v)): size_t(512); }();
++		return m;
++	}
++
++	void Begin(const std::vector<CUnitScript*>& animating, int deltaTime) {
++		snap = animating;
++		const size_t n = snap.size();
++		if (cap < n) {
++			cap = n + n / 2;
++			state.reset(new std::atomic<uint8_t>[cap]);
++		}
++		frame = gs->frameNum;
++		tickDelta = deltaTime;
++		for (size_t k = 0; k < n; ++k) {
++			state[k].store(0, std::memory_order_relaxed);
++			snap[k]->brP11Frame = frame;
++			snap[k]->brP11Idx = int(k);
++		}
++		numChunks = int((n + CHUNK - 1) / CHUNK);
++		nextChunk.store(0, std::memory_order_relaxed);
++
++		const int nw = ThreadPool::GetNumThreads() - 1;
++		static TaskPool<ForTaskGroup, decltype(workerFn)> pool;
++		taskGroup = pool.GetTaskGroup();
++		taskGroup->Enqueue(0, nw, 1, workerFn);
++		taskGroup->UpdateId();
++		for (int i = 1; i <= nw; ++i) {
++			taskGroup->wantedThread.store(i);
++			ThreadPool::PushTaskGroup(taskGroup);
++		}
++		ThreadPool::NotifyWorkerThreads(true, false);
++		active.store(true, std::memory_order_release);
++	}
++
++	void Ensure(const CUnitScript* s) {
++		if (s->brP11Frame != frame)
++			return;
++		const int k = s->brP11Idx;
++		if (k < 0 || size_t(k) >= snap.size() || snap[k] != s)
++			return;
++		TickIdx(size_t(k), true);
++	}
++
++	void EnsureAllSlow() {
++		for (size_t k = 0; k < snap.size(); ++k)
++			TickIdx(k, true);
++	}
++
++	void End() {
++		EnsureAllSlow();
++		active.store(false, std::memory_order_release);
++		{
++			MultithreadedSection mtSection;
++			ThreadPool::WaitForFinished(taskGroup);
++		}
++		taskGroup.reset();
++	}
++}
++
++void BrP11EnsureAll()
++{
++	if (BrP11::active.load(std::memory_order_acquire))
++		BrP11::EnsureAllSlow();
++}
++
+ void CUnitScriptEngine::Tick(int deltaTime)
+ {
+ 	SCOPED_TIMER("CUnitScriptEngine::Tick");
+@@ -146,7 +265,11 @@ void CUnitScriptEngine::Tick(int deltaTime)
+ 		BrP7::Begin();
+ 
+ 	// tick all (COB or LUS) script instances that have registered themselves as animating
+-	{
++	const bool brP11 = (g_brToggles2 & 0x80000000) != 0 && animating.size() >= BrP11::MinScripts()
++		&& ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection();
++	if (brP11) {
++		BrP11::Begin(animating, deltaTime);
++	} else {
+ 		ZoneScopedN("CUnitScriptEngine::Tick(MT)");
+ 
+ 		// setting currentScript = animating[i]; is not required here, only in ST section below
+@@ -164,6 +287,8 @@ void CUnitScriptEngine::Tick(int deltaTime)
+ 		uint32_t cs = 0;
+ 		for (size_t i = 0; i < animating.size(); /*NO-OP*/) {
+ 			currentScript = animating[i];
++			if (brP11)
++				BrP11::Ensure(currentScript);
+ 			// deal with synced checksum here, before animating is possibly popped below
+ 			cs = spring::hash_combine(currentScript->GetAnimArrayChecksum(), cs);
+ 
+@@ -178,6 +303,8 @@ void CUnitScriptEngine::Tick(int deltaTime)
+ 		currentScript = nullptr;
+ 		Sync::Assert(cs, "animating");
+ 	}
++	if (brP11)
++		BrP11::End();
+ 
+ 	cobEngine->RunDeferredCallins();
+ }
+-- 
+2.53.0
+

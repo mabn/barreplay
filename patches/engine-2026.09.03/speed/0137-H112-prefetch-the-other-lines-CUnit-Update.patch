@@ -1,0 +1,48 @@
+From 364e365a092c7027a2f9a855b71a60251ac49d61 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 19:51:24 +0000
+Subject: [PATCH 137/149] [barreplay] H112: prefetch the other lines
+ CUnit::Update touches in the unit 8 ahead (toggle3 0x20)
+
+CUnit is 4352 bytes (68 lines); Update reads pos, radius, the physical state,
+midPos (CSolidObject) and lines 60-62, 65-67 of CUnit (position error,
+restTime, recentDamage and the flanking bonus, isDead/beingBuilt, stunned and
+H88's ground cache). H66 prefetched only the first line; H74's helper, which
+covers more, is off. Loads only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/UnitHandler.cpp | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 93a6534..507acb8 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -838,6 +838,23 @@ void CUnitHandler::UpdateUnits()
+ 		BrRunAhead::At(int(i));
+ 		// [barreplay] H66: prefetch the unit 8 ahead and its move type 4 ahead
+ 		if (i + 8 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 8]);
++		// [barreplay] H112 (toggle3 0x20): and the other lines CUnit::Update
++		// touches in it (a unit is 68 lines; pos, radius, the physical state,
++		// midPos, the position error, restTime, recentDamage and the flanking
++		// bonus, isDead/beingBuilt, stunned and H88's ground cache). Loads only.
++		if ((g_brToggles3 & 0x20) != 0 && i + 8 < activeUnits.size()) {
++			const CUnit* u8 = activeUnits[i + 8];
++			__builtin_prefetch(&u8->pos);
++			__builtin_prefetch(&u8->radius);
++			__builtin_prefetch(&u8->physicalState);
++			__builtin_prefetch(&u8->midPos);
++			__builtin_prefetch(&u8->posErrorVector);
++			__builtin_prefetch(reinterpret_cast<const char*>(&u8->posErrorDelta) + sizeof(float3) - 1);
++			__builtin_prefetch(&u8->restTime);
++			__builtin_prefetch(&u8->recentDamage);
++			__builtin_prefetch(&u8->beingBuilt);
++			__builtin_prefetch(reinterpret_cast<const char*>(u8) + sizeof(CUnit) - 1); // stunned, H88's cache
++		}
+ 		if (i + 4 < activeUnits.size()) {
+ 			// [barreplay] H91: only the move types the collision-map update will read
+ 			const CUnit* u4 = activeUnits[i + 4];
+-- 
+2.53.0
+

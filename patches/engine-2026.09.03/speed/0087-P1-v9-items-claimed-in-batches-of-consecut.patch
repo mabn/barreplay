@@ -1,0 +1,150 @@
+From 889cc7b910ed1e3d6ae62ca7ffbe29bdef8678ab Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 17:39:58 +0000
+Subject: [PATCH 87/90] [barreplay] P1 v9: items claimed in batches of
+ consecutive planned-parallel units (toggle2 0x20; bits 6-7 the size:
+ 8/4/16/32); the in-order start passes once a batch
+
+---
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 106 ++++++++++++++++++
+ 1 file changed, 106 insertions(+)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 064c35e..c169f35 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -101,6 +101,10 @@ namespace BrParAir {
+ 	static int trailsFlushed = 0;
+ 	static size_t doneCap = 0;
+ 	static std::atomic<int> claim{0}, frontier{0}, nextStart{0}, handoff{-1};
++	// [barreplay] P1 v9 (toggle2 0x20): items claimed in batches
++	static std::vector<int> batchBeg; // batch b is [batchBeg[b], batchBeg[b + 1])
++	static bool batched = false;
++	static constexpr int MAX_BATCH = 32;
+ 	static std::atomic<unsigned> serialRuns{0};
+ 
+ 	// [barreplay] measurement: the main thread's waits by kind (cycles, count),
+@@ -429,11 +433,100 @@ namespace BrParAir {
+ 		}
+ 	}
+ 
++	// v9: a batch of consecutive planned-parallel items (a planned serial item
++	// is always a batch of its own) takes the in-order start once. Its owner
++	// checks the plans of all its items, releases the start past the ones that
++	// still hold, and runs them in order; an item whose plan no longer holds
++	// keeps the start (nothing later can begin) and runs serially, exactly as
++	// in Process, and the rest of the batch then goes item by item. The start
++	// passes one batch at a time instead of one item at a time: the chain was
++	// most of the main thread's wait here (~5,600 hops a frame between cores).
++	static void ProcessBatch(int b0, int b1, bool isMain) {
++		if ((b1 - b0) == 1 || isSerial[b0]) {
++			for (int i = b0; i < b1; ++i)
++				Process(i, isMain);
++			return;
++		}
++
++		unsigned n = 0;
++		const unsigned runs0 = serialRuns.load(std::memory_order_acquire);
++		bool early[MAX_BATCH];
++		for (int i = b0; i < b1; ++i)
++			early[i - b0] = StillAsPlanned(i);
++
++		if (nextStart.load(std::memory_order_acquire) != b0) {
++			MainWait mw(MW_START);
++			while (nextStart.load(std::memory_order_acquire) != b0) {
++				if (!isMain || !ServiceHandoff())
++					Spin(n);
++			}
++		}
++
++		const bool same = (serialRuns.load(std::memory_order_acquire) == runs0);
++		int f = b0;
++		for (; f < b1; ++f) {
++			if (same) {
++				stats.earlyChecks++;
++				if (!early[f - b0])
++					break;
++			} else if (!StillAsPlanned(f)) {
++				break;
++			}
++		}
++		if (f > b0)
++			nextStart.store(f, std::memory_order_release);
++
++		for (int i = b0; i < f; ++i) {
++			if (predBeg[i] != predBeg[i + 1]) {
++				MainWait mw(MW_PRED);
++				for (int p = predBeg[i], e = predBeg[i + 1]; p < e; ++p) {
++					const int j = preds[p];
++					while (!done[j].load(std::memory_order_acquire)) {
++						if (!isMain || !ServiceHandoff())
++							Spin(n);
++					}
++				}
++			}
++			curRank = i;
++			RunItem(work[i]);
++			curRank = -1;
++			Finish(i);
++		}
++
++		if (f == b1)
++			return;
++
++		// f no longer as planned: alone, with nothing later started (the
++		// start stays at f), as Process's serial path does it
++		stats.replanned++;
++		if (isMain) {
++			{
++				MainWait mw(MW_SERIAL);
++				while (frontier.load(std::memory_order_acquire) != f)
++					Spin(n);
++			}
++			RunExclusive(f);
++		} else {
++			handoff.store(f, std::memory_order_release);
++			while (!done[f].load(std::memory_order_acquire))
++				Spin(n);
++		}
++		for (int i = f + 1; i < b1; ++i)
++			Process(i, isMain);
++	}
++
+ 	static void Loop(bool isMain) {
+ 		const int n = int(work.size());
+ 		for (;;) {
+ 			if (isMain)
+ 				ServiceHandoff();
++			if (batched) {
++				const int b = claim.fetch_add(1, std::memory_order_relaxed);
++				if (b >= int(batchBeg.size()) - 1)
++					break;
++				ProcessBatch(batchBeg[b], batchBeg[b + 1], isMain);
++				continue;
++			}
+ 			const int k = claim.fetch_add(1, std::memory_order_relaxed);
+ 			if (k >= n)
+ 				break;
+@@ -575,6 +668,19 @@ namespace BrParAir {
+ 		for (int k = 0; k < n; ++k)
+ 			done[k].store(0, std::memory_order_relaxed);
+ 
++		// v9: the batches (toggle2 bits 6-7: 8, 4, 16 or 32 items)
++		batched = ((g_brToggles2 & 0x20) != 0);
++		if (batched) {
++			static constexpr int SIZES[4] = {8, 4, 16, 32};
++			const int bs = SIZES[(g_brToggles2 >> 6) & 3];
++			batchBeg.clear();
++			for (int k = 0; k < n; ++k) {
++				if (k == 0 || isSerial[k] || isSerial[k - 1] || (k - batchBeg.back()) >= bs)
++					batchBeg.push_back(k);
++			}
++			batchBeg.push_back(n);
++		}
++
+ 		claim.store(0, std::memory_order_relaxed);
+ 		handoff.store(-1, std::memory_order_relaxed);
+ 		nextStart.store(0, std::memory_order_relaxed);
+-- 
+2.53.0
+

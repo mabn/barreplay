@@ -1,0 +1,127 @@
+From b2cd9f055b4c4d7037b4f1681a08f6192f6b6e5f Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 13:38:09 +0000
+Subject: [PATCH 76/78] [barreplay] P5 v3: the safety memo in the COB file and
+ the per-unit chaining in the instance (O(1), no hash maps); one thread lookup
+ per tick
+
+---
+ rts/Sim/Units/Scripts/BrCobPar.cpp  | 28 ++++++++++++++++------------
+ rts/Sim/Units/Scripts/CobFile.h     |  3 +++
+ rts/Sim/Units/Scripts/CobInstance.h |  4 ++++
+ 3 files changed, 23 insertions(+), 12 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.cpp b/rts/Sim/Units/Scripts/BrCobPar.cpp
+index 99a5295..d1cc824 100644
+--- a/rts/Sim/Units/Scripts/BrCobPar.cpp
++++ b/rts/Sim/Units/Scripts/BrCobPar.cpp
+@@ -29,7 +29,6 @@ namespace BrP5 {
+ 	// ---- which functions a worker may run ----------------------------------
+ 	namespace {
+ 		enum : uint8_t { FS_UNKNOWN = 0, FS_SAFE = 1, FS_UNSAFE = 2, FS_VISITING = 3 };
+-		std::unordered_map<const CCobFile*, std::vector<uint8_t>> fnMemo;
+ 
+ 		// GetUnitVal ids that only read (UnitScript.cpp; no writes, no logging),
+ 		// and LUA0..LUA9 (the thread's own luaArgs)
+@@ -207,10 +206,14 @@ namespace BrP5 {
+ 		if (f == nullptr)
+ 			return false;
+ 
+-		std::vector<uint8_t>& memo = fnMemo[f];
++		std::vector<uint8_t>& memo = f->brP5Memo;
+ 		if (memo.size() != f->scriptNames.size())
+ 			memo.assign(f->scriptNames.size(), FS_UNKNOWN);
+ 
++		// the common case: decided already
++		if (size_t(functionId) < memo.size() && (memo[functionId] == FS_SAFE || memo[functionId] == FS_UNSAFE))
++			return (memo[functionId] == FS_SAFE);
++
+ 		return (Analyze(f, memo, functionId) == FS_SAFE);
+ 	}
+ 
+@@ -221,6 +224,7 @@ namespace BrP5 {
+ 		struct Op { uint8_t kind; int a; int b; CUnitScript* s; float3 p, d, r; };
+ 
+ 		struct Item {
++			CCobThread* t; // looked up once: the registry is node-based, and a thread is only erased by its own tick
+ 			int id;
+ 			int prev;   // the unit's previous tick in this phase, or -1
+ 			bool par;   // may run on a worker
+@@ -284,7 +288,7 @@ namespace BrP5 {
+ 					_mm_pause();
+ 			}
+ 
+-			CCobThread* t = engine->GetThread(it.id);
++			CCobThread* t = it.t;
+ 
+ 			if (deferred) {
+ 				tlItem = &it;
+@@ -449,8 +453,8 @@ namespace BrP5 {
+ 		}
+ 
+ 		// classify, and chain each unit's ticks
+-		std::unordered_map<const void*, int> lastOf;
+-		lastOf.reserve(n);
++		static uint32_t phaseStamp = 0;
++		++phaseStamp;
+ 		for (int k = 0; k < n; ++k) {
+ 			Item& it = items[k];
+ 			it.id = ids[k];
+@@ -459,18 +463,18 @@ namespace BrP5 {
+ 			it.ops.clear();
+ 			done[k].store(0, std::memory_order_relaxed);
+ 
+-			const CCobThread* t = e->GetThread(it.id);
++			CCobThread* t = e->GetThread(it.id);
++			it.t = t;
+ 			if (t == nullptr) {
+ 				it.par = true; // nothing to do either way
+ 				continue;
+ 			}
+ 
+-			const void* key = t->cobInst;
+-			if (key != nullptr) {
+-				const auto p = lastOf.find(key);
+-				if (p != lastOf.end())
+-					it.prev = p->second;
+-				lastOf[key] = k;
++			if (CCobInstance* inst = t->cobInst; inst != nullptr) {
++				if (inst->brP5Phase == phaseStamp)
++					it.prev = inst->brP5LastItem;
++				inst->brP5Phase = phaseStamp;
++				inst->brP5LastItem = k;
+ 			}
+ 
+ 			if (t->cobInst == nullptr || t->BrCallbackType() == CCobInstance::CBAimShield)
+diff --git a/rts/Sim/Units/Scripts/CobFile.h b/rts/Sim/Units/Scripts/CobFile.h
+index 9099187..a47548a 100644
+--- a/rts/Sim/Units/Scripts/CobFile.h
++++ b/rts/Sim/Units/Scripts/CobFile.h
+@@ -54,6 +54,9 @@ public:
+ 	spring::unordered_map<std::string, int> scriptMap;
+ 
+ 	std::string name;
++
++	// [barreplay] P5: per function, whether a worker may run it (BrCobPar.cpp)
++	mutable std::vector<uint8_t> brP5Memo;
+ };
+ 
+ #endif // COB_FILE_H
+diff --git a/rts/Sim/Units/Scripts/CobInstance.h b/rts/Sim/Units/Scripts/CobInstance.h
+index 96614a2..4fb2faa 100644
+--- a/rts/Sim/Units/Scripts/CobInstance.h
++++ b/rts/Sim/Units/Scripts/CobInstance.h
+@@ -36,6 +36,10 @@ class CCobInstance : public CUnitScript
+ public:
+ 	enum ThreadCallbackType { CBNone, CBKilled, CBAimWeapon, CBAimShield };
+ 
++	// [barreplay] P5: this instance's last tick in the current phase
++	uint32_t brP5Phase = 0;
++	int brP5LastItem = -1;
++
+ protected:
+ 	void InitCommon();
+ 	void MapScriptToModelPieces(LocalModel* lmodel);
+-- 
+2.53.0
+

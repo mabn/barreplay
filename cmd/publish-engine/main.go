@@ -76,6 +76,8 @@ import (
 // enough to run twice in a few minutes.
 var gateReplays = map[string]string{
 	"2026.07.04": "4936896a8b258d038cbd28f55eb15ed2",
+	// a 16-player 13-minute Supreme Isthmus game, the 2026.09.03 twin of the above
+	"2026.09.03": "0488036bb993bd3576e3097adbf73d61",
 }
 
 // stripHint is the size past which a stripped binary has clearly kept its

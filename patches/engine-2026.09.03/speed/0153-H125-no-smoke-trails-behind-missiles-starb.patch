@@ -1,0 +1,221 @@
+From 54d19de0ec82c8cc136a7fea47377c8ded945ded Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 00:41:28 +0000
+Subject: [PATCH 153/156] [barreplay] H125: no smoke trails behind missiles,
+ starbursts and debris (toggle3 0x200000)
+
+speed62's late window: making and updating the trails (unsynced projectiles,
+CSmokeTrailProjectile) is ~0.2% of the main thread, and freeing projectiles
+another 0.28% of which they are a part. The one thing a synced projectile
+takes from its trail is the trail's useAirLos, which the trail's constructor
+computes from its midpoint ((pos1 + pos2) * 0.5f, more than 10 elmos above
+CGround::GetApproximateHeight); BrH125::AirLos computes it without the trail.
+In a trail's place the projectile holds a tag never dereferenced, so each
+'is there a trail' test answers as before and the old smoke position and
+direction advance exactly as they did.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Classes/SmokeTrailProjectile.cpp          |  2 ++
+ .../Particles/Classes/SmokeTrailProjectile.h  | 22 +++++++++++++++++++
+ rts/Sim/Projectiles/PieceProjectile.cpp       | 13 ++++++++---
+ .../WeaponProjectiles/MissileProjectile.cpp   | 16 +++++++++-----
+ .../WeaponProjectiles/StarburstProjectile.cpp | 19 ++++++++++++----
+ 5 files changed, 60 insertions(+), 12 deletions(-)
+
+diff --git a/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.cpp b/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.cpp
+index 49ff247..945880d 100644
+--- a/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.cpp
++++ b/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.cpp
+@@ -14,6 +14,8 @@
+ 
+ #include "System/Misc/TracyDefs.h"
+ 
++unsigned char BrH125::noTrailTag = 0; // [barreplay] H125
++
+ CR_BIND_DERIVED(CSmokeTrailProjectile, CProjectile, )
+ 
+ CR_REG_METADATA(CSmokeTrailProjectile,(
+diff --git a/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.h b/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.h
+index 5ff6d3a..4d3ff94 100644
+--- a/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.h
++++ b/rts/Rendering/Env/Particles/Classes/SmokeTrailProjectile.h
+@@ -4,8 +4,30 @@
+ #define SMOKE_TRAIL_PROJECTILE_H
+ 
+ #include "Sim/Projectiles/Projectile.h"
++#include "Map/Ground.h"
+ 
+ struct AtlasedTexture;
++class CSmokeTrailProjectile;
++
++extern unsigned g_brToggles3; // [barreplay] (Sim/MoveTypes/Systems/GeneralMoveSystem.cpp)
++
++// [barreplay] H125 (toggle3 0x200000): missiles, starburst missiles and
++// flying debris make no smoke trails. A trail is an unsynced projectile drawn
++// behind them; the one thing a synced projectile takes from it is the trail's
++// useAirLos, which its constructor computes from where it starts (false, or
++// more than 10 elmos above the ground at its midpoint) — AirLos gives that
++// without the trail. In a trail's place the projectile holds NoTrail(), a tag
++// never dereferenced, so every "is there a trail" test answers as before.
++namespace BrH125 {
++	extern unsigned char noTrailTag;
++	inline bool On() { return (g_brToggles3 & 0x200000) != 0; }
++	inline CSmokeTrailProjectile* NoTrail() { return reinterpret_cast<CSmokeTrailProjectile*>(&noTrailTag); }
++	// CSmokeTrailProjectile(owner, pos1, pos2, ...)'s useAirLos
++	inline bool AirLos(const float3& pos1, const float3& pos2) {
++		const float3 mid = (pos1 + pos2) * 0.5f;
++		return ((mid.y - CGround::GetApproximateHeight(mid.x, mid.z)) > 10.0f);
++	}
++}
+ 
+ class CSmokeTrailProjectile : public CProjectile
+ {
+diff --git a/rts/Sim/Projectiles/PieceProjectile.cpp b/rts/Sim/Projectiles/PieceProjectile.cpp
+index 6243151..abc3ae8 100644
+--- a/rts/Sim/Projectiles/PieceProjectile.cpp
++++ b/rts/Sim/Projectiles/PieceProjectile.cpp
+@@ -174,7 +174,9 @@ void CPieceProjectile::Collision(CUnit* unit, CFeature* feature)
+ 		helper->Explosion(params);
+ 	}
+ 
+-	if (explFlags & PF_Smoke) {
++	if ((explFlags & PF_Smoke) && (explFlags & PF_NoCEGTrail) && BrH125::On()) {
++		smokeTrail = BrH125::NoTrail(); // [barreplay] H125
++	} else if (explFlags & PF_Smoke) {
+ 		if (explFlags & PF_NoCEGTrail) {
+ 			smokeTrail = projMemPool.alloc<CSmokeTrailProjectile>(
+ 				owner(),
+@@ -256,12 +258,17 @@ void CPieceProjectile::Update()
+ 
+ 	if (explFlags & PF_Smoke) {
+ 		if (smokeTrail) {
+-			smokeTrail->UpdateEndPos(pos, dir);
++			if (smokeTrail != BrH125::NoTrail())
++				smokeTrail->UpdateEndPos(pos, dir);
+ 			oldSmokePos = pos;
+ 			oldSmokeDir = dir;
+ 		}
+ 
+-		if ((age % NUM_TRAIL_PARTS) == 0) {
++		if ((age % NUM_TRAIL_PARTS) == 0 && BrH125::On()) {
++			// [barreplay] H125: the trail's useAirLos, without the trail
++			useAirLos = BrH125::AirLos(pos, oldSmokePos);
++			smokeTrail = BrH125::NoTrail();
++		} else if ((age % NUM_TRAIL_PARTS) == 0) {
+ 			smokeTrail = projMemPool.alloc<CSmokeTrailProjectile>(
+ 				owner(),
+ 				pos, oldSmokePos,
+diff --git a/rts/Sim/Projectiles/WeaponProjectiles/MissileProjectile.cpp b/rts/Sim/Projectiles/WeaponProjectiles/MissileProjectile.cpp
+index dcaa574..e187a1f 100644
+--- a/rts/Sim/Projectiles/WeaponProjectiles/MissileProjectile.cpp
++++ b/rts/Sim/Projectiles/WeaponProjectiles/MissileProjectile.cpp
+@@ -106,7 +106,7 @@ CMissileProjectile::CMissileProjectile(const ProjectileParams& params): CWeaponP
+ void CMissileProjectile::Collision()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (weaponDef->visuals.smokeTrail)
++	if (weaponDef->visuals.smokeTrail && !BrH125::On()) // [barreplay] H125
+ 		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
+ 
+ 	CWeaponProjectile::Collision();
+@@ -116,7 +116,7 @@ void CMissileProjectile::Collision()
+ void CMissileProjectile::Collision(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (weaponDef->visuals.smokeTrail)
++	if (weaponDef->visuals.smokeTrail && !BrH125::On()) // [barreplay] H125
+ 		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
+ 
+ 	CWeaponProjectile::Collision(unit);
+@@ -126,7 +126,7 @@ void CMissileProjectile::Collision(CUnit* unit)
+ void CMissileProjectile::Collision(CFeature* feature)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (weaponDef->visuals.smokeTrail)
++	if (weaponDef->visuals.smokeTrail && !BrH125::On()) // [barreplay] H125
+ 		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
+ 
+ 	CWeaponProjectile::Collision(feature);
+@@ -247,12 +247,18 @@ void CMissileProjectile::Update()
+ 
+ 	if (weaponDef->visuals.smokeTrail) {
+ 		if (smokeTrail) {
+-			smokeTrail->UpdateEndPos(pos, dir);
++			if (smokeTrail != BrH125::NoTrail())
++				smokeTrail->UpdateEndPos(pos, dir);
+ 			oldSmoke = pos;
+ 			oldDir = dir;
+ 		}
+ 
+-		if ((age % weaponDef->visuals.smokePeriod) == 0) {
++		if ((age % weaponDef->visuals.smokePeriod) == 0 && BrH125::On()) {
++			// [barreplay] H125: the trail's useAirLos, without the trail
++			useAirLos = BrH125::AirLos(pos, oldSmoke);
++			smokeTrail = BrH125::NoTrail();
++			numParts = 0;
++		} else if ((age % weaponDef->visuals.smokePeriod) == 0) {
+ 			smokeTrail = projMemPool.alloc<CSmokeTrailProjectile>(
+ 				own,
+ 				pos, oldSmoke,
+diff --git a/rts/Sim/Projectiles/WeaponProjectiles/StarburstProjectile.cpp b/rts/Sim/Projectiles/WeaponProjectiles/StarburstProjectile.cpp
+index 2062ffe..b75ca8d 100644
+--- a/rts/Sim/Projectiles/WeaponProjectiles/StarburstProjectile.cpp
++++ b/rts/Sim/Projectiles/WeaponProjectiles/StarburstProjectile.cpp
+@@ -99,7 +99,7 @@ CStarburstProjectile::CStarburstProjectile(const ProjectileParams& params): CWea
+ void CStarburstProjectile::Collision()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (leaveSmokeTrail)
++	if (leaveSmokeTrail && !BrH125::On()) // [barreplay] H125
+ 		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldSmokeDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
+ 
+ 	CWeaponProjectile::Collision();
+@@ -111,7 +111,7 @@ void CStarburstProjectile::Collision()
+ void CStarburstProjectile::Collision(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (leaveSmokeTrail)
++	if (leaveSmokeTrail && !BrH125::On()) // [barreplay] H125
+ 		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldSmokeDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
+ 
+ 	CWeaponProjectile::Collision(unit);
+@@ -123,7 +123,7 @@ void CStarburstProjectile::Collision(CUnit* unit)
+ void CStarburstProjectile::Collision(CFeature* feature)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (leaveSmokeTrail)
++	if (leaveSmokeTrail && !BrH125::On()) // [barreplay] H125
+ 		projMemPool.alloc<CSmokeTrailProjectile>(owner(), pos, oldSmoke, dir, oldSmokeDir, false, true, GetSmokeSize(), GetSmokeTime(), GetSmokePeriod(), GetSmokeColor(), weaponDef->visuals.texture2, weaponDef->visuals.smokeTrailCastShadow);
+ 
+ 	CWeaponProjectile::Collision(feature);
+@@ -301,7 +301,10 @@ void CStarburstProjectile::UpdateSmokeTrail()
+ 	if (!leaveSmokeTrail)
+ 		return;
+ 
+-	if (smokeTrail != nullptr)
++	if (smokeTrail == BrH125::NoTrail()) {
++		oldSmoke = pos;
++		oldSmokeDir = dir;
++	} else if (smokeTrail != nullptr)
+ 		smokeTrail->UpdateEndPos(oldSmoke = pos, oldSmokeDir = dir);
+ 
+ 	trailAge++;
+@@ -310,6 +313,14 @@ void CStarburstProjectile::UpdateSmokeTrail()
+ 	if ((trailAge % GetSmokePeriod()) != 0)
+ 		return;
+ 
++	if (BrH125::On()) {
++		// [barreplay] H125: the trail's useAirLos, without the trail
++		useAirLos = BrH125::AirLos(pos, oldSmoke);
++		smokeTrail = BrH125::NoTrail();
++		numParts = 0;
++		return;
++	}
++
+ 	smokeTrail = projMemPool.alloc<CSmokeTrailProjectile>(
+ 		owner(),
+ 		pos, oldSmoke,
+-- 
+2.53.0
+

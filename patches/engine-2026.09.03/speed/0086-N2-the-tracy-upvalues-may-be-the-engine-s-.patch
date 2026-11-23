@@ -1,0 +1,65 @@
+From 758d495f1888efdf406101d3d7ddc1ccbb10fd72 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 17:09:06 +0000
+Subject: [PATCH 86/90] [barreplay] N2: the tracy upvalues may be the engine's
+ own no-op (a build without Tracy), not only BAR's Lua stubs
+
+---
+ rts/Lua/BrNativeHandler.cpp | 30 +++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Lua/BrNativeHandler.cpp b/rts/Lua/BrNativeHandler.cpp
+index 541fd96..a633dc2 100644
+--- a/rts/Lua/BrNativeHandler.cpp
++++ b/rts/Lua/BrNativeHandler.cpp
+@@ -100,6 +100,30 @@ namespace BrN2 {
+ 			return &clvalue(StackAt(L, idx))->l;
+ 		}
+ 
++		// a build without Tracy registers every tracy.* function as one C
++		// function that returns at once; a build with it, a different one for
++		// each. So: ZoneBeginN, ZoneEnd and Message all the same C function.
++		lua_CFunction TracyNoop(lua_State* L) {
++		#ifdef TRACY_ENABLE
++			return nullptr;
++		#else
++			lua_CFunction f = nullptr;
++			lua_getglobal(L, "tracy");
++			if (lua_istable(L, -1)) {
++				const char* const names[] = {"ZoneBeginN", "ZoneEnd", "Message"};
++				for (const char* n: names) {
++					lua_getfield(L, -1, n);
++					const lua_CFunction g = lua_iscfunction(L, -1)? lua_tocfunction(L, -1): nullptr;
++					lua_pop(L, 1);
++					if (g == nullptr || (f != nullptr && g != f)) { f = nullptr; break; }
++					f = g;
++				}
++			}
++			lua_pop(L, 1);
++			return f;
++		#endif
++		}
++
+ 		// `function() end`: one RETURN 0 1, nothing else
+ 		bool IsEmptyStub(const LClosure* c) {
+ 			const Proto* p = c->p;
+@@ -190,11 +214,15 @@ namespace BrN2 {
+ 				if (HANDLER_TRACY[ci]) {
+ 					if (h->nupvalues != 2)
+ 						break;
++					// the tracy upvalues: BAR's empty Lua stubs (no engine
++					// tracy table) or the engine's no-op (a build without Tracy)
++					const lua_CFunction noop = TracyNoop(L);
+ 					bool stubs = true;
+ 					for (int i = 1; i <= 2; ++i) {
+ 						lua_getupvalue(L, -1 - (i - 1), i);
+ 						const LClosure* t = LuaClosureAt(L, -1);
+-						stubs = stubs && (t != nullptr && IsEmptyStub(t));
++						const bool isNoop = (noop != nullptr && lua_iscfunction(L, -1) && lua_tocfunction(L, -1) == noop);
++						stubs = stubs && ((t != nullptr && IsEmptyStub(t)) || isNoop);
+ 					}
+ 					if (!stubs)
+ 						break;
+-- 
+2.53.0
+
