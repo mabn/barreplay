@@ -1,0 +1,249 @@
+From 6480b7bc812cd45d10abb4b8f135b48c2acf3500 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 10:37:35 +0000
+Subject: [PATCH 094/108] [barreplay] H97: each unit's slot in its quad lists
+ kept beside unit->quads, so leaving a quad erases without a linear search
+ (toggle2 0x400)
+
+MovedUnit's own time was 1.9% of the late window's main thread, nearly all of
+it spring::VectorErase's find in the dense quads of the air swarms. The erase
+goes straight to the slot and moves the same last element into it, so the
+lists are exactly what the search would leave. Every slot is checked before
+use; a wrong one falls back to the search and the table is rebuilt from the
+lists. Rebuilt the same way whenever the toggle comes on (checkpoints).
+---
+ rts/Sim/Misc/QuadField.cpp | 156 +++++++++++++++++++++++++++++++++++--
+ rts/Sim/Misc/QuadField.h   |   4 +
+ 2 files changed, 154 insertions(+), 6 deletions(-)
+
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 896e9e2..b6ec489 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -10,6 +10,9 @@
+ #include "Sim/Misc/GlobalSynced.h"
+ #include "Sim/Misc/GlobalConstants.h"
+ #include "Sim/Misc/TeamHandler.h"
++#include "Sim/Units/UnitHandler.h"
++#include "Sim/Units/Unit.h"
++#include "System/Log/ILog.h"
+ #include "System/ContainerUtil.h"
+ #include "System/Threading/ThreadPool.h"
+ 
+@@ -52,6 +55,92 @@ CR_REG_METADATA_SUB(CQuadField, Quad, (
+ 
+ CQuadField quadField;
+ thread_local int g_brQfThread = 0;
++
++// [barreplay] H97 (toggle2 0x400): a unit leaving a quad left its two quad
++// lists by a linear search for itself (spring::VectorErase: find, then the
++// last element moves into its slot). In a late game's dense air swarms those
++// lists hold hundreds of units, and the searches were most of MovedUnit
++// (1.9% of the main thread). Each unit's slot in each list is kept beside
++// unit->quads, so the erase goes straight to it and moves the same last
++// element into the same slot: the lists come out exactly as before. A slot is
++// checked before use (list[slot] == unit); a wrong one falls back to the search
++// and the table is rebuilt from the lists, so bookkeeping can only cost time,
++// never change the result. Rebuilt the same way when the toggle comes on.
++namespace {
++	// per unit id, beside unit->quads[k]: the unit's slot in
++	// baseQuads[quads[k]].units (first) and in its .teamUnits[allyteam] (second)
++	std::vector<std::vector<std::pair<int, int>>> brSlots;
++	bool brSlotsValid = false;
++	long long brSlotMisses = 0, brSlotRebuilds = 0;
++	int brSlotLogFrame = 0;
++}
++
++bool CQuadField::BrH97Begin()
++{
++	if ((g_brToggles2 & 0x400) == 0) {
++		brSlotsValid = false;
++		return false;
++	}
++	if (brSlotsValid)
++		return true;
++
++	brSlotRebuilds++;
++	brSlots.resize(unitHandler.MaxUnits());
++	for (auto& v: brSlots)
++		v.clear();
++	for (const CUnit* u: unitHandler.GetActiveUnits())
++		brSlots[u->id].assign(u->quads.size(), {-1, -1});
++	for (size_t qi = 0; qi < baseQuads.size(); ++qi) {
++		const Quad& q = baseQuads[qi];
++		for (size_t p = 0; p < q.units.size(); ++p) {
++			const CUnit* u = q.units[p];
++			auto& s = brSlots[u->id];
++			for (size_t k = 0; k < u->quads.size() && k < s.size(); ++k)
++				if (u->quads[k] == int(qi)) { s[k].first = int(p); break; }
++		}
++		for (const auto& tl: q.teamUnits) {
++			for (size_t p = 0; p < tl.size(); ++p) {
++				const CUnit* u = tl[p];
++				auto& s = brSlots[u->id];
++				for (size_t k = 0; k < u->quads.size() && k < s.size(); ++k)
++					if (u->quads[k] == int(qi)) { s[k].second = int(p); break; }
++			}
++		}
++	}
++	brSlotsValid = true;
++	if ((gs->frameNum - brSlotLogFrame) >= 900 || brSlotRebuilds == 1) {
++		brSlotLogFrame = gs->frameNum;
++		LOG("[BR_H97] f=%d rebuilds=%lld misses=%lld", gs->frameNum, brSlotRebuilds, brSlotMisses);
++	}
++	return true;
++}
++
++// spring::VectorErase(list, unit) when list[slot] == unit, without the search
++void CQuadField::BrH97EraseAt(std::vector<CUnit*>& list, int slot, CUnit* unit, int qi, bool team)
++{
++	if (slot < 0 || size_t(slot) >= list.size() || list[slot] != unit) {
++		brSlotMisses++;
++		spring::VectorErase(list, unit);
++		brSlotsValid = false; // the element it moved has a stale slot now
++		return;
++	}
++	CUnit* last = list.back();
++	list[slot] = last;
++	list.pop_back();
++	if (last == unit)
++		return;
++	auto& ls = brSlots[last->id];
++	for (size_t k = 0; k < last->quads.size(); ++k) {
++		if (last->quads[k] != qi)
++			continue;
++		if (k < ls.size())
++			(team? ls[k].second: ls[k].first) = slot;
++		else
++			brSlotsValid = false;
++		return;
++	}
++	brSlotsValid = false;
++}
+ //#define DEBUG_QUADFIELD
+ 
+ void CQuadField::Quad::PostLoad()
+@@ -427,12 +516,21 @@ bool CQuadField::InsertUnitIf(CUnit* unit, const float3& wpos)
+ 	// [barreplay] P4: the unit lists change
+ 	BrP4::Drain(BrP4::DR_QUAD);
+ 
++	const bool h97 = BrH97Begin();
++
+ 	// unit might also be overlapping the cell, so test for uniqueness
+ 	if (!spring::VectorInsertUnique(unit->quads, wposQuadIdx, true))
+ 		return false;
+ 
+ 	spring::VectorInsertUnique(baseQuads[wposQuadIdx].units, unit, false);
+ 	spring::VectorInsertUnique(baseQuads[wposQuadIdx].teamUnits[unit->allyteam], unit, false);
++	if (h97) {
++		auto& s = brSlots[unit->id];
++		if (s.size() + 1 == unit->quads.size())
++			s.emplace_back(int(baseQuads[wposQuadIdx].units.size()) - 1, int(baseQuads[wposQuadIdx].teamUnits[unit->allyteam].size()) - 1);
++		else
++			brSlotsValid = false;
++	}
+ 	return true;
+ }
+ 
+@@ -461,6 +559,27 @@ bool CQuadField::RemoveUnitIf(CUnit* unit, const float3& wpos)
+ 
+ 	BrP4::Drain(BrP4::DR_QUAD);
+ 
++	if (BrH97Begin()) {
++		// spring::VectorErase(unit->quads, wposQuadIdx), its slots alongside
++		const auto it = std::find(unit->quads.begin(), unit->quads.end(), wposQuadIdx);
++		if (it == unit->quads.end())
++			return false;
++		const size_t k = size_t(it - unit->quads.begin());
++		auto& s = brSlots[unit->id];
++		const std::pair<int, int> sl = (k < s.size())? s[k]: std::pair<int, int>{-1, -1};
++		*it = unit->quads.back();
++		unit->quads.pop_back();
++		if (s.size() == unit->quads.size() + 1) {
++			s[k] = s.back();
++			s.pop_back();
++		} else {
++			brSlotsValid = false;
++		}
++		BrH97EraseAt(baseQuads[wposQuadIdx].units, sl.first, unit, wposQuadIdx, false);
++		BrH97EraseAt(baseQuads[wposQuadIdx].teamUnits[unit->allyteam], sl.second, unit, wposQuadIdx, true);
++		return true;
++	}
++
+ 	if (!spring::VectorErase(unit->quads, wposQuadIdx))
+ 		return false;
+ 
+@@ -487,14 +606,28 @@ void CQuadField::MovedUnit(CUnit* unit)
+ 
+ 	BrP4::Drain(BrP4::DR_QUAD);
+ 
+-	for (const int qi: unit->quads) {
+-		spring::VectorErase(baseQuads[qi].units, unit);
+-		spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
++	const bool h97 = BrH97Begin();
++	if (h97) {
++		auto& s = brSlots[unit->id];
++		for (size_t k = 0; k < unit->quads.size(); ++k) {
++			const int qi = unit->quads[k];
++			const std::pair<int, int> sl = (k < s.size())? s[k]: std::pair<int, int>{-1, -1};
++			BrH97EraseAt(baseQuads[qi].units, sl.first, unit, qi, false);
++			BrH97EraseAt(baseQuads[qi].teamUnits[unit->allyteam], sl.second, unit, qi, true);
++		}
++		s.clear();
++	} else {
++		for (const int qi: unit->quads) {
++			spring::VectorErase(baseQuads[qi].units, unit);
++			spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
++		}
+ 	}
+ 
+ 	for (const int qi: *qfQuery.quads) {
+ 		spring::VectorInsertUnique(baseQuads[qi].units, unit, false);
+ 		spring::VectorInsertUnique(baseQuads[qi].teamUnits[unit->allyteam], unit, false);
++		if (h97)
++			brSlots[unit->id].emplace_back(int(baseQuads[qi].units.size()) - 1, int(baseQuads[qi].teamUnits[unit->allyteam].size()) - 1);
+ 	}
+ 
+ 	// [barreplay] H78 (toggle 0x800): copy into the unit's own buffer instead of
+@@ -511,9 +644,20 @@ void CQuadField::RemoveUnit(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	BrP4::Drain(BrP4::DR_QUAD);
+-	for (const int qi: unit->quads) {
+-		spring::VectorErase(baseQuads[qi].units, unit);
+-		spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
++	if (BrH97Begin()) {
++		auto& s = brSlots[unit->id];
++		for (size_t k = 0; k < unit->quads.size(); ++k) {
++			const int qi = unit->quads[k];
++			const std::pair<int, int> sl = (k < s.size())? s[k]: std::pair<int, int>{-1, -1};
++			BrH97EraseAt(baseQuads[qi].units, sl.first, unit, qi, false);
++			BrH97EraseAt(baseQuads[qi].teamUnits[unit->allyteam], sl.second, unit, qi, true);
++		}
++		s.clear();
++	} else {
++		for (const int qi: unit->quads) {
++			spring::VectorErase(baseQuads[qi].units, unit);
++			spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
++		}
+ 	}
+ 
+ 	unit->quads.clear();
+diff --git a/rts/Sim/Misc/QuadField.h b/rts/Sim/Misc/QuadField.h
+index 24c90f2..dddb449 100644
+--- a/rts/Sim/Misc/QuadField.h
++++ b/rts/Sim/Misc/QuadField.h
+@@ -231,6 +231,10 @@ private:
+ 	int2 WorldPosToQuadField(const float3 p) const;
+ 	int WorldPosToQuadFieldIdx(const float3 p) const;
+ 
++	// [barreplay] H97: the slots of every unit in the quad lists (QuadField.cpp)
++	bool BrH97Begin();
++	void BrH97EraseAt(std::vector<CUnit*>& list, int slot, CUnit* unit, int qi, bool team);
++
+ private:
+ 	std::vector<Quad> baseQuads;
+ 
+-- 
+2.53.0
+

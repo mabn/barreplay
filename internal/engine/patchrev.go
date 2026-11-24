@@ -27,6 +27,9 @@ var patchSeries = map[string][]string{
 		"33b518d4a985fa192e4074d7a49b6d4e01e48e3a6aab2a6b2c76299ffeb16807",
 		"392b92d73fe92547d8c78570468db9b199efaec0adecf699c8256e43fa7eb74d",
 	},
+	"2026.09.03": {
+		"9348a8f2edb11846d501b8663a405c7dccfeb1180f9293890fd8b50fe1c0c458",
+	},
 }
 
 // PatchedVersion is the semver of a patched build: the engine's version with

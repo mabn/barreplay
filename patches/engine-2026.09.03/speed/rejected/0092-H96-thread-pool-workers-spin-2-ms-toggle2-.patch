@@ -1,0 +1,71 @@
+From a4827c95c0ddb2435ea7303ee2cab42bab91ac21 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 06:41:46 +0000
+Subject: [PATCH 092/108] [barreplay] H96: thread-pool workers spin 2 ms
+ (toggle2 0x100) or 20 ms (0x200) after their last task and sleep at most 0.5
+ ms at a time
+
+Stock lets every worker but the first sleep at once with a backoff up to 30 ms,
+and pushing a task group wakes nobody unless all of them sleep, so a parallel
+section starts with one or two workers awake and the main thread does a third
+of it (speed44 late window: weapon vectors 27% main, ground movement 34%, LOS
+36%, against 12.5% for one of eight threads). Scheduling only.
+---
+ rts/System/Threading/ThreadPool.cpp | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/rts/System/Threading/ThreadPool.cpp b/rts/System/Threading/ThreadPool.cpp
+index e8d0407..a3fb099 100644
+--- a/rts/System/Threading/ThreadPool.cpp
++++ b/rts/System/Threading/ThreadPool.cpp
+@@ -2,6 +2,7 @@
+ 
+ #ifdef THREADPOOL
+ 
++#include <immintrin.h>
+ #include "System/Sync/SyncChecker.h"
+ #include "ThreadPool.h"
+ #include "System/Exceptions.h"
+@@ -254,6 +255,8 @@ static bool DoTask(int tid, bool async)
+ }
+ 
+ 
++extern unsigned g_brToggles2; // [barreplay] Sim/MoveTypes/Systems/BrParallelAir.h
++
+ __FORCE_ALIGN_STACK__
+ static void WorkerLoop(int tid, bool async)
+ {
+@@ -272,15 +275,27 @@ static void WorkerLoop(int tid, bool async)
+ 	const auto ourSpinTime = spring_time::fromMicroSecs(30 * (tid == 1));
+ 	const auto maxSleepTime = spring_time::fromMilliSecs(30);
+ 
++	// [barreplay] H96 (toggle2 0x100 / 0x200): every worker spins 2 ms (0x200:
++	// 20 ms, about a late-game frame) after its last task before it sleeps, and
++	// sleeps at most 0.5 ms at a time. Stock lets all but one worker sleep at
++	// once, with a backoff up to 30 ms, and a pushed task group wakes nobody
++	// unless every worker sleeps: a parallel section then starts with one or
++	// two workers awake, and the main thread does a third of it. Scheduling
++	// only; every section's result is the same whoever runs its chunks.
+ 	while (!exitFlags[tid]) {
+-		const auto spinlockEnd = spring_now() + ourSpinTime;
++		const unsigned brMode = (g_brToggles2 >> 8) & 3;
++		const auto spinlockEnd = spring_now() + ((brMode == 0)? ourSpinTime: spring_time::fromMicroSecs((brMode == 1)? 2000: 20000));
++		const auto sleepCap = (brMode == 0)? maxSleepTime: spring_time::fromMicroSecs(500);
+ 		      auto sleepTime   = spring_time::fromMicroSecs(1);
+ 
+ 		while (!DoTask(tid, async) && !exitFlags[tid]) {
+-			if (spring_now() < spinlockEnd)
++			if (spring_now() < spinlockEnd) {
++				if (brMode != 0)
++					_mm_pause();
+ 				continue;
++			}
+ 
+-			newTasksSignal[async].wait_for(sleepTime = std::min(sleepTime * 1.25f, maxSleepTime));
++			newTasksSignal[async].wait_for(sleepTime = std::min(sleepTime * 1.25f, sleepCap));
+ 		}
+ 	}
+ }
+-- 
+2.53.0
+

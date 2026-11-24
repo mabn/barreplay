@@ -1,0 +1,94 @@
+From 9f557f81e44c29e4770c8b28469dccdc53dffa69 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 15:42:59 +0000
+Subject: [PATCH 106/108] [barreplay] H104: in a demo replay the unsynced
+ halves of LuaRules and LuaGaia get no events and no SendToUnsynced messages
+ (toggle2 0x40000)
+
+Unsynced Lua cannot change the simulation and the capture widget reads only the
+engine. SendToUnsynced keeps its argument checks.
+---
+ rts/Game/Game.cpp           | 22 ++++++++++++++++++++++
+ rts/Lua/LuaHandle.cpp       |  2 +-
+ rts/Lua/LuaHandle.h         |  3 +++
+ rts/Lua/LuaHandleSynced.cpp |  4 ++++
+ 4 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index 1869537..c9f06f5 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1821,6 +1821,28 @@ void CGame::SimFrame() {
+ 		BrH99::Create();
+ 	}
+ 	const bool brH99 = (g_brToggles2 & 0x1000) != 0;
++
++	// [barreplay] H104 (toggle2 0x40000): in a demo replay the unsynced halves
++	// of LuaRules and LuaGaia receive no events (taken off every list) and no
++	// SendToUnsynced messages. Unsynced Lua cannot change the simulation, and
++	// the capture widget reads only the engine (no WG, GG, SYNCED or calls
++	// into gadgets), so nothing recorded can depend on them; in a headless
++	// replay they only maintain state for drawing that never happens.
++	{
++		static bool brH104Done = false;
++		if (!brH104Done && (g_brToggles2 & 0x40000) != 0 && gameSetup != nullptr && gameSetup->hostDemo) {
++			brH104Done = true;
++			int muted = 0;
++			for (CSplitLuaHandle* h: {static_cast<CSplitLuaHandle*>(luaRules), static_cast<CSplitLuaHandle*>(luaGaia)}) {
++				if (h == nullptr)
++					continue;
++				h->unsyncedLuaHandle.brMuted = true;
++				eventHandler.RemoveClient(&h->unsyncedLuaHandle);
++				muted += 1;
++			}
++			LOG("[BR_H104] f=%d muted %d unsynced Lua handles", gs->frameNum, muted);
++		}
++	}
+ #endif
+ #if defined(SYNCCHECK) && defined(SYNC_HISTORY)
+ 	CSyncChecker::NewGameFrame();
+diff --git a/rts/Lua/LuaHandle.cpp b/rts/Lua/LuaHandle.cpp
+index f3a4494..f0bf2b2 100644
+--- a/rts/Lua/LuaHandle.cpp
++++ b/rts/Lua/LuaHandle.cpp
+@@ -715,7 +715,7 @@ bool CLuaHandle::HasCallIn(lua_State* L, const string& name) const
+ bool CLuaHandle::UpdateCallIn(lua_State* L, const string& name)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	if (HasCallIn(L, name)) {
++	if (HasCallIn(L, name) && !brMuted) {
+ 		eventHandler.InsertEvent(this, name);
+ 	} else {
+ 		eventHandler.RemoveEvent(this, name);
+diff --git a/rts/Lua/LuaHandle.h b/rts/Lua/LuaHandle.h
+index 97ddf43..e681c44 100644
+--- a/rts/Lua/LuaHandle.h
++++ b/rts/Lua/LuaHandle.h
+@@ -354,6 +354,9 @@ class CLuaHandle : public CEventClient
+ 		bool rmlui = false;
+ 		bool userMode = false;
+ 		bool killMe = false; // set for handles that fail to RunCallIn
++		// [barreplay] H104: an unsynced LuaRules/LuaGaia handle taken off every
++		// event list in a demo replay; it does not put itself back
++		bool brMuted = false;
+ 
+ 		int callinErrors = 0;
+ 
+diff --git a/rts/Lua/LuaHandleSynced.cpp b/rts/Lua/LuaHandleSynced.cpp
+index 722b459..5115110 100644
+--- a/rts/Lua/LuaHandleSynced.cpp
++++ b/rts/Lua/LuaHandleSynced.cpp
+@@ -2278,6 +2278,10 @@ int CSyncedLuaHandle::SendToUnsynced(lua_State* L)
+ 	}
+ 
+ 	CUnsyncedLuaHandle* ulh = CSplitLuaHandle::GetUnsyncedHandle(L);
++	// [barreplay] H104: the unsynced half is muted (a demo replay); the
++	// argument checks above are all the synced caller can observe
++	if (ulh->brMuted)
++		return 0;
+ 	ulh->RecvFromSynced(L, args);
+ 	return 0;
+ }
+-- 
+2.53.0
+

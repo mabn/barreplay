@@ -1,0 +1,245 @@
+From 0ec9c914f748026cceb0df37a24357f1cc38ec97 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 16:50:04 +0000
+Subject: [PATCH 108/108] [barreplay] P7 v4: phase A runs each sensor type's
+ per-unit loop itself (toggle2 0x80000)
+
+One task per type, types claimed from a counter (a join runs any unclaimed type
+itself). The handler's event functions and the height-map hook join first.
+Phase B redoes the marked units, then each type's Update, which now discards
+an instance created and released before it (never added, no squares).
+---
+ rts/Sim/Misc/LosHandler.cpp | 119 +++++++++++++++++++++++++++++++++++-
+ rts/Sim/Misc/LosHandler.h   |   1 +
+ 2 files changed, 118 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index d8ba37a..73a8ba5 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LosHandler.h"
++#include <immintrin.h>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h" // g_brToggles, BrChunkMax
+ #include "BrLosOverlap.h"
+ 
+@@ -572,6 +573,17 @@ void ILosType::Update()
+ 
+ 	// filter the updates into their subparts
+ 	for (SLosInstance* li: losUpdate) {
++		// [barreplay] P7 v4: an instance created (NEW) and released again
++		// before this update was never added to the maps and has no squares:
++		// it goes, without a LosRemove and without the cache. Only P7 v4's
++		// phase A followed by phase B's redo makes one; nothing does in stock,
++		// where no unit's instance changes between UpdateUnit and Update.
++		if (__builtin_expect((li->status & SLosInstance::TLosStatus::NEW) != 0 && li->refCount == 0, 0)) {
++			li->isQueuedForUpdate = false;
++			li->status = SLosInstance::TLosStatus::RECALC;
++			losDeleted.push_back(li);
++			continue;
++		}
+ 		const auto status = OptimizeInstanceUpdate(li);
+ 		li->isQueuedForUpdate = false;
+ 
+@@ -819,6 +831,7 @@ void CLosHandler::SetGlobalLOS(const int allyTeamId, const bool newState)
+ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit), true);
+@@ -829,6 +842,7 @@ void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int we
+ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+@@ -839,6 +853,7 @@ void CLosHandler::UnitTaken(const CUnit* unit, int oldTeam, int newTeam)
+ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	for (ILosType* lt: losTypes) {
+ 		lt->RemoveUnit(const_cast<CUnit*>(unit));
+@@ -849,6 +864,7 @@ void CLosHandler::UnitReverseBuilt(const CUnit* unit)
+ void CLosHandler::UnitLoaded(const CUnit* unit, const CUnit* transport)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
+ 	BrP7::Mark(unit); // [barreplay] P7
+ 	if (!unit->IsStunned())
+ 		return;
+@@ -877,6 +893,13 @@ namespace BrP7 {
+ 		auto phaseA = [](const int chunk) { losHandler->BrP7PhaseA(chunk); };
+ 		decltype(for_mt_background(0, 1, phaseA)) task;
+ 		constexpr int CHUNK = 256;
++
++		// P7 v4 (toggle2 0x80000): phase A runs each type's per-unit loop
++		// itself (UpdateUnit), a type per claim
++		bool v4 = false;
++		std::atomic<int> nextType{0};   // the next type to claim
++		std::atomic<int> doneTypes{0};  // types finished
++		bool joined = false;
+ 	}
+ 
+ 	void MarkSlow(const CUnit* unit) {
+@@ -887,7 +910,15 @@ namespace BrP7 {
+ 	void MarkAllSlow() {
+ 		all = true;
+ 	}
+-	void JoinSlow() {}
++	void JoinSlow() {
++		// v4 only: phase A writes the types' state, so whatever touches it in
++		// the window waits; the types nobody has claimed yet run here, so this
++		// never waits for a worker that is itself waiting
++		if (!v4 || !launched || joined)
++			return;
++		losHandler->BrP7RunTypes();
++		joined = true;
++	}
+ 	void Begin() {
+ 		if (losHandler != nullptr)
+ 			losHandler->BrP7Begin();
+@@ -896,9 +927,43 @@ namespace BrP7 {
+ 
+ // phase A, one chunk of units: H93's test of every type (UpdateUnit's tests in
+ // its order, reads only), the bit set where UpdateUnit would act
++void CLosHandler::BrP7RunTypes()
++{
++	using namespace BrP7;
++	const int n = int(losTypes.size());
++	for (int t; (t = nextType.fetch_add(1, std::memory_order_acq_rel)) < n; ) {
++		ILosType* lt = losTypes[t];
++		for (size_t k = 0, m = units.size(); k < m; ++k) {
++			CUnit* u = units[k];
++			if (t == 0)
++				idxOf[u->id] = int(k);
++			lt->UpdateUnit(u, false);
++		}
++		doneTypes.fetch_add(1, std::memory_order_acq_rel);
++	}
++	while (doneTypes.load(std::memory_order_acquire) < n) {
++		_mm_pause();
++	}
++}
++
+ void CLosHandler::BrP7PhaseA(int chunk)
+ {
+ 	using namespace BrP7;
++	if (v4) {
++		// each task claims types until none is left
++		const int n = int(losTypes.size());
++		for (int t; (t = nextType.fetch_add(1, std::memory_order_acq_rel)) < n; ) {
++			ILosType* lt = losTypes[t];
++			for (size_t k = 0, m = units.size(); k < m; ++k) {
++				CUnit* u = units[k];
++				if (t == 0)
++					idxOf[u->id] = int(k);
++				lt->UpdateUnit(u, false);
++			}
++			doneTypes.fetch_add(1, std::memory_order_acq_rel);
++		}
++		return;
++	}
+ 	const size_t b = size_t(chunk) * CHUNK, e = std::min(units.size(), b + CHUNK);
+ 	for (size_t n = b; n < e; ++n) {
+ 		const CUnit* u = units[n];
+@@ -931,12 +996,21 @@ void CLosHandler::BrP7Begin()
+ 		return;
+ 
+ 	units = unitHandler.GetActiveUnits();
+-	needs.assign(units.size(), 0);
+ 	if (idxOf.size() != size_t(unitHandler.MaxUnits()))
+ 		idxOf.assign(unitHandler.MaxUnits(), -1);
+ 	marked.clear();
+ 	all = false;
+ 	launched = true;
++	v4 = (g_brToggles2 & 0x80000) != 0;
++	if (v4) {
++		nextType.store(0, std::memory_order_relaxed);
++		doneTypes.store(0, std::memory_order_relaxed);
++		joined = false;
++		open.store(1, std::memory_order_release);
++		task = for_mt_background(0, int(losTypes.size()), phaseA);
++		return;
++	}
++	needs.assign(units.size(), 0);
+ 	open.store(1, std::memory_order_release);
+ 	task = for_mt_background(0, int((units.size() + CHUNK - 1) / CHUNK), phaseA);
+ }
+@@ -950,6 +1024,46 @@ bool CLosHandler::BrP7Finish()
+ 	if (!launched)
+ 		return false;
+ 
++	if (v4) {
++		// phase A's types (any left unclaimed run here), then the marked units
++		// again with their final inputs, then each type's map update
++		BrP7RunTypes();
++		wait_for_mt_background(task);
++		open.store(0, std::memory_order_release);
++		launched = false;
++		st.frames++;
++
++		if (all) {
++			st.allFrames++;
++			for_mt(0, losTypes.size(), [&](const int idx) {
++				ILosType* lt = losTypes[idx];
++				for (CUnit* u: unitHandler.GetActiveUnits()) {
++					lt->UpdateUnit(u, false);
++				}
++				lt->Update();
++			});
++		} else {
++			static std::vector<CUnit*> redo;
++			redo.clear();
++			for (const CUnit* u: marked) {
++				const int i = idxOf[u->id];
++				if (i >= 0 && size_t(i) < units.size() && units[i] == u)
++					redo.push_back(units[i]);
++			}
++			st.marks += marked.size();
++			for_mt(0, losTypes.size(), [&](const int idx) {
++				ILosType* lt = losTypes[idx];
++				for (CUnit* u: redo) {
++					lt->UpdateUnit(u, false);
++				}
++				lt->Update();
++			});
++		}
++		marked.clear();
++		all = false;
++		return true;
++	}
++
+ 	wait_for_mt_background(task);
+ 	open.store(0, std::memory_order_release);
+ 	launched = false;
+@@ -1066,6 +1180,7 @@ void CLosHandler::Update()
+ void CLosHandler::UpdateHeightMapSynced(SRectangle rect)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP7::Join(); // [barreplay] P7 v4: phase A writes the types
+ 	// [barreplay] H94 (toggle 0x40000000): the sensor types on all threads. Each
+ 	// type's update touches only its own instances, cache and queues (and reads
+ 	// the instances' own fields), and does exactly what it did, in its own
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index 0044ffc..a8ed423 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -341,6 +341,7 @@ public:
+ 	void BrP7JoinA();
+ 	bool BrP7Finish();
+ 	void BrP7PhaseA(int idx);
++	void BrP7RunTypes();
+ };
+ 
+ 
+-- 
+2.53.0
+

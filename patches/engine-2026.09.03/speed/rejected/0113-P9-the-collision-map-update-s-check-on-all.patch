@@ -1,0 +1,153 @@
+From c5fe65519e7d62699815e823a868c09b4e3ae165 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 23:02:41 +0000
+Subject: [PATCH] [barreplay] P9: the collision-map update's check on all
+ threads before the unit loop; the loop calls MovedUnit only where the quads
+ changed (toggle2 0x400000)
+
+The check reads only the unit and writes only its move type's last position;
+MovedUnit runs in the loop's order; after a Lua write the rest take the
+ordinary path. Flags by unit id, stamped with the frame. From 2048 units.
+---
+ rts/Sim/Misc/QuadField.cpp     |  9 ++++++
+ rts/Sim/Misc/QuadField.h       |  2 ++
+ rts/Sim/MoveTypes/MoveType.cpp |  8 +++++
+ rts/Sim/MoveTypes/MoveType.h   |  5 ++++
+ rts/Sim/Units/UnitHandler.cpp  | 53 ++++++++++++++++++++++++++++++++++
+ 5 files changed, 77 insertions(+)
+
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index b6ec489..f87a4f6 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -592,6 +592,15 @@ bool CQuadField::RemoveUnitIf(CUnit* unit, const float3& wpos)
+ 
+ 
+ #ifndef UNIT_TEST
++bool CQuadField::BrQuadsChanged(const CUnit* unit)
++{
++	QuadFieldQuery qfQuery;
++	GetQuads(qfQuery, unit->pos, unit->radius);
++	if (qfQuery.quads->size() == unit->quads.size())
++		return !std::equal(qfQuery.quads->begin(), qfQuery.quads->end(), unit->quads.begin());
++	return true;
++}
++
+ void CQuadField::MovedUnit(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Sim/Misc/QuadField.h b/rts/Sim/Misc/QuadField.h
+index dddb449..6cc6fa7 100644
+--- a/rts/Sim/Misc/QuadField.h
++++ b/rts/Sim/Misc/QuadField.h
+@@ -149,6 +149,8 @@ public:
+ 	bool RemoveUnitIf(CUnit* unit, const float3& wpos);
+ 
+ 	void MovedUnit(CUnit* unit);
++	// [barreplay] P9: would MovedUnit find the unit's quads changed (reads only)
++	bool BrQuadsChanged(const CUnit* unit);
+ 	void RemoveUnit(CUnit* unit);
+ 
+ 	void AddFeature(CFeature* feature);
+diff --git a/rts/Sim/MoveTypes/MoveType.cpp b/rts/Sim/MoveTypes/MoveType.cpp
+index 908e3c6..7cbdcaa 100644
+--- a/rts/Sim/MoveTypes/MoveType.cpp
++++ b/rts/Sim/MoveTypes/MoveType.cpp
+@@ -96,6 +96,14 @@ void AMoveType::UpdateCollisionMap(bool force)
+ 	}
+ }
+ 
++uint8_t AMoveType::BrCollisionPrecheck()
++{
++	if (!(owner->pos != oldCollisionUpdatePos))
++		return 0;
++	oldCollisionUpdatePos = owner->pos;
++	return quadField.BrQuadsChanged(owner)? 2: 1;
++}
++
+ void AMoveType::UpdateGroundBlockMap() {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (owner->pos != oldSlowUpdatePos) {
+diff --git a/rts/Sim/MoveTypes/MoveType.h b/rts/Sim/MoveTypes/MoveType.h
+index 0e5ec6a..dfd9cf2 100644
+--- a/rts/Sim/MoveTypes/MoveType.h
++++ b/rts/Sim/MoveTypes/MoveType.h
+@@ -54,6 +54,11 @@ public:
+ 	virtual bool Update() = 0;
+ 	virtual void SlowUpdate();
+ 	void UpdateCollisionMap(bool force = false);
++	// [barreplay] P9: UpdateCollisionMap's work up to MovedUnit's quad
++	// comparison (own fields and reads only, any thread): 0 the position did
++	// not change, 1 it changed within the same quads, 2 the quads changed
++	uint8_t BrCollisionPrecheck();
++	void BrCollisionSync() { oldCollisionUpdatePos = owner->pos; }
+ 	void UpdateGroundBlockMap();
+ 
+ 	virtual bool IsSkidding() const { return false; }
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index b2334cf..d0ffb98 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -756,6 +756,59 @@ void CUnitHandler::UpdateUnits()
+ 		return;
+ 	}
+ 
++	// [barreplay] P9 (toggle2 0x400000): the collision-map update's check, on
++	// all threads before the loop. For the units due this frame (H91's rate
++	// test), whether the position changed since the last update and, if so,
++	// whether the quads did; that reads only the unit (position, radius, its
++	// quad list) and writes only its move type's last position, and nothing in
++	// the loop moves a unit except through Lua. The loop then calls MovedUnit,
++	// in its order, only for the units whose quads changed (so the quad lists
++	// change in the same order), and after a Lua write takes the ordinary path
++	// for the rest, which a Lua move then finds. Units created in the loop take
++	// the ordinary path. Flags are kept by unit id (a creation in the loop
++	// shifts positions), stamped with the frame. From 2048 units.
++	if ((g_brToggles2 & 0x400000) != 0 && (g_brToggles & 0x400000) != 0 && activeUnitCount >= 2048 && ThreadPool::HasThreads()) {
++		static std::vector<uint8_t> brColl;
++		static std::vector<int> brStamp;
++		if (brStamp.size() != size_t(MaxUnits())) {
++			brColl.assign(MaxUnits(), 0);
++			brStamp.assign(MaxUnits(), -1);
++		}
++		const int rate = modInfo.unitQuadPositionUpdateRate;
++		const int frame = gs->frameNum;
++
++		for_mt_chunk(0, int(activeUnitCount), [&](const int i) {
++			CUnit* u = activeUnits[i];
++			if (((frame + u->id) % rate) != 0)
++				return;
++			g_brQfThread = ThreadPool::GetThreadNum(); // this thread's quad-query pools
++			brColl[u->id] = u->moveType->BrCollisionPrecheck();
++			brStamp[u->id] = frame;
++			g_brQfThread = 0;
++		}, 1, BrChunkMax());
++
++		const unsigned luaWrites = g_brLuaWrites;
++		for (size_t i = 0; i < activeUnitCount; ++i) {
++			if (i + 8 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 8]);
++			CUnit* unit = activeUnits[i];
++			unit->Update();
++
++			const int id = unit->id;
++			if (brStamp[id] == frame) {
++				if (brColl[id] == 2) {
++					if (g_brLuaWrites != luaWrites)
++						unit->moveType->BrCollisionSync(); // as the ordinary update would leave it
++					quadField.MovedUnit(unit);
++				} else if (g_brLuaWrites != luaWrites) {
++					unit->moveType->UpdateCollisionMap();
++				}
++			} else if (((frame + id) % rate) == 0) {
++				unit->moveType->UpdateCollisionMap();
++			}
++		}
++		return;
++	}
++
+ 	BrRunAhead::Begin(1, activeUnits, 0, activeUnitCount);
+ 	for (size_t i = 0; i < activeUnitCount; ++i) {
+ 		BrRunAhead::At(int(i));
+-- 
+2.53.0
+

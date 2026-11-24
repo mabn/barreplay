@@ -1,0 +1,198 @@
+From 3c918638b21ecedc288619a96ec19cdacf3d773a Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 00:55:57 +0000
+Subject: [PATCH 155/156] [barreplay] H126: the map work also in four bands of
+ map rows
+
+An 8v8 has two ally teams (three with Gaia), so (type, ally team) tasks halve
+the heaviest type's map work at best. A span of an instance's squares lies
+within one row (AddSquaresToInstance builds them row by row, of in-map
+squares only) and a circle is added row by row, so a map splits into bands of
+rows that never share a counter: each (type, ally team, band) task applies the
+spans starting in its band and the circle rows inside it, skipping whole any
+instance whose rows miss the band. The adds use the counter loop alone: in
+full view the visible add's report of squares entering LOS returns at once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Misc/LosHandler.cpp | 45 ++++++++++++++++++++++++++++---------
+ rts/Sim/Misc/LosHandler.h   |  5 +++--
+ rts/Sim/Misc/LosMap.cpp     | 18 +++++++++++++++
+ rts/Sim/Misc/LosMap.h       | 20 +++++++++++++----
+ 4 files changed, 71 insertions(+), 17 deletions(-)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 9cbf9a2..8010eb6 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -718,19 +718,39 @@ void ILosType::BrStageMapWork()
+ 		brAdd[li->allyteam].push_back(li);
+ }
+ 
+-// [barreplay] H126: ally team a's removes, then its adds (the raycasts have run)
+-void ILosType::BrMapWork(int a)
++// [barreplay] H126: ally team a's removes, then its adds (the raycasts have
++// run), on the rows of one band of its map; an instance whose circle misses
++// the band is skipped whole
++void ILosType::BrMapWork(int a, int band, int bands)
+ {
++	CLosMap& m = losMaps[a];
++	const int rows = m.BrRows();
++	const int rowLo = int((int64_t(rows) * band) / bands);
++	const int rowHi = int((int64_t(rows) * (band + 1)) / bands);
++	const auto misses = [&](const SLosInstance* li) {
++		return (li->basePos.y + li->radius < rowLo) || (li->basePos.y - li->radius >= rowHi);
++	};
++	const bool raycast = (algoType == LOS_ALGO_RAYCAST);
++
+ 	for (const int k: brRem[a]) {
+-		if (brRecalcRem[k]) {
+-			losMaps[a].BrAddSquares(brOld[k], -1);
++		const SLosInstance* li = losRemove[k];
++		if (misses(li))
++			continue;
++		if (raycast) {
++			m.BrAddSquaresBand(brRecalcRem[k] ? brOld[k] : li->squares, -1, rowLo, rowHi);
+ 		} else {
+-			LosRemove(losRemove[k]);
++			m.BrAddCircleBand(li, -1, rowLo, rowHi);
+ 		}
+ 	}
+-	for (SLosInstance* li: brAdd[a]) {
++	for (const SLosInstance* li: brAdd[a]) {
+ 		assert(li->refCount > 0);
+-		LosAdd(li);
++		if (misses(li))
++			continue;
++		if (raycast) {
++			m.BrAddSquaresBand(li->squares, 1, rowLo, rowHi);
++		} else {
++			m.BrAddCircleBand(li, 1, rowLo, rowHi);
++		}
+ 	}
+ }
+ 
+@@ -1232,8 +1252,8 @@ void CLosHandler::BrP7JoinA() {}
+ // one task per type, whose heaviest (the sight type's removes and adds) the
+ // others waited for. Four steps: per type, the units and Update's queues and
+ // filtering (BrUpdateBegin, BrStageMapWork); every type's raycasts at once;
+-// each (type, ally team)'s removes and adds; per type, the cache
+-// (BrUpdateEnd). A type's state is touched only in its own first and last
++// each (type, ally team, band of map rows)'s removes and adds; per type, the
++// cache (BrUpdateEnd). A type's state is touched only in its own first and last
+ // step; a map step touches one ally team's map (integer adds, which commute)
+ // and reads the squares the raycasts wrote. Only in full view: a visible add
+ // otherwise reports squares entering LOS to the unsynced height map.
+@@ -1275,6 +1295,8 @@ static void BrH126Types(std::array<ILosType*, 7>& losTypes, F&& perType)
+ 		lt->losMaps[li->allyteam].PrepareRaycast(li);
+ 	});
+ 
++	// each (type, ally team) with work, in BANDS bands of its map's rows
++	static constexpr int BANDS = 4;
+ 	static std::vector<std::pair<int, int>> jobs;
+ 	jobs.clear();
+ 	for (size_t t = 0; t < losTypes.size(); ++t) {
+@@ -1285,8 +1307,9 @@ static void BrH126Types(std::array<ILosType*, 7>& losTypes, F&& perType)
+ 				jobs.emplace_back(int(t), int(a));
+ 		}
+ 	}
+-	for_mt(0, jobs.size(), [&](const int j) {
+-		losTypes[jobs[j].first]->BrMapWork(jobs[j].second);
++	for_mt(0, int(jobs.size()) * BANDS, [&](const int j) {
++		const auto& job = jobs[j / BANDS];
++		losTypes[job.first]->BrMapWork(job.second, j % BANDS, BANDS);
+ 	});
+ 
+ 	for_mt(0, losTypes.size(), [&](const int idx) {
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index ffcc00e..0f9513a 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -145,11 +145,12 @@ public:
+ 	// its early exit); BrStageMapWork then sorts the map work by ally team, in
+ 	// Update's order, moving a recalculated instance's old squares aside so its
+ 	// raycast (on any thread) cannot clobber what its removal needs;
+-	// BrMapWork(a) is ally team a's removes and adds; BrUpdateEnd is the cache.
++	// BrMapWork(a, band, bands) is ally team a's removes and adds on one band
++	// of the map's rows; BrUpdateEnd is the cache.
+ 	bool BrUpdateBegin();
+ 	void BrStageMapWork();
+ 	bool BrHasMapWork(int a) const { return size_t(a) < brRem.size() && (!brRem[a].empty() || !brAdd[a].empty()); }
+-	void BrMapWork(int a);
++	void BrMapWork(int a, int band, int bands);
+ 	void BrUpdateEnd();
+ 	const std::vector<SLosInstance*>& BrRecalc() const { return losRecalc; }
+ 
+diff --git a/rts/Sim/Misc/LosMap.cpp b/rts/Sim/Misc/LosMap.cpp
+index 57cc5d5..f4ebbe1 100644
+--- a/rts/Sim/Misc/LosMap.cpp
++++ b/rts/Sim/Misc/LosMap.cpp
+@@ -427,6 +427,24 @@ void CLosMap::AddCircle(SLosInstance* instance, int amount)
+ }
+ 
+ 
++// [barreplay] H126: AddCircle for the rows in [rowLo, rowHi) (LosMap.h)
++void CLosMap::BrAddCircleBand(const SLosInstance* instance, int amount, int rowLo, int rowHi)
++{
++	MidpointCircleAlgoPerLine(instance->radius, [&](int width, int y) {
++		const unsigned y_ = instance->basePos.y + y;
++
++		if (y_ < size.y && int(y_) >= rowLo && int(y_) < rowHi) {
++			const unsigned sx = std::clamp(instance->basePos.x - width,     0, size.x);
++			const unsigned ex = std::clamp(instance->basePos.x + width + 1, 0, size.x);
++
++			for (unsigned x_ = sx; x_ < ex; ++x_) {
++				losmap[(y_ * size.x) + x_] += amount;
++			}
++		}
++	});
++}
++
++
+ void CLosMap::AddRaycast(SLosInstance* instance, int amount)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Sim/Misc/LosMap.h b/rts/Sim/Misc/LosMap.h
+index 6f7f5ae..9f3ae0f 100644
+--- a/rts/Sim/Misc/LosMap.h
++++ b/rts/Sim/Misc/LosMap.h
+@@ -53,20 +53,32 @@ public:
+ 	// FIXME temp fix for CBaseGroundDrawer and AI interface, which need raw data
+ 	const unsigned short& front() const { return losmap.front(); }
+ 	const auto& GetLosMap() const { return losmap; }
+-	// [barreplay] H126: AddRaycast's plain path (any amount but a visible
+-	// add's) over the given squares instead of the instance's own (a template
+-	// only because SLosInstance is incomplete here; 0 is EMPTY_RLE's length)
++	// [barreplay] H126: AddRaycast's counter loop over the given squares (an
++	// instance's, or its old ones) and AddCircle's, both for the map rows in
++	// [rowLo, rowHi) only. A span lies within one row (AddSquaresToInstance
++	// makes them row by row, of in-map squares only), so it belongs to the
++	// band its start is in, and two bands never touch the same counter. A
++	// visible add's report of squares entering LOS is left out: in full view,
++	// the only place this runs, CReadMap::UpdateLOS returns at once. (A
++	// template only because SLosInstance is incomplete here; 0 is EMPTY_RLE's
++	// length.)
+ 	template <typename RLEs>
+-	void BrAddSquares(const RLEs& losSquares, int amount) {
++	void BrAddSquaresBand(const RLEs& losSquares, int amount, int rowLo, int rowHi) {
+ 		if (losSquares.empty() || losSquares[0].length == 0)
+ 			return;
+ 
++		const int lo = rowLo * size.x;
++		const int hi = rowHi * size.x;
+ 		for (const auto rle: losSquares) {
++			if (rle.start < lo || rle.start >= hi)
++				continue;
+ 			for (int idx = rle.start, len = rle.length; len > 0; --len, ++idx) {
+ 				losmap[idx] += amount;
+ 			}
+ 		}
+ 	}
++	void BrAddCircleBand(const SLosInstance* instance, int amount, int rowLo, int rowHi);
++	int BrRows() const { return size.y; } // [barreplay] H126
+ private:
+ 	void LosAdd(SLosInstance* instance) const;
+ 	void UnsafeLosAdd(SLosInstance* instance) const;
+-- 
+2.53.0
+

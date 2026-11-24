@@ -1,0 +1,291 @@
+From 4051ca7c82bdda26b05ddef9861eb53c8abb44de Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 13:42:31 +0000
+Subject: [PATCH 13/13] Engine event log: Spring.GetUnitSampleData and the
+ weapon reload log
+
+GetUnitSampleData returns every unit's sampled state in one call (what the
+per-unit Get* functions return under full read, in GetAllUnits' order).
+SetEngineEventLog's third flag logs every write of a weapon's reloadStatus,
+drained by Spring.GetLoggedReloads. Both full-read only; barreplay's widget
+uses them in place of ~8 calls per unit per sample and a weapon-state call per
+ready launcher slot per frame.
+---
+ rts/Lua/LuaEngineEventLog.cpp        | 124 +++++++++++++++++++++++++++
+ rts/Lua/LuaEngineEventLog.h          |   2 +
+ rts/Lua/LuaSyncedCtrl.cpp            |   1 +
+ rts/Sim/Units/Scripts/UnitScript.cpp |   1 +
+ rts/Sim/Units/Unit.cpp               |   1 +
+ rts/Sim/Weapons/BeamLaser.cpp        |   1 +
+ rts/Sim/Weapons/Weapon.cpp           |   4 +
+ rts/Sim/Weapons/Weapon.h             |   8 ++
+ 8 files changed, 142 insertions(+)
+
+diff --git a/rts/Lua/LuaEngineEventLog.cpp b/rts/Lua/LuaEngineEventLog.cpp
+index 8df07fb..d1606bf 100644
+--- a/rts/Lua/LuaEngineEventLog.cpp
++++ b/rts/Lua/LuaEngineEventLog.cpp
+@@ -12,6 +12,11 @@
+ #include "Sim/Projectiles/ProjectileHandler.h"
+ #include "Sim/Units/Unit.h"
+ #include "Sim/Units/UnitDef.h"
++#include "Sim/Units/UnitHandler.h"
++#include "Sim/Units/UnitTypes/Builder.h"
++#include "Sim/Units/UnitTypes/Factory.h"
++#include "Sim/Misc/TeamHandler.h"
++#include "Sim/Weapons/Weapon.h"
+ #include "Sim/Weapons/WeaponDef.h"
+ #include "System/EventClient.h"
+ #include "System/EventHandler.h"
+@@ -218,6 +223,8 @@ bool LuaEngineEventLog::PushEntries(lua_State* L)
+ 	REGISTER_LUA_CFUNC(SetEngineEventLog);
+ 	REGISTER_LUA_CFUNC(GetLoggedExplosions);
+ 	REGISTER_LUA_CFUNC(GetLoggedDamage);
++	REGISTER_LUA_CFUNC(GetUnitSampleData);
++	REGISTER_LUA_CFUNC(GetLoggedReloads);
+ 	return true;
+ }
+ 
+@@ -225,6 +232,9 @@ void LuaEngineEventLog::Reset()
+ {
+ 	setRegistered(explosionLog(), explosionLog()->log, false);
+ 	setRegistered(damageLog(), damageLog()->log, false);
++	g_brReloadLogOn = false;
++	g_brReloadLog.clear();
++	g_brReloadLog.shrink_to_fit();
+ }
+ 
+ 
+@@ -239,9 +249,49 @@ int LuaEngineEventLog::SetEngineEventLog(lua_State* L)
+ {
+ 	setRegistered(explosionLog(), explosionLog()->log, luaL_optboolean(L, 1, false));
+ 	setRegistered(damageLog(), damageLog()->log, luaL_optboolean(L, 2, false));
++	g_brReloadLogOn = luaL_optboolean(L, 3, false) && CLuaHandle::GetHandleFullRead(L);
++	if (!g_brReloadLogOn) {
++		g_brReloadLog.clear();
++		g_brReloadLog.shrink_to_fit();
++	}
+ 	return 0;
+ }
+ 
++/***
++ * [barreplay] Drains the weapon reload-frame changes recorded since the
++ * previous call (third flag of SetEngineEventLog): every write of a weapon's
++ * reloadStatus, in the order the simulation made them.
++ *
++ * @function Spring.GetLoggedReloads
++ * @param fill table? reused for the result
++ * @return number[]? values flat, 3 per change: unitID, weaponNum (0-based), reloadFrame
++ * @return integer count
++ */
++int LuaEngineEventLog::GetLoggedReloads(lua_State* L)
++{
++	if (!CLuaHandle::GetHandleFullRead(L))
++		return 0;
++	int prevLen = 0;
++	if (lua_istable(L, 1)) {
++		prevLen = lua_objlen(L, 1);
++		lua_pushvalue(L, 1);
++	} else {
++		lua_createtable(L, g_brReloadLog.size(), 0);
++	}
++	const int n = static_cast<int>(g_brReloadLog.size());
++	for (int i = 0; i < n; i++) {
++		lua_pushnumber(L, g_brReloadLog[i]);
++		lua_rawseti(L, -2, i + 1);
++	}
++	for (int i = n + 1; i <= prevLen; i++) {
++		lua_pushnil(L);
++		lua_rawseti(L, -2, i);
++	}
++	lua_pushnumber(L, n / 3);
++	g_brReloadLog.clear();
++	return 2;
++}
++
+ /***
+  * [barreplay] Drains the explosions recorded since the previous call.
+  *
+@@ -269,3 +319,77 @@ int LuaEngineEventLog::GetLoggedDamage(lua_State* L)
+ {
+ 	return drain(L, damageLog()->log, LOG_DAMAGE_STRIDE);
+ }
++
++
++/***
++ * [barreplay] Every unit's sampled state in one call, for a full-read handle:
++ * what Spring.GetAllUnits + GetUnitTeam / GetUnitPosition / GetUnitDefID /
++ * GetUnitHealth / GetUnitVelocity / GetUnitIsBuilding / GetUnitLosState(id,
++ * allyTeam, true) return under full read, in GetAllUnits' order, as one flat
++ * array: unitID, team, unitDefID, x, z, health, maxHealth, buildProgress,
++ * speed.x, speed.z, buildee unitID (0 = none), then one raw losStatus per
++ * requested ally team (0 for an invalid one). The same float values the
++ * separate calls push, so a widget gets identical numbers for ~1/10 of the
++ * Lua->C calls. Passing a table as arg 2 reuses it.
++ *
++ * @function Spring.GetUnitSampleData
++ * @param allyTeams integer[]
++ * @param reuse table?
++ * @return number[] data, integer count, integer stride
++ */
++int LuaEngineEventLog::GetUnitSampleData(lua_State* L)
++{
++	if (!CLuaHandle::GetHandleFullRead(L))
++		return 0;
++
++	std::vector<int> allyTeams;
++	if (lua_istable(L, 1)) {
++		const int n = lua_objlen(L, 1);
++		for (int i = 1; i <= n; i++) {
++			lua_rawgeti(L, 1, i);
++			allyTeams.push_back(lua_isnumber(L, -1) ? lua_toint(L, -1) : -1);
++			lua_pop(L, 1);
++		}
++	}
++	const int stride = 11 + static_cast<int>(allyTeams.size());
++	const auto& units = unitHandler.GetActiveUnits();
++
++	int prevLen = 0;
++	if (lua_istable(L, 2)) {
++		prevLen = lua_objlen(L, 2);
++		lua_pushvalue(L, 2);
++	} else {
++		lua_createtable(L, units.size() * stride, 0);
++	}
++
++	int k = 0;
++	const auto put = [&](lua_Number v) { lua_pushnumber(L, v); lua_rawseti(L, -2, ++k); };
++	for (const CUnit* u: units) {
++		int buildee = 0;
++		if (const CBuilder* b = dynamic_cast<const CBuilder*>(u); b != nullptr && b->curBuild) {
++			buildee = b->curBuild->id;
++		} else if (const CFactory* f = dynamic_cast<const CFactory*>(u); f != nullptr && f->curBuild) {
++			buildee = f->curBuild->id;
++		}
++		put(u->id);
++		put(u->team);
++		put(u->unitDef->id);
++		put(u->pos.x);
++		put(u->pos.z);
++		put(u->health);
++		put(u->maxHealth);
++		put(u->buildProgress);
++		put(u->speed.x);
++		put(u->speed.z);
++		put(buildee);
++		for (const int at: allyTeams)
++			put(teamHandler.IsValidAllyTeam(at) ? u->losStatus[at] : 0);
++	}
++	for (int i = k + 1; i <= prevLen; i++) {
++		lua_pushnil(L);
++		lua_rawseti(L, -2, i);
++	}
++	lua_pushnumber(L, units.size());
++	lua_pushnumber(L, stride);
++	return 3;
++}
+diff --git a/rts/Lua/LuaEngineEventLog.h b/rts/Lua/LuaEngineEventLog.h
+index 16bee54..bdf2193 100644
+--- a/rts/Lua/LuaEngineEventLog.h
++++ b/rts/Lua/LuaEngineEventLog.h
+@@ -61,6 +61,8 @@ private:
+ 	static int SetEngineEventLog(lua_State* L);
+ 	static int GetLoggedExplosions(lua_State* L);
+ 	static int GetLoggedDamage(lua_State* L);
++	static int GetUnitSampleData(lua_State* L);
++	static int GetLoggedReloads(lua_State* L);
+ };
+ 
+ #endif // LUA_ENGINE_EVENT_LOG_H
+diff --git a/rts/Lua/LuaSyncedCtrl.cpp b/rts/Lua/LuaSyncedCtrl.cpp
+index fe7eeea..2af3976 100644
+--- a/rts/Lua/LuaSyncedCtrl.cpp
++++ b/rts/Lua/LuaSyncedCtrl.cpp
+@@ -2491,6 +2491,7 @@ static bool SetSingleUnitWeaponState(lua_State* L, CWeapon* weapon, int index)
+ 		case hashString("reloadState"):
+ 		case hashString("reloadFrame"): {
+ 			weapon->reloadStatus = lua_toint(L, index + 1);
++			BR_RELOAD_CHANGED(weapon);
+ 		} break;
+ 
+ 		case hashString("reloadTime"): {
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index 80b76e5..1bcb5b6 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -1493,6 +1493,7 @@ int CUnitScript::GetUnitVal(int val, int p1, int p2, int p3, int p4)
+ 			CWeapon* w = unit->weapons[np1 - 1];
+ 			const int old = w->reloadStatus;
+ 			w->reloadStatus = p2;
++			BR_RELOAD_CHANGED(w);
+ 			return old;
+ 		}
+ 
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 9d2f32b..99dd767 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -682,6 +682,7 @@ void CUnit::Update()
+ 		// paralyzed weapons shouldn't reload
+ 		for (CWeapon* w: weapons) {
+ 			++(w->reloadStatus);
++			BR_RELOAD_CHANGED(w);
+ 		}
+ 
+ 		return;
+diff --git a/rts/Sim/Weapons/BeamLaser.cpp b/rts/Sim/Weapons/BeamLaser.cpp
+index c25cb4e..e9c0029 100644
+--- a/rts/Sim/Weapons/BeamLaser.cpp
++++ b/rts/Sim/Weapons/BeamLaser.cpp
+@@ -195,6 +195,7 @@ void CBeamLaser::UpdateSweep()
+ 	//   reloadStatus is normally only set in UpdateFire and only if CanFire
+ 	//   (which is not true during sweeping, the integration should be better)
+ 	reloadStatus = gs->frameNum + int(reloadTime / owner->reloadSpeed);
++	BR_RELOAD_CHANGED(this);
+ }
+ 
+ void CBeamLaser::Update()
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index 21f304d..d4fb6e6 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -1,6 +1,9 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "Weapon.h"
++
++bool g_brReloadLogOn = false;
++std::vector<int> g_brReloadLog;
+ #include "WeaponDefHandler.h"
+ #include "WeaponMemPool.h"
+ #include "Game/GameHelper.h"
+@@ -501,6 +504,7 @@ void CWeapon::UpdateFire()
+ 	}
+ 
+ 	reloadStatus = gs->frameNum + int(reloadTime / owner->reloadSpeed);
++	BR_RELOAD_CHANGED(this);
+ 
+ 	salvoLeft = salvoSize;
+ 	nextSalvo = gs->frameNum + salvoWindup;
+diff --git a/rts/Sim/Weapons/Weapon.h b/rts/Sim/Weapons/Weapon.h
+index b350a6e..0908112 100644
+--- a/rts/Sim/Weapons/Weapon.h
++++ b/rts/Sim/Weapons/Weapon.h
+@@ -24,6 +24,14 @@ struct WeaponVectorsState {
+ 	float3 weaponDir;
+ };
+ 
++// [barreplay] W3: every change of a weapon's reloadStatus, as (unitID,
++// weaponNum, value) triples, while switched on (Spring.SetEngineEventLog's
++// third flag). Lets a full-read widget follow reload frames without polling
++// every weapon every frame. Off: one predictable branch per write.
++extern bool g_brReloadLogOn;
++extern std::vector<int> g_brReloadLog;
++#define BR_RELOAD_CHANGED(w) do { if (g_brReloadLogOn) { g_brReloadLog.push_back((w)->owner->id); g_brReloadLog.push_back((w)->weaponNum); g_brReloadLog.push_back((w)->reloadStatus); } } while (0)
++
+ class CWeapon : public CObject
+ {
+ 	CR_DECLARE_DERIVED(CWeapon)
+-- 
+2.53.0
+

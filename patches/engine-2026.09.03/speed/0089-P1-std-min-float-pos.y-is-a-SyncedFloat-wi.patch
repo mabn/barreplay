@@ -1,0 +1,26 @@
+From 25f051f06ce0e22d330469dba680e57adc66daf1 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 19:26:33 +0000
+Subject: [PATCH 89/90] [barreplay] P1: std::min<float> (pos.y is a SyncedFloat
+ with the sync checker on)
+
+---
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index c169f35..60c9b57 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -251,7 +251,7 @@ namespace BrParAir {
+ 	// cannot happen in this frame's update.
+ 	static bool CrashCannotEndThisFrame(const CUnit* u) {
+ 		const float reach = u->speed.w + 4.0f;
+-		const float lowY = std::min(u->pos.y, u->midPos.y) - reach - u->pos.distance(u->midPos);
++		const float lowY = std::min<float>(u->pos.y, u->midPos.y) - reach - u->pos.distance(u->midPos);
+ 		const float* hm = readMap->GetCornerHeightMapSynced();
+ 
+ 		const int x0 = std::clamp(int((u->pos.x - reach) / SQUARE_SIZE) - 1, 0, mapDims.mapx);
+-- 
+2.53.0
+

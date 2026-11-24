@@ -1,0 +1,37 @@
+From f19680f0da4f2e40af3a02398a128d8a2db58d83 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 15:43:52 +0000
+Subject: [PATCH 107/108] [barreplay] H104: the flag is public
+
+---
+ rts/Lua/LuaHandle.h | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Lua/LuaHandle.h b/rts/Lua/LuaHandle.h
+index e681c44..ff36de2 100644
+--- a/rts/Lua/LuaHandle.h
++++ b/rts/Lua/LuaHandle.h
+@@ -52,6 +52,10 @@ class CCobDeferredCallin;
+ class CLuaHandle : public CEventClient
+ {
+ 	public:
++		// [barreplay] H104: an unsynced LuaRules/LuaGaia handle taken off every
++		// event list in a demo replay; it does not put itself back
++		bool brMuted = false;
++
+ 		void CheckStack();
+ 		int GetCallInErrors() const { return callinErrors; }
+ 		void ResetCallinErrors() { callinErrors = 0; }
+@@ -354,9 +358,6 @@ class CLuaHandle : public CEventClient
+ 		bool rmlui = false;
+ 		bool userMode = false;
+ 		bool killMe = false; // set for handles that fail to RunCallIn
+-		// [barreplay] H104: an unsynced LuaRules/LuaGaia handle taken off every
+-		// event list in a demo replay; it does not put itself back
+-		bool brMuted = false;
+ 
+ 		int callinErrors = 0;
+ 
+-- 
+2.53.0
+

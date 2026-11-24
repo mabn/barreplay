@@ -1,0 +1,109 @@
+From 6c4066002c70fa6e87a5b47c237526a103c389f5 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:51:33 +0000
+Subject: [PATCH 145/149] [barreplay] H119: FindAnim on a perturbed list
+ binary-searches its sorted prefix (toggle3 0x2000)
+
+CUnitScript::AddAnim was 1.2% of the main thread in speed62's late window, 57%
+of it FindAnim's linear scan, taken whenever the list had changed since the last
+TickAllAnims (which leaves it sorted). The list's first brAnimsSorted entries
+are still sorted: an append only adds to the tail, a swap-erase cuts the prefix
+at its slot. So the prefix is binary-searched and only the tail scanned; the
+(piece, type, axis) key is unique per anim (the invariant H80 relies on), so
+the element found is the one the full scan finds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/Scripts/UnitScript.cpp | 27 +++++++++++++++++++++++++++
+ rts/Sim/Units/Scripts/UnitScript.h   |  2 ++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index ceffe8c..fd1f57f 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -58,6 +58,8 @@
+ 
+ #endif
+ 
++extern unsigned g_brToggles3; // [barreplay] H119
++
+ CR_BIND_INTERFACE(CUnitScript)
+ 
+ CR_REG_METADATA(CUnitScript, (
+@@ -68,6 +70,7 @@ CR_REG_METADATA(CUnitScript, (
+ 	CR_MEMBER(doneAnims),
+ 	// [barreplay] defaults to true, so a loaded script just re-sorts once
+ 	CR_IGNORED(animsDirty),
++	CR_IGNORED(brAnimsSorted),
+ 
+ 	//Populated by children
+ 	CR_IGNORED(rootPiece),
+@@ -257,6 +260,7 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 	// [barreplay] order-preserving erase (was swap-erase VectorEraseIfAll), so a
+ 	// sorted <anims> stays sorted and the per-tick sort above can stay skipped
+ 	std::erase_if(anims, [](const auto& ai) { return ai.done; });
++	brAnimsSorted = uint32_t(anims.size()); // [barreplay] H119: sorted, start to end
+ 
+ 	// [barreplay] H73: a run-time test - this file is compiled into engineSim,
+ 	// which never sees -DHEADLESS, so the #ifdef it had kept this dead
+@@ -424,6 +428,25 @@ CUnitScript::AnimContainerTypeIt CUnitScript::FindAnim(AnimType type, int piece,
+ 			return it;
+ 		return anims.end();
+ 	}
++	// [barreplay] H119 (toggle3 0x2000): <anims>' first brAnimsSorted entries
++	// are still sorted (TickAllAnims leaves it sorted; an append only adds to
++	// the tail; a swap-erase cuts the prefix at its slot), so binary-search
++	// those and scan the tail. The key is unique per anim (the same invariant
++	// H80 relies on), so this finds the element the full scan would.
++	if ((g_brToggles3 & 0x2000) != 0) {
++		const auto pre = anims.begin() + std::min<size_t>(brAnimsSorted, anims.size());
++		const auto key = std::make_tuple(piece, type, axis);
++		const auto lb = std::lower_bound(anims.begin(), pre, key, [](const AnimInfo& ai, const auto& k) {
++			return std::tie(ai.piece, ai.animType, ai.axis) < k;
++		});
++		if (lb != pre && lb->piece == piece && lb->animType == type && lb->axis == axis)
++			return lb;
++		for (auto it = pre; it != anims.end(); ++it) {
++			if (((it->animType ^ type) | (it->piece ^ piece) | (it->axis ^ axis)) == 0)
++				return it;
++		}
++		return anims.end();
++	}
+ 	for (auto it = anims.begin(); it != anims.end(); ++it) {
+ 		if (((it->animType ^ type) | (it->piece ^ piece) | (it->axis ^ axis)) == 0)
+ 			return it;
+@@ -438,6 +461,7 @@ void CUnitScript::RemoveAnim(AnimType type, const AnimContainerTypeIt& animInfoI
+ 		return;
+ 
+ 	AnimInfo& ai = *animInfoIt;
++	const uint32_t brIdx = uint32_t(animInfoIt - anims.begin()); // [barreplay] H119
+ 
+ 	// We need to unblock threads waiting on this animation, otherwise they will be lost in the void
+ 	// NOTE: AnimFinished might result in new anims being added
+@@ -447,6 +471,9 @@ void CUnitScript::RemoveAnim(AnimType type, const AnimContainerTypeIt& animInfoI
+ 	ai = anims.back();
+ 	anims.pop_back();
+ 	animsDirty = true; // [barreplay] swap-erase above breaks sorted order
++	// [barreplay] H119: what is before the slot stays sorted (appends only grow
++	// the unsorted tail)
++	brAnimsSorted = std::min<uint32_t>(std::min(brAnimsSorted, brIdx), uint32_t(anims.size()));
+ 
+ 	// If this was the last animation, remove from currently animating list
+ 	// FIXME: this could be done in a cleaner way
+diff --git a/rts/Sim/Units/Scripts/UnitScript.h b/rts/Sim/Units/Scripts/UnitScript.h
+index 560c680..1759dd9 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.h
++++ b/rts/Sim/Units/Scripts/UnitScript.h
+@@ -60,6 +60,8 @@ protected:
+ 	// the erase of done anims is order-preserving (std::erase_if), so it never
+ 	// perturbs an already-sorted vector.
+ 	bool animsDirty = true;
++	// [barreplay] H119: the length of <anims>' sorted prefix (see FindAnim)
++	uint32_t brAnimsSorted = 0;
+ 
+ 	bool busy;
+ 	bool hasSetSFXOccupy;
+-- 
+2.53.0
+

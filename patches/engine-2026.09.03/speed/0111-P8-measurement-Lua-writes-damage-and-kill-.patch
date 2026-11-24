@@ -1,0 +1,98 @@
+From ff47c2b25bad490980c3e43583db813ffa6858f4 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 21:37:46 +0000
+Subject: [PATCH] [barreplay] P8 measurement: Lua writes, damage and kill calls
+ in the weapon loop, and the index of the first Lua write (BARREPLAY_P8_STATS)
+
+---
+ rts/Sim/Units/Unit.cpp        |  4 ++++
+ rts/Sim/Units/UnitHandler.cpp | 27 +++++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 2a23151..aacbd15 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -60,6 +60,8 @@
+ #include "Sim/Projectiles/ProjectileMemPool.h"
+ #include "Sim/Projectiles/WeaponProjectiles/MissileProjectile.h"
+ #include "Sim/Weapons/Weapon.h"
++
++unsigned g_brDamageCalls = 0, g_brKillCalls = 0; // [barreplay] P8 measurement
+ #include "Sim/Weapons/WeaponDefHandler.h"
+ #include "Sim/Weapons/WeaponLoader.h"
+ #include "System/EventHandler.h"
+@@ -477,6 +479,7 @@ void CUnit::KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int wea
+ 
+ void CUnit::ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int weaponDefID)
+ {
++	++g_brKillCalls; // [barreplay] P8 measurement
+ 	BrP7::Mark(this); // [barreplay] P7: an LOS input changes
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (isDead)
+@@ -1327,6 +1330,7 @@ void CUnit::DoDamage(
+ 	int weaponDefID,
+ 	int projectileID
+ ) {
++	++g_brDamageCalls; // [barreplay] P8 measurement
+ 	if (isDead)
+ 		return;
+ 	if (IsCrashing() || IsInVoid())
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index b7b48b6..e9ebfc8 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -607,6 +607,7 @@ void CUnitHandler::SlowUpdateUnits()
+ }
+ 
+ extern unsigned g_brLuaWrites; // [barreplay] H101 (Lua/LuaUtils.cpp)
++extern unsigned g_brDamageCalls, g_brKillCalls; // [barreplay] P8 measurement (Sim/Units/Unit.cpp)
+ extern unsigned g_brHeightMapVersion; // [barreplay] H88 (Map/ReadMap.h)
+ 
+ void CUnitHandler::UpdateUnits()
+@@ -818,6 +819,14 @@ void CUnitHandler::UpdateUnitWeapons()
+ 			unit->UpdateWeaponVectors();
+ 		}, 1, BrChunkMax());
+ 	}
++	// [barreplay] P8 measurement: in the weapon loop, how many Lua writes,
++	// damage and kill calls there are, and how far into the loop the first Lua
++	// write comes (what a weapon-vector pipeline could overlap)
++	struct BrP8Stat { long long frames = 0, luaWrites = 0, damages = 0, kills = 0, units = 0, firstLuaIdxSum = 0, framesWithLua = 0; };
++	static BrP8Stat brP8;
++	static int brP8LogFrame = -1000000;
++	const unsigned brLua0 = g_brLuaWrites, brDmg0 = g_brDamageCalls, brKill0 = g_brKillCalls;
++	long long brFirstLua = -1;
+ 	{
+ 		SCOPED_TIMER("Sim::Unit::Weapon");
+ 		BrRunAhead::Begin(2, activeUnits, 0, activeUnits.size());
+@@ -854,9 +863,27 @@ void CUnitHandler::UpdateUnitWeapons()
+ 				}
+ 			}
+ 			activeUnits[activeUpdateUnit]->UpdateWeapons();
++			if (brFirstLua < 0 && g_brLuaWrites != brLua0)
++				brFirstLua = (long long) activeUpdateUnit;
+ 		}
+ 		BrRunAhead::End();
+ 	}
++	brP8.frames += 1;
++	brP8.units += activeUnits.size();
++	brP8.luaWrites += (g_brLuaWrites - brLua0);
++	brP8.damages += (g_brDamageCalls - brDmg0);
++	brP8.kills += (g_brKillCalls - brKill0);
++	if (brFirstLua >= 0) {
++		brP8.framesWithLua += 1;
++		brP8.firstLuaIdxSum += brFirstLua;
++	}
++	if ((gs->frameNum - brP8LogFrame) >= 900 && getenv("BARREPLAY_P8_STATS") != nullptr) {
++		brP8LogFrame = gs->frameNum;
++		LOG("[BR_P8] f=%d frames=%lld avgUnits=%.0f luaWrites/frame=%.2f damages/frame=%.1f kills/frame=%.2f framesWithLua=%lld avgFirstLuaIdx=%.0f",
++			gs->frameNum, brP8.frames, double(brP8.units) / brP8.frames, double(brP8.luaWrites) / brP8.frames,
++			double(brP8.damages) / brP8.frames, double(brP8.kills) / brP8.frames, brP8.framesWithLua,
++			brP8.framesWithLua > 0 ? double(brP8.firstLuaIdxSum) / brP8.framesWithLua : -1.0);
++	}
+ }
+ 
+ void CUnitHandler::UpdatePreFrame()
+-- 
+2.53.0
+

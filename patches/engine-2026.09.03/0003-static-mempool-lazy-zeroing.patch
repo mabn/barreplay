@@ -1,0 +1,56 @@
+From 3a908edc7c5682aa5f034c7ad77a34c6e1759da1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 24 Aug 2026 00:39:06 +0200
+Subject: [PATCH] StaticMemPool: zero only the pages handed out, not the whole
+ pool
+
+clear() memset the entire pages array, and every instance of this
+template is a namespace-scope global whose constructor runs before main.
+So each process started by writing 1.05 GiB of zeroes over .bss that the
+loader had already zeroed -- weaponMemPool 758 MiB, projMemPool 142,
+unitMemPool 138, featureMemPool 45 -- and held every page of it resident
+for its whole life, whatever the size of the game being simulated.
+
+The pool's invariant is that an unallocated page reads as zero. allocMem
+hands pages out in order and freeMem zeroes each one it takes back, so
+everything past used_page_count is already zero and only the used prefix
+can be dirty. Zeroing that prefix keeps the invariant exactly; at
+construction it is empty, so the pools now cost what their live objects
+cost.
+
+Headless BAR re-simulation on a 7.9 GB host, 8v8 replay: peak RSS was
+6.7 GB and the run was stopped for want of memory at 95% of the demo.
+---
+ rts/System/MemPoolTypes.h | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/rts/System/MemPoolTypes.h b/rts/System/MemPoolTypes.h
+index 34e0824..57b883a 100644
+--- a/rts/System/MemPoolTypes.h
++++ b/rts/System/MemPoolTypes.h
+@@ -354,7 +354,21 @@ public:
+ 
+ 	void reserve(size_t) {} // no-op
+ 	void clear() {
+-		std::memset(pages.data(), 0, total_size());
++		// Only the pages that were ever handed out can be dirty: allocMem walks
++		// `pages` in order and freeMem zeroes every page it takes back, so the
++		// tail past used_page_count still reads as zero and re-zeroing it here
++		// buys nothing. Writing the whole array instead is what made the four
++		// static pools resident in full from the first instant of the process
++		// (weapon 758 MiB + projectile 142 + unit 138 + feature 45 = ~1.05 GiB
++		// of .bss, all of it zeroes) on every run, whatever the size of the
++		// game -- and this construction runs before main, so a headless replay
++		// paid it before it knew which demo it was about to simulate.
++		//
++		// The pool's own invariant, "an unallocated page reads as zero", is
++		// what makes this safe, and it holds from the start because every
++		// instance of this template is a namespace-scope global: .bss is
++		// zero-filled by the loader, so the constructor has nothing to do.
++		std::memset(pages.data(), 0, used_page_count * PAGE_SIZE());
+ 		std::memset(indcs.data(), 0, NUM_PAGES());
+ 
+ 		used_page_count = 0;
+-- 
+2.47.3
+

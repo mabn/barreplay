@@ -1,0 +1,482 @@
+From d9fd1db77b7430e7b82c1f27cac3a4ece9e472b9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 22:38:30 +0000
+Subject: [PATCH] [barreplay] P8: weapon vectors computed by the workers while
+ the weapon loop runs behind them (toggle2 0x200000)
+
+Every unit's vectors are made ready (computed by whoever gets there first)
+before its weapons update, and before anything in the loop changes or reads
+another unit's: damage, kills, stuns, team changes, moves and turns, Lua
+writes (all units), Lua's weapon reads, interceptable projectiles (all), a
+beam's shield hit. From 2048 units.
+---
+ rts/Lua/LuaSyncedRead.cpp         |   3 +
+ rts/Lua/LuaUtils.cpp              |   3 +
+ rts/Sim/Misc/InterceptHandler.cpp |   2 +
+ rts/Sim/Objects/SolidObject.cpp   |   3 +
+ rts/Sim/Objects/SolidObject.h     |   2 +
+ rts/Sim/Units/BrWeaponVectors.h   |  62 ++++++++++++
+ rts/Sim/Units/Unit.cpp            |   7 ++
+ rts/Sim/Units/UnitHandler.cpp     | 150 +++++++++++++++++++++++++++++-
+ rts/Sim/Weapons/BeamLaser.cpp     |   2 +
+ 9 files changed, 233 insertions(+), 1 deletion(-)
+ create mode 100644 rts/Sim/Units/BrWeaponVectors.h
+
+diff --git a/rts/Lua/LuaSyncedRead.cpp b/rts/Lua/LuaSyncedRead.cpp
+index d8a2a2f..5afdbf4 100644
+--- a/rts/Lua/LuaSyncedRead.cpp
++++ b/rts/Lua/LuaSyncedRead.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaSyncedRead.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ 
+ #include "LuaInclude.h"
+ 
+@@ -5392,6 +5393,7 @@ int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
+ 		return 0;
+ 
+ 	const CWeapon* weapon = unit->weapons[weaponNum];
++	BrP8::Ensure(weapon->owner); // [barreplay] P8
+ 	const float3& pos = weapon->weaponMuzzlePos;
+ 	const float3* dir = &weapon->wantedDir;
+ 
+@@ -5631,6 +5633,7 @@ int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
+ 	const CWeapon* weapon = unit->weapons[weaponNum];
+ 	const CUnit* enemy = nullptr;
+ 
++	BrP8::Ensure(weapon->owner); // [barreplay] P8
+ 	float3 srcPos = weapon->GetAimFromPos();
+ 	float3 tgtPos;
+ 
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index 0f53876..499e350 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -8,6 +8,7 @@
+ #include "LuaUtils.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/Misc/BrLosOverlap.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ 
+ // [barreplay] H101: how many calls of a Lua function that writes simulation
+ // state there have been (the functions entered through the two trampolines)
+@@ -16,6 +17,7 @@ unsigned g_brLuaWrites = 0;
+ int BrLuaDrainingCall(lua_State* L)
+ {
+ 	++g_brLuaWrites;
++	BrP8::EnsureAll(); // [barreplay] P8: Lua can change anything a weapon vector reads
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	// [barreplay] P7: a Lua write in the script tick can change any LOS input
+ 	BrP7::MarkAll();
+@@ -29,6 +31,7 @@ int BrLuaDrainingCall(lua_State* L)
+ int BrLuaDrainingCallLus(lua_State* L)
+ {
+ 	++g_brLuaWrites;
++	BrP8::EnsureAll(); // [barreplay] P8: Lua can change anything a weapon vector reads
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	const lua_CFunction f = reinterpret_cast<lua_CFunction>(lua_touserdata(L, lua_upvalueindex(1)));
+ 	return f(L);
+diff --git a/rts/Sim/Misc/InterceptHandler.cpp b/rts/Sim/Misc/InterceptHandler.cpp
+index bda5d54..753fc2f 100644
+--- a/rts/Sim/Misc/InterceptHandler.cpp
++++ b/rts/Sim/Misc/InterceptHandler.cpp
+@@ -4,6 +4,7 @@
+ #include <algorithm>
+ 
+ #include "InterceptHandler.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ 
+ #include "Map/Ground.h"
+ #include "Sim/Misc/GlobalSynced.h"
+@@ -138,6 +139,7 @@ void CInterceptHandler::RemoveInterceptorWeapon(CWeapon* weapon)
+ 
+ void CInterceptHandler::AddInterceptTarget(CWeaponProjectile* target, const float3& destination)
+ {
++	BrP8::EnsureAll(); // [barreplay] P8: the check below reads every interceptor's vectors
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	// keep track of all interceptable projectiles
+ 	interceptables.push_back(target);
+diff --git a/rts/Sim/Objects/SolidObject.cpp b/rts/Sim/Objects/SolidObject.cpp
+index 2486d00..2c84b4b 100644
+--- a/rts/Sim/Objects/SolidObject.cpp
++++ b/rts/Sim/Objects/SolidObject.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "SolidObject.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
+ #include "SolidObjectDef.h"
+ #include "Map/ReadMap.h"
+@@ -161,6 +162,7 @@ unsigned int CSolidObject::BrComputePhysicalStateAt(float eps, float groundHeigh
+ void CSolidObject::Move(const float3& v, bool relative)
+ {
+ 	const float3& dv = relative ? v : (v - pos);
++	BrP8::EnsureObj(this); // [barreplay] P8: a unit's position
+ 
+ 	// [barreplay] P4 (BrPipeTarget.h): searches read positions; a move by
+ 	// nothing changes no bits unless a coordinate is a zero (whose sign the
+@@ -457,6 +459,7 @@ void CSolidObject::UpdateDirVectors(const float3& uDir)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	BrP4::Drain(BrP4::DR_MOVE);
++	BrP8::EnsureObj(this); // [barreplay] P8: a unit's direction vectors
+ 	// set initial rotation of the object around updir=UpVector first
+ 	const float3 fDir = GetVectorFromHeading(heading);
+ 	const float3 rDir = float3{ -fDir.z, 0.0f, fDir.x };
+diff --git a/rts/Sim/Objects/SolidObject.h b/rts/Sim/Objects/SolidObject.h
+index 38a1f56..ef304ff 100644
+--- a/rts/Sim/Objects/SolidObject.h
++++ b/rts/Sim/Objects/SolidObject.h
+@@ -10,6 +10,7 @@
+ #include "Rendering/Models/LocalModel.hpp"
+ #include "Sim/Misc/CollisionVolume.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "System/Matrix44f.h"
+ #include "System/type2.h"
+ #include "System/Ecs/EcsMain.h"
+@@ -168,6 +169,7 @@ public:
+ 	void SetDirVectorsEuler(const float3& angles);
+ 	void SetDirVectors(const CMatrix44f& matrix) {
+ 		BrP4::Drain(BrP4::DR_MOVE);
++		BrP8::EnsureObj(this); // [barreplay] P8
+ 		rightdir.x = -matrix[0]; updir.x = matrix[4]; frontdir.x = matrix[ 8];
+ 		rightdir.y = -matrix[1]; updir.y = matrix[5]; frontdir.y = matrix[ 9];
+ 		rightdir.z = -matrix[2]; updir.z = matrix[6]; frontdir.z = matrix[10];
+diff --git a/rts/Sim/Units/BrWeaponVectors.h b/rts/Sim/Units/BrWeaponVectors.h
+new file mode 100644
+index 0000000..b9b6a5b
+--- /dev/null
++++ b/rts/Sim/Units/BrWeaponVectors.h
+@@ -0,0 +1,62 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_WEAPON_VECTORS_H
++#define BR_WEAPON_VECTORS_H
++
++#include <atomic>
++
++// [barreplay] P8 (toggle2 0x200000): the weapon vectors (CUnit::UpdateWeaponVectors:
++// each weapon's aim-from and muzzle positions and direction) computed by the
++// workers, in unit order, WHILE the main thread runs the weapon loop behind
++// them, instead of in a parallel section that has to finish first.
++//
++// In stock every unit's vectors are computed before any weapon updates, from
++// the unit's position, direction vectors, piece matrices, its weapon-use flags
++// (dead, stunned, hold fire, ...) and the height map. The weapon loop changes
++// those for a unit other than the one updating only through what the hooks
++// below see, and each hook first makes the unit's vectors ready (computing
++// them right there if no worker has started them, or waiting for the worker
++// that has), so they come from the same state as in stock:
++//   - damage and kills (DoDamage, ForcedKillUnit: hit-by-weapon and death
++//     scripts move the target's pieces, a kill or a stun clears its weapon-use
++//     flags);
++//   - moves and turns (CSolidObject's position and direction writers), team
++//     changes and transports;
++//   - every Lua write (all units: Lua can change anything).
++// And whatever READS another unit's vectors in the loop makes them ready
++// first: a beam's shield hit (the shield weapon's muzzle), the intercept check
++// a new interceptable projectile runs (every interceptor), Lua's weapon reads.
++// The main thread makes each unit ready before its own weapons update. Units
++// created during the loop get none (stock computed vectors only for the units
++// there before it).
++
++class CUnit;
++class CSolidObject;
++
++extern unsigned g_brToggles2;
++
++namespace BrP8 {
++	// the weapon loop is running with the vectors pipelined
++	extern std::atomic<bool> active;
++
++	void EnsureSlow(const CUnit* unit);
++	void EnsureObjSlow(const CSolidObject* obj);
++	void EnsureAllSlow();
++
++	inline void Ensure(const CUnit* unit) {
++		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
++			EnsureSlow(unit);
++	}
++	// a position or direction writer of any solid object (a feature is no unit
++	// of the loop and is ignored)
++	inline void EnsureObj(const CSolidObject* obj) {
++		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
++			EnsureObjSlow(obj);
++	}
++	inline void EnsureAll() {
++		if (__builtin_expect(active.load(std::memory_order_relaxed), false))
++			EnsureAllSlow();
++	}
++}
++
++#endif
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index aacbd15..2fed5ab 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -60,6 +60,7 @@
+ #include "Sim/Projectiles/ProjectileMemPool.h"
+ #include "Sim/Projectiles/WeaponProjectiles/MissileProjectile.h"
+ #include "Sim/Weapons/Weapon.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ 
+ unsigned g_brDamageCalls = 0, g_brKillCalls = 0; // [barreplay] P8 measurement
+ #include "Sim/Weapons/WeaponDefHandler.h"
+@@ -480,6 +481,7 @@ void CUnit::KillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int wea
+ void CUnit::ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, int weaponDefID)
+ {
+ 	++g_brKillCalls; // [barreplay] P8 measurement
++	BrP8::Ensure(this); // [barreplay] P8: the death script and the weapon-use flags
+ 	BrP7::Mark(this); // [barreplay] P7: an LOS input changes
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (isDead)
+@@ -961,6 +963,7 @@ void CUnit::UpdateLosStatus(int at)
+ 
+ 
+ void CUnit::SetStunned(bool stun) {
++	BrP8::Ensure(this); // [barreplay] P8: a weapon-use flag
+ 	BrP7::Mark(this); // [barreplay] P7: an LOS input changes
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	stunned = stun;
+@@ -1331,6 +1334,7 @@ void CUnit::DoDamage(
+ 	int projectileID
+ ) {
+ 	++g_brDamageCalls; // [barreplay] P8 measurement
++	BrP8::Ensure(this); // [barreplay] P8: hit-by-weapon scripts, stuns, kills change what the vectors read
+ 	if (isDead)
+ 		return;
+ 	if (IsCrashing() || IsInVoid())
+@@ -1540,6 +1544,7 @@ bool CUnit::ChangeTeam(int newteam, ChangeType type)
+ {
+ 	BrP7::Mark(this); // [barreplay] P7: an LOS input changes
+ 	BrP4::Drain(BrP4::DR_TEAM);
++	BrP8::Ensure(this); // [barreplay] P8
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (isDead)
+ 		return false;
+@@ -2777,6 +2782,7 @@ bool CUnit::AttachUnit(CUnit* unit, int piece, bool force)
+ {
+ 	BrP7::Mark(this); BrP7::Mark(unit); // [barreplay] P7: positions, stun
+ 	BrP4::Drain(BrP4::DR_TRANSPORT);
++	BrP8::EnsureAll(); // [barreplay] P8: transports move units
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	assert(unit != this);
+ 
+@@ -2859,6 +2865,7 @@ bool CUnit::DetachUnitCore(CUnit* unit)
+ {
+ 	BrP7::Mark(this); BrP7::Mark(unit); // [barreplay] P7: positions, stun
+ 	BrP4::Drain(BrP4::DR_TRANSPORT);
++	BrP8::EnsureAll(); // [barreplay] P8: transports move units
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (unit->GetTransporter() != this)
+ 		return false;
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index e9ebfc8..b2334cf 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -3,6 +3,9 @@
+ #include <cassert>
+ 
+ #include "UnitHandler.h"
++#include "BrWeaponVectors.h"
++#include <immintrin.h>
++#include <memory>
+ #include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/Misc/QuadField.h"
+ #include "BrRunAhead.h"
+@@ -809,9 +812,150 @@ void CUnitHandler::UpdateUnits()
+ 	BrRunAhead::End();
+ }
+ 
++// [barreplay] P8 (Sim/Units/BrWeaponVectors.h): the weapon vectors pipelined
++// into the weapon loop
++namespace BrP8 {
++	std::atomic<bool> active{false};
++
++	namespace {
++		std::vector<CUnit*> units;                      // the active units when the loop started
++		std::unique_ptr<std::atomic<uint8_t>[]> state;  // per unit: 0 waiting, 1 being computed, 2 done
++		size_t stateCap = 0;
++		std::vector<int> idxOf;                         // unit id -> index in units (checked against units)
++		std::atomic<int> nextChunk{0};
++		int numChunks = 0;
++		constexpr int CHUNK = 32;
++		struct Stats { long long frames = 0, units = 0, byMain = 0, waits = 0, all = 0; } st;
++		int lastLog = -1000000;
++
++		inline void Compute(size_t k) { units[k]->UpdateWeaponVectors(); }
++
++		// main thread or a hook: this unit's vectors, now
++		void EnsureIdx(size_t k)
++		{
++			if (state[k].load(std::memory_order_acquire) == 2)
++				return;
++			uint8_t z = 0;
++			if (state[k].compare_exchange_strong(z, 1, std::memory_order_acq_rel)) {
++				Compute(k);
++				state[k].store(2, std::memory_order_release);
++				st.byMain += 1;
++				return;
++			}
++			st.waits += 1;
++			while (state[k].load(std::memory_order_acquire) != 2)
++				_mm_pause();
++		}
++
++		void WorkerLoop()
++		{
++			for (int c; (c = nextChunk.fetch_add(1, std::memory_order_acq_rel)) < numChunks; ) {
++				const size_t b = size_t(c) * CHUNK, e = std::min(units.size(), b + CHUNK);
++				for (size_t k = b; k < e; ++k) {
++					uint8_t z = 0;
++					if (state[k].compare_exchange_strong(z, 1, std::memory_order_acq_rel)) {
++						Compute(k);
++						state[k].store(2, std::memory_order_release);
++					}
++				}
++			}
++		}
++
++		auto workerFn = [](const int) { WorkerLoop(); };
++		std::shared_ptr<ForTaskGroup<decltype(workerFn)>> taskGroup;
++	}
++
++	void EnsureSlow(const CUnit* unit)
++	{
++		const int id = unit->id;
++		if (id < 0 || size_t(id) >= idxOf.size())
++			return;
++		const int k = idxOf[id];
++		if (k < 0 || size_t(k) >= units.size() || units[k] != unit)
++			return;
++		EnsureIdx(size_t(k));
++	}
++
++	void EnsureObjSlow(const CSolidObject* obj)
++	{
++		const int id = obj->id;
++		if (id < 0 || size_t(id) >= idxOf.size())
++			return;
++		const int k = idxOf[id];
++		if (k < 0 || size_t(k) >= units.size() || static_cast<const CSolidObject*>(units[k]) != obj)
++			return;
++		EnsureIdx(size_t(k));
++	}
++
++	void EnsureAllSlow()
++	{
++		st.all += 1;
++		for (size_t k = 0; k < units.size(); ++k)
++			EnsureIdx(k);
++	}
++
++	void Begin(const std::vector<CUnit*>& activeUnits)
++	{
++		units = activeUnits;
++		const size_t n = units.size();
++		if (stateCap < n) {
++			stateCap = n + n / 2;
++			state.reset(new std::atomic<uint8_t>[stateCap]);
++		}
++		for (size_t k = 0; k < n; ++k)
++			state[k].store(0, std::memory_order_relaxed);
++		if (idxOf.size() != size_t(unitHandler.MaxUnits()))
++			idxOf.assign(unitHandler.MaxUnits(), -1);
++		for (size_t k = 0; k < n; ++k)
++			idxOf[units[k]->id] = int(k);
++		numChunks = int((n + CHUNK - 1) / CHUNK);
++		nextChunk.store(0, std::memory_order_relaxed);
++
++		const int nw = ThreadPool::GetNumThreads() - 1;
++		static TaskPool<ForTaskGroup, decltype(workerFn)> pool;
++		taskGroup = pool.GetTaskGroup();
++		taskGroup->Enqueue(0, nw, 1, workerFn);
++		taskGroup->UpdateId();
++		for (int i = 1; i <= nw; ++i) {
++			taskGroup->wantedThread.store(i);
++			ThreadPool::PushTaskGroup(taskGroup);
++		}
++		ThreadPool::NotifyWorkerThreads(true, false);
++		active.store(true, std::memory_order_release);
++	}
++
++	void End()
++	{
++		// whatever nobody reached (units the loop never got to after a late
++		// creation, the tail when the workers fell behind)
++		for (size_t k = 0; k < units.size(); ++k)
++			EnsureIdx(k);
++		active.store(false, std::memory_order_release);
++		{
++			MultithreadedSection mtSection;
++			ThreadPool::WaitForFinished(taskGroup);
++		}
++		taskGroup.reset();
++		st.frames += 1;
++		st.units += units.size();
++		if ((gs->frameNum - lastLog) >= 900 && getenv("BARREPLAY_P8_STATS") != nullptr) {
++			lastLog = gs->frameNum;
++			LOG("[BR_P8] f=%d pipelined frames=%lld avgUnits=%.0f byMain/frame=%.1f waits/frame=%.2f ensureAll/frame=%.2f",
++				gs->frameNum, st.frames, double(st.units) / st.frames, double(st.byMain) / st.frames,
++				double(st.waits) / st.frames, double(st.all) / st.frames);
++		}
++	}
++}
++
+ void CUnitHandler::UpdateUnitWeapons()
+ {
+-	{
++	// [barreplay] P8 (toggle2 0x200000): the vectors computed by the workers
++	// while the weapon loop runs behind them (BrWeaponVectors.h); from 2048 units
++	const bool brP8On = (g_brToggles2 & 0x200000) != 0 && activeUnits.size() >= 2048
++		&& ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection();
++	if (brP8On) {
++		BrP8::Begin(activeUnits);
++	} else {
+ 		SCOPED_TIMER("Sim::Unit::UpdateWeaponVectors");
+ 
+ 		for_mt_chunk(0, activeUnits.size(), [&](const int idx) {
+@@ -862,12 +1006,16 @@ void CUnitHandler::UpdateUnitWeapons()
+ 					}
+ 				}
+ 			}
++			if (brP8On)
++				BrP8::Ensure(activeUnits[activeUpdateUnit]);
+ 			activeUnits[activeUpdateUnit]->UpdateWeapons();
+ 			if (brFirstLua < 0 && g_brLuaWrites != brLua0)
+ 				brFirstLua = (long long) activeUpdateUnit;
+ 		}
+ 		BrRunAhead::End();
+ 	}
++	if (brP8On)
++		BrP8::End();
+ 	brP8.frames += 1;
+ 	brP8.units += activeUnits.size();
+ 	brP8.luaWrites += (g_brLuaWrites - brLua0);
+diff --git a/rts/Sim/Weapons/BeamLaser.cpp b/rts/Sim/Weapons/BeamLaser.cpp
+index e9c0029..fd21aa1 100644
+--- a/rts/Sim/Weapons/BeamLaser.cpp
++++ b/rts/Sim/Weapons/BeamLaser.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "BeamLaser.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "PlasmaRepulser.h"
+ #include "WeaponDef.h"
+ #include "Game/GameHelper.h"
+@@ -376,6 +377,7 @@ void CBeamLaser::FireInternal(float3 curDir)
+ 
+ 		if (hitShield != nullptr && hitShield->weaponDef->shieldRepulser) {
+ 			// reflect
++			BrP8::Ensure(hitShield->owner); // [barreplay] P8
+ 			const float3 normal = (hitPos - hitShield->weaponMuzzlePos).Normalize();
+ 			const float3 prjDir = normal * normal.dot(curDir) * 2.0f;
+ 
+-- 
+2.53.0
+

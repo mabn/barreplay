@@ -1,0 +1,65 @@
+From 779e4afe67ffcb71690bb4b37bac4d9671ca572c Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 03:16:40 +0000
+Subject: [PATCH 160/160] [barreplay] H129: also stunned, a line before the
+ last one in this layout
+
+pahole of speed64: stunned at 4337 and H88's cache at 4338-4352 sit in
+lines 67-68 of 69, so the 'last line' prefetches (H112 in UpdateUnits, H115
+in the weapon loop) fetched only brPhysGround. With H129's bit both loops
+also prefetch stunned 8 units ahead (CUnit::BrStunnedAddr: the member is
+private).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/Unit.h          |  2 ++
+ rts/Sim/Units/UnitHandler.cpp | 12 ++++++++++--
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index ac9060e..99f8b26 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -564,6 +564,8 @@ public:
+ 	// under (x, z) hands it to H88's cache below (the very value
+ 	// UpdatePhysicalState would read there at this height-map version)
+ 	void BrNotePhysGround(float x, float z, float h);
++	// [barreplay] H129: where stunned is (prefetches; the member is private)
++	const void* BrStunnedAddr() const { return &stunned; }
+ private:
+ 	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
+ 	bool stunned = false;
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index cd3731f..ee3976c 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -881,6 +881,11 @@ void CUnitHandler::UpdateUnits()
+ 			__builtin_prefetch(&u8->recentDamage);
+ 			__builtin_prefetch(&u8->beingBuilt);
+ 			__builtin_prefetch(reinterpret_cast<const char*>(u8) + sizeof(CUnit) - 1); // stunned, H88's cache
++			// [barreplay] H129 (toggle3 0x4000000): stunned and most of H88's
++			// cache are a line BEFORE the last one now (pahole: stunned 4337,
++			// brPhysValid..brPhysZ 4338-4351, the last line only brPhysGround)
++			if ((g_brToggles3 & 0x4000000) != 0)
++				__builtin_prefetch(u8->BrStunnedAddr());
+ 		}
+ 		if (i + 4 < activeUnits.size()) {
+ 			// [barreplay] H91: only the move types the collision-map update will read
+@@ -1157,9 +1162,12 @@ void CUnitHandler::UpdateUnitWeapons()
+ 				}
+ 				// [barreplay] H129 (toggle3 0x4000000): and its curTarget, which
+ 				// every weapon's Update tests when it has no target of its own
+-				// (Weapon.cpp:418, 58% of that function's own time in speed62)
+-				if ((g_brToggles3 & 0x4000000) != 0)
++				// (Weapon.cpp:418, 58% of that function's own time in speed62),
++				// and stunned, which is no longer in the last line H115 fetches
++				if ((g_brToggles3 & 0x4000000) != 0) {
+ 					__builtin_prefetch(&activeUnits[ahead + 8]->curTarget);
++					__builtin_prefetch(activeUnits[ahead + 8]->BrStunnedAddr());
++				}
+ 			}
+ 			// [barreplay] H115: the weapons vector's buffer 6 ahead (its line 8
+ 			// ahead, above), so the first weapon's pointer is there 4 ahead
+-- 
+2.53.0
+

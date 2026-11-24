@@ -1,0 +1,12 @@
+# Applied with `git am` AFTER ../series, for the Windows build only:
+#   git am $(grep -v '^#' windows-series | sed "s|^|$PWD/|")
+# Each is a build fix that changes nothing a Linux build compiles.
+# 0001: the bench harness (series entry experiments/tools/bench-harness.patch
+#       and 0005) uses Linux perf_event counters and CLOCK_THREAD_CPUTIME_ID;
+#       compiled out on other platforms, where NEWFRAME just runs SimFrame().
+#       From revision 5 also: H74 (switch 0x40, off) pins its helper thread
+#       with Linux calls, unpinned elsewhere; and unitsync.dll, which compiles
+#       LuaUtils.cpp and links Lua, must resolve every symbol, so the speed
+#       patches' Lua trampolines are engine-only and unitsync defines the
+#       third switch word Lua's table code reads (0).
+0001-bench-harness-H74-s-pinning-the-Lua-trampolines-unit.patch

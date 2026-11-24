@@ -1,0 +1,112 @@
+From 85e33caac62b1be578bd583cd9082978cb819565 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 04:32:55 +0000
+Subject: [PATCH] [barreplay] H105: the huge-page collapser backs off from 2
+ MiB ranges whose collapse failed (toggle2 0x4000000); its thread is named
+ recoil-thp; counters every 30 passes
+
+It inherited the main thread's name, so main-thread profiles counted its
+samples (20% of the late window's) as the main thread's.
+---
+ rts/Game/Game.cpp | 60 +++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 58 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index ae9c69c..a6c1639 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1690,6 +1690,9 @@ static const char* const tracingSimFrameName = "SimFrame";
+ #include <thread>
+ #include <mutex>
+ #include <condition_variable>
++#include <chrono>
++#include <cerrno>
++#include <unordered_map>
+ #include <pthread.h>
+ #ifndef MADV_COLLAPSE
+ #define MADV_COLLAPSE 25
+@@ -1703,8 +1706,25 @@ static const char* const tracingSimFrameName = "SimFrame";
+ // and a low-priority background thread collapses what is resident into huge
+ // pages (MADV_COLLAPSE, kernel >= 6.1) every couple of seconds instead. Mapping
+ // only: no address or content changes, so the simulation cannot see it.
++// [barreplay] H105 (toggle2 0x4000000): a 2 MiB range whose collapse failed is
++// tried again only after a backoff (2, 4, ... 32 passes), since a failure is the
++// expensive case (the kernel scans the range and may compact memory for a huge
++// page it then cannot get) and a range that failed usually fails again next
++// pass. A success or a range that is already huge costs a page-table check.
++// Counted for the log every 30 passes.
++namespace BrH105 {
++	struct Backoff { uint16_t fails = 0; uint32_t nextPass = 0; };
++	std::unordered_map<uintptr_t, Backoff> ranges;
++	uint32_t pass = 0;
++	long long tried = 0, ok = 0, failed = 0, skipped = 0, eagain = 0, enomem = 0, einval = 0, other = 0;
++	long long usTotal = 0;
++}
++
+ static void BrCollapseHugePages()
+ {
++	const bool h105 = (g_brToggles2 & 0x4000000) != 0;
++	const auto t0 = std::chrono::steady_clock::now();
++	BrH105::pass += 1;
+ 	FILE* f = fopen("/proc/self/maps", "r");
+ 	if (f == nullptr)
+ 		return;
+@@ -1727,10 +1747,43 @@ static void BrCollapseHugePages()
+ 			continue;
+ 		// one 2 MiB range at a time, so a failure (EAGAIN while something
+ 		// writes the range, or memory not resident) costs only that range
+-		for (uintptr_t p = beg; p < end; p += HP)
+-			madvise(reinterpret_cast<void*>(p), HP, MADV_COLLAPSE);
++		for (uintptr_t p = beg; p < end; p += HP) {
++			BrH105::Backoff* bo = nullptr;
++			if (h105) {
++				auto it = BrH105::ranges.find(p);
++				if (it != BrH105::ranges.end()) {
++					bo = &it->second;
++					if (bo->nextPass > BrH105::pass) {
++						BrH105::skipped += 1;
++						continue;
++					}
++				}
++			}
++			BrH105::tried += 1;
++			if (madvise(reinterpret_cast<void*>(p), HP, MADV_COLLAPSE) == 0) {
++				BrH105::ok += 1;
++				if (bo != nullptr)
++					BrH105::ranges.erase(p);
++				continue;
++			}
++			const int e = errno;
++			BrH105::failed += 1;
++			if (e == EAGAIN) BrH105::eagain += 1; else if (e == ENOMEM) BrH105::enomem += 1; else if (e == EINVAL) BrH105::einval += 1; else BrH105::other += 1;
++			if (h105) {
++				if (bo == nullptr)
++					bo = &BrH105::ranges[p];
++				bo->fails = std::min<uint16_t>(bo->fails + 1, 5);
++				bo->nextPass = BrH105::pass + (1u << bo->fails);
++			}
++		}
+ 	}
+ 	fclose(f);
++	BrH105::usTotal += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
++	if ((BrH105::pass % 30) == 0) {
++		LOG("[BR_H105] passes=%u tried=%lld ok=%lld failed=%lld (EAGAIN=%lld ENOMEM=%lld EINVAL=%lld other=%lld) skipped=%lld backoff=%zu ms/pass=%.1f",
++			BrH105::pass, BrH105::tried, BrH105::ok, BrH105::failed, BrH105::eagain, BrH105::enomem, BrH105::einval, BrH105::other,
++			BrH105::skipped, BrH105::ranges.size(), BrH105::usTotal / 1000.0 / BrH105::pass);
++	}
+ }
+ 
+ // [barreplay] H99 (toggle2 0x1000): the per-frame Lua GC step on its own
+@@ -1794,6 +1847,9 @@ static void BrStartHugePageCollapser()
+ 	if (getenv("BARREPLAY_NO_THP_COLLAPSE") != nullptr)
+ 		return;
+ 	std::thread([]() {
++		// [barreplay] its own name: it inherited recoil-main, so profiles
++		// filtered on the main thread's name counted it as the main thread
++		pthread_setname_np(pthread_self(), "recoil-thp");
+ 		setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+ 		for (;;) {
+ 			BrCollapseHugePages();
+-- 
+2.53.0
+

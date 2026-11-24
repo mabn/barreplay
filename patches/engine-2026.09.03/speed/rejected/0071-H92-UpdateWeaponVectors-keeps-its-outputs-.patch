@@ -1,0 +1,229 @@
+From 3b2c768d432f2cf8d0d21d67f561e7c2610544c9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 11:00:11 +0000
+Subject: [PATCH 71/72] [barreplay] H92: UpdateWeaponVectors keeps its outputs
+ while every input is bitwise unchanged (toggle 0x4000000)
+
+---
+ rts/Rendering/Models/LocalModelPiece.cpp | 12 ++++++
+ rts/Rendering/Models/LocalModelPiece.hpp |  7 ++++
+ rts/Sim/Weapons/Weapon.cpp               | 53 ++++++++++++++++++++++++
+ rts/Sim/Weapons/Weapon.h                 | 15 +++++++
+ 4 files changed, 87 insertions(+)
+
+diff --git a/rts/Rendering/Models/LocalModelPiece.cpp b/rts/Rendering/Models/LocalModelPiece.cpp
+index 16c7a0b..1b516f5 100644
+--- a/rts/Rendering/Models/LocalModelPiece.cpp
++++ b/rts/Rendering/Models/LocalModelPiece.cpp
+@@ -1,4 +1,5 @@
+ #include "LocalModelPiece.hpp"
++#include <atomic>
+ #include "Sim/Weapons/BrPipeTarget.h"
+ 
+ #include "3DModelPiece.hpp"
+@@ -44,8 +45,15 @@ CR_REG_METADATA(LocalModelPiece, (
+  * LocalModelPiece
+  */
+ 
++uint32_t LocalModelPiece::BrNewTraVersion()
++{
++	static std::atomic<uint32_t> gen{0};
++	return (gen.fetch_add(1, std::memory_order_relaxed) << 16);
++}
++
+ LocalModelPiece::LocalModelPiece(const S3DModelPiece* piece)
+ 	: dirty(true)
++	, brTraVersion(BrNewTraVersion())
+ 	, wasUpdated{ true }
+ 	, noInterpolation{ false }
+ 
+@@ -226,6 +234,7 @@ void LocalModelPiece::UpdateModelSpaceTransform(const Transform& pTra)
+ {
+ 	modelSpaceTra = pTra * pieceSpaceTra;
+ 	modelSpaceMat = modelSpaceTra.ToMatrix();
++	++brTraVersion;
+ }
+ 
+ void LocalModelPiece::UpdateModelSpaceTransform(const LocalModelPiece* parent)
+@@ -236,6 +245,7 @@ void LocalModelPiece::UpdateModelSpaceTransform(const LocalModelPiece* parent)
+ 		modelSpaceTra = pieceSpaceTra;
+ 
+ 	modelSpaceMat = modelSpaceTra.ToMatrix();
++	++brTraVersion;
+ }
+ 
+ void LocalModelPiece::UpdateChildTransformRec(bool updateChildTransform) const
+@@ -257,6 +267,7 @@ void LocalModelPiece::UpdateChildTransformRec(bool updateChildTransform) const
+ 			modelSpaceTra = pieceSpaceTra;
+ 
+ 		modelSpaceMat = modelSpaceTra.ToMatrix();
++	++brTraVersion;
+ 	}
+ 
+ 	for (auto& child : children) {
+@@ -281,6 +292,7 @@ void LocalModelPiece::UpdateParentMatricesRec() const
+ 		modelSpaceTra = pieceSpaceTra;
+ 
+ 	modelSpaceMat = modelSpaceTra.ToMatrix();
++	++brTraVersion;
+ }
+ 
+ Transform LocalModelPiece::CalcPieceSpaceTransformOrig(const float3& p, const float3& r, float s) const
+diff --git a/rts/Rendering/Models/LocalModelPiece.hpp b/rts/Rendering/Models/LocalModelPiece.hpp
+index 1cc798a..7cbb9e8 100644
+--- a/rts/Rendering/Models/LocalModelPiece.hpp
++++ b/rts/Rendering/Models/LocalModelPiece.hpp
+@@ -23,10 +23,12 @@ struct LocalModelPiece
+ 
+ 	LocalModelPiece()
+ 		: dirty(true)
++		, brTraVersion(BrNewTraVersion())
+ 		, wasUpdated{ true }
+ 		, noInterpolation { false }
+ 	{}
+ 	LocalModelPiece(const S3DModelPiece* piece);
++	static uint32_t BrNewTraVersion();
+ 	~LocalModelPiece();
+ 
+ 	void AddChild(LocalModelPiece* c) { children.push_back(c); }
+@@ -70,6 +72,8 @@ struct LocalModelPiece
+ 	void SetDirtyRaw(bool state) { dirty = state; }
+ 	void SetDirty();
+ 	bool GetDirty() const { return dirty; }
++	uint32_t BrTraVersion() const { return brTraVersion; }
++	bool HasOriginal() const { return (original != nullptr); }
+ 	void SetFloat3(const float3& src, float3& dst); // anim-script only
+ 	void SetFloat(const float& src, float& dst); // anim-script only
+ 	void SetPosition(const float3& p) { SetFloat3(p, pos); } // anim-script only
+@@ -117,6 +121,9 @@ private:
+ 
+ 	mutable std::array<bool, 3> noInterpolation; // rotate, move, scale
+ 	mutable bool dirty;
++	// [barreplay] H92: changes whenever modelSpaceTra is written; starts at a
++	// value unique to this piece object so a reused address cannot match
++	mutable uint32_t brTraVersion;
+ 
+ 	Transform prevModelSpaceTra;
+ 
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index 2aed918..33ec49c 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -1,6 +1,8 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "Weapon.h"
++#include <cstring>
++#include "Rendering/Models/LocalModelPiece.hpp"
+ 
+ bool g_brReloadLogOn = false;
+ std::vector<int> g_brReloadLog;
+@@ -283,10 +285,36 @@ void CWeapon::UpdateWeaponErrorVector()
+ 		errorVector = newErrorVector;
+ }
+ 
++static inline bool BrSame(const float3& a, const float3& b) { return (std::memcmp(&a, &b, sizeof(float3)) == 0); }
++
+ void CWeapon::UpdateWeaponVectors()
+ {
+ 	ZoneScoped;
+ 
++	const bool h92 = ((g_brToggles & 0x4000000) != 0);
++	const LocalModelPiece* ap = nullptr;
++	const LocalModelPiece* mp = nullptr;
++
++	if (h92) {
++		ap = owner->script->SafeGetPiece(aimFromPiece);
++		mp = owner->script->SafeGetPiece(muzzlePiece);
++
++		// [barreplay] H92: nothing this function reads has changed, and nothing
++		// else has written what it writes since
++		if (brVec.valid && ap == brVec.aim && mp == brVec.muz && ap != nullptr && mp != nullptr
++			&& !ap->GetDirty() && !mp->GetDirty() && ap->BrTraVersion() == brVec.aimVer && mp->BrTraVersion() == brVec.muzVer
++			&& BrSame(owner->pos, brVec.pos) && BrSame(owner->frontdir, brVec.front) && BrSame(owner->rightdir, brVec.right) && BrSame(owner->updir, brVec.up)
++			&& BrSame(relAimFromPos, brVec.relAimFrom) && BrSame(relWeaponMuzzlePos, brVec.relMuzzle) && BrSame(aimFromPos, brVec.aimFrom)
++			&& BrSame(weaponMuzzlePos, brVec.muzzle) && BrSame(weaponDir, brVec.dir)) {
++			aimFromPos = brVec.rawAimFrom;
++			if (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z)) {
++				aimFromPos = owner->pos + UpVector * 10;
++			}
++			brVec.aimFrom = aimFromPos;
++			return;
++		}
++	}
++
+ 	relAimFromPos = owner->script->GetPiecePos(aimFromPiece);
+ 	owner->script->GetEmitDirPos(muzzlePiece, relWeaponMuzzlePos, weaponDir);
+ 
+@@ -294,10 +322,35 @@ void CWeapon::UpdateWeaponVectors()
+ 	weaponMuzzlePos = owner->GetObjectSpacePos(relWeaponMuzzlePos);
+ 	weaponDir = owner->GetObjectSpaceVec(weaponDir).SafeNormalize();
+ 
++	const float3 rawAimFrom = aimFromPos;
++
+ 	// hope that we are underground because we are a popup weapon and will come above ground later
+ 	if (aimFromPos.y < CGround::GetHeightReal(aimFromPos.x, aimFromPos.z)) {
+ 		aimFromPos = owner->pos + UpVector * 10;
+ 	}
++
++	if (h92) {
++		// a missing piece leaves the outputs as they were (and the next call
++		// transforms weaponDir again), and a dirty one was computed into
++		// scratch (BrPipeTarget.h) or not at all: only clean pieces cache
++		brVec.valid = (ap != nullptr && mp != nullptr && mp->HasOriginal() && !ap->GetDirty() && !mp->GetDirty());
++		if (brVec.valid) {
++			brVec.aim = ap;
++			brVec.muz = mp;
++			brVec.aimVer = ap->BrTraVersion();
++			brVec.muzVer = mp->BrTraVersion();
++			brVec.pos = owner->pos;
++			brVec.front = owner->frontdir;
++			brVec.right = owner->rightdir;
++			brVec.up = owner->updir;
++			brVec.rawAimFrom = rawAimFrom;
++			brVec.relAimFrom = relAimFromPos;
++			brVec.relMuzzle = relWeaponMuzzlePos;
++			brVec.aimFrom = aimFromPos;
++			brVec.muzzle = weaponMuzzlePos;
++			brVec.dir = weaponDir;
++		}
++	}
+ }
+ 
+ 
+diff --git a/rts/Sim/Weapons/Weapon.h b/rts/Sim/Weapons/Weapon.h
+index 17c7112..52ee906 100644
+--- a/rts/Sim/Weapons/Weapon.h
++++ b/rts/Sim/Weapons/Weapon.h
+@@ -13,6 +13,7 @@
+ #include "System/float3.h"
+ 
+ class CUnit;
++struct LocalModelPiece;
+ class CWeaponProjectile;
+ struct WeaponDef;
+ 
+@@ -213,6 +214,20 @@ public:
+ 	float3 relWeaponMuzzlePos;              // position of the firepoint
+ 	float3 weaponMuzzlePos;
+ 	float3 weaponDir;
++
++	// [barreplay] H92 (toggle 0x4000000): the inputs and outputs of the last
++	// UpdateWeaponVectors; while all inputs are bitwise the same, so are the
++	// outputs, and only the ground clamp (the height map can change) is redone
++	struct BrVecCache {
++		const LocalModelPiece* aim = nullptr;
++		const LocalModelPiece* muz = nullptr;
++		uint32_t aimVer = 0;
++		uint32_t muzVer = 0;
++		float3 pos, front, right, up;
++		float3 rawAimFrom; // before the ground clamp
++		float3 relAimFrom, relMuzzle, aimFrom, muzzle, dir;
++		bool valid = false;
++	} brVec;
+ 	float3 mainDir;                         // main aiming-direction of weapon
+ 	float3 wantedDir;                       // norm(currentTargetPos - weaponMuzzlePos)
+ 	float3 lastRequestedDir;                // last angle we called the script with
+-- 
+2.53.0
+

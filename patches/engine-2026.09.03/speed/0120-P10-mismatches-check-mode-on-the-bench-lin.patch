@@ -1,0 +1,25 @@
+From c8addc745fb36352b3725c43bac3f445e7df6928 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 00:10:12 +0000
+Subject: [PATCH] [barreplay] P10: mismatches (check mode) on the bench line
+
+---
+ rts/Sim/Weapons/BrPipeTarget.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index 8e7bc89..3641f11 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -230,7 +230,7 @@ namespace BrP4 {
+ 		for (int r = 0; r < DR_N && k < size; ++r)
+ 			k += snprintf(buf + k, size - k, " %s=%lld", DrainName(r), st.drains[r]);
+ 		if (k < size)
+-			k += snprintf(buf + k, size - k, " [BR_P10] launched=%lld used=%lld stale=%lld argsDiffer=%lld notLaunched=%lld", p10.launched, p10.used, p10.stale, p10.args, p10.none);
++			k += snprintf(buf + k, size - k, " [BR_P10] launched=%lld used=%lld stale=%lld argsDiffer=%lld notLaunched=%lld mismatches=%lld (P4 mismatches=%lld)", p10.launched, p10.used, p10.stale, p10.args, p10.none, p10.mismatches, st.mismatches);
+ 		if (k < size)
+ 			k += snprintf(buf + k, size - k, "\n");
+ 		return k;
+-- 
+2.53.0
+

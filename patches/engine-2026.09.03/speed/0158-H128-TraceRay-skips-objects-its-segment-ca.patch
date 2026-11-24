@@ -1,0 +1,123 @@
+From 940c92e7fecf73726627ef6e2e439c28370feb0f Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 03:12:04 +0000
+Subject: [PATCH 158/160] [barreplay] H128: TraceRay skips objects its segment
+ cannot reach before building their transforms (toggle3 0x2000000)
+
+speed62: DetectHit is 1.9% of the main thread, nearly all from TraceRay
+(beam lasers, line-of-fire checks), whose every candidate in the ray's quads
+gets its transform built, translated by relMidPos and the volume offsets and
+inverted before the volume-space bounding-box early-out. Every hit lies in
+the volume's local box of half-scales h around the point the transform maps
+relMidPos + offsets to, and the inverse DetectHit uses is a transpose; so
+when the transform's axes are orthonormal to within 1e-3, a segment farther
+than |h| (+2% + 2 elmos for rounding) from that point hits nothing and the
+object is skipped. The axes are a unit's -rightdir/updir/frontdir and pos
+(GetTransformMatrix(true) builds them on the spot) and a feature's stored
+transMatrix[true] itself; piece-tree volumes and anything less orthonormal
+get DetectHit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Game/TraceRay.cpp | 57 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+
+diff --git a/rts/Game/TraceRay.cpp b/rts/Game/TraceRay.cpp
+index df64721..c5c3986 100644
+--- a/rts/Game/TraceRay.cpp
++++ b/rts/Game/TraceRay.cpp
+@@ -26,6 +26,8 @@
+ 
+ #include "System/Misc/TracyDefs.h"
+ 
++extern unsigned g_brToggles3; // [barreplay] (Sim/MoveTypes/Systems/GeneralMoveSystem.cpp)
++
+ //////////////////////////////////////////////////////////////////////
+ // Local/Helper functions
+ //////////////////////////////////////////////////////////////////////
+@@ -197,6 +199,56 @@ float TraceRay(const float3& p, const float3& d, float l, int f, const CUnit* o,
+ 	return (TraceRay(p, d, l, f, o->allyteam, o, hu, hf, cq));
+ }
+ 
++// [barreplay] H128 (toggle3 0x2000000): whether the segment p0 + d * [0, len]
++// cannot hit o's collision volume, decided before the object's transform is
++// copied (or built), composed with its mid-position and offsets, and inverted
++// for DetectHit's volume-space test. Every hit lies inside the volume's local box
++// of half-scales h, around the point the transform maps relMidPos + offsets
++// to; with an orthonormal transform (the inverse DetectHit uses is a
++// transpose) that is within |h| of its world position, so a segment farther
++// than that, with a 2% and 2-elmo margin for the rounding, hits nothing. Only
++// when the direction vectors are orthonormal to within 1e-3, and never for a
++// piece-tree volume (tested piece by piece); anything else gets DetectHit.
++// The transform's axes x, y, z and translation t are what DetectHit gets: for a
++// unit, GetTransformMatrix(true) = CMatrix44f(pos, -rightdir, updir, frontdir)
++// built on the spot; for a feature, its stored transMatrix[true], read as is.
++static inline bool BrSegmentMissesVolumeAxes(const CSolidObject* o, const float3& x, const float3& y, const float3& z, const float3& t,
++	const float3& p0, const float3& d, float len)
++{
++	const CollisionVolume* v = &o->collisionVolume;
++	if (v->DefaultToPieceTree())
++		return false;
++
++	constexpr float eps = 1e-3f;
++	if (math::fabs(x.SqLength() - 1.0f) > eps || math::fabs(y.SqLength() - 1.0f) > eps || math::fabs(z.SqLength() - 1.0f) > eps)
++		return false;
++	if (math::fabs(x.dot(y)) > eps || math::fabs(x.dot(z)) > eps || math::fabs(y.dot(z)) > eps)
++		return false;
++
++	// the transform translated by relMidPos and the offsets (CCollisionHandler::Intersect)
++	const float3 lc = o->relMidPos + v->GetOffsets();
++	const float3 c = t + x * lc.x + y * lc.y + z * lc.z;
++
++	const float dd = d.SqLength();
++	if (dd <= 0.0f)
++		return false;
++	const float u = std::clamp((c - p0).dot(d) / dd, 0.0f, len);
++	const float3 q = p0 + d * u;
++	const float r = math::sqrt(v->GetHScales().SqLength()) * 1.02f + 2.0f;
++	return ((c - q).SqLength() > (r * r));
++}
++
++static inline bool BrSegmentMissesUnit(const CUnit* u, const float3& p0, const float3& d, float len)
++{
++	return BrSegmentMissesVolumeAxes(u, -u->rightdir, u->updir, u->frontdir, u->pos, p0, d, len);
++}
++
++static inline bool BrSegmentMissesFeature(const CFeature* f, const float3& p0, const float3& d, float len)
++{
++	const CMatrix44f& m = f->GetTransformMatrixRef(true);
++	return BrSegmentMissesVolumeAxes(f, m.GetX(), m.GetY(), m.GetZ(), m.GetPos(), p0, d, len);
++}
++
+ float TraceRay(
+ 	const float3& pos,
+ 	const float3& dir,
+@@ -231,6 +283,7 @@ float TraceRay(
+ 
+ 	if (scanForFeatures || scanForAnyUnits) {
+ 		CollisionQuery cq;
++		const bool brH128 = (g_brToggles3 & 0x2000000) != 0;
+ 
+ 		QuadFieldQuery qfQuery;
+ 		quadField.GetQuadsOnRay(qfQuery, pos, dir, traceLength);
+@@ -251,6 +304,8 @@ float TraceRay(
+ 					//   for collisions with projectiles so we can skip it here
+ 					if (!f->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS))
+ 						continue;
++					if (brH128 && BrSegmentMissesFeature(f, pos, dir, traceLength))
++						continue;
+ 
+ 					if (CCollisionHandler::DetectHit(f, f->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+ 						const float len = cq.GetHitPosDist(pos, dir);
+@@ -289,6 +344,8 @@ float TraceRay(
+ 
+ 					if (!doHitTest)
+ 						continue;
++					if (brH128 && BrSegmentMissesUnit(u, pos, dir, traceLength))
++						continue;
+ 
+ 					if (CCollisionHandler::DetectHit(u, u->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+ 						const float len = cq.GetHitPosDist(pos, dir);
+-- 
+2.53.0
+

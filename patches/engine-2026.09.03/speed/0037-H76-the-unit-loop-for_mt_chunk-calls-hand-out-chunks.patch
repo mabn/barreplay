@@ -1,0 +1,81 @@
+From d3bd84161097c96c7c1810d96eae80c9d671b29b Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 14:31:14 +0000
+Subject: [PATCH 37/43] H76: the unit-loop for_mt_chunk calls hand out chunks
+ of at most 32 (toggle 0x200)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h       | 11 +++++++++++
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp |  2 +-
+ rts/Sim/Units/UnitHandler.cpp                   |  4 ++--
+ 3 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+index a21f60f..0f00937 100644
+--- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -7,7 +7,9 @@
+ // several threads with EXACTLY the sequential result. See GeneralMoveSystem.cpp
+ // for the schedule; these are the hooks the move types call while one runs.
+ 
++#include <algorithm>
+ #include <atomic>
++#include <limits>
+ #include <immintrin.h>
+ 
+ class CUnit;
+@@ -16,6 +18,15 @@ class CUnit;
+ // harness's go file ("t=<hex>") on each restore of a checkpoint
+ extern unsigned g_brToggles;
+ 
++// [barreplay] H76 (toggle 0x200): the largest chunk a for_mt_chunk call of the
++// unit loops hands one thread. for_mt_chunk cuts its range into one chunk per
++// thread, so the calling thread waits for the slowest worker (a late wake-up,
++// or two workers on one core); small chunks let the slice queue balance them.
++// Each element still runs exactly once; which thread runs it never mattered.
++inline int BrChunkMax(int floorSize = 1) {
++	return ((g_brToggles & 0x200) != 0)? std::max(floorSize, 32): std::numeric_limits<int>::max();
++}
++
+ namespace BrParAir {
+ 	// rank of the item this thread is running inside the parallel loop, -1 outside it
+ 	extern thread_local int curRank;
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 0354730..96d5e1e 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -419,7 +419,7 @@ namespace BrParAir {
+ 			p.tgtType = int(u->curTarget.type);
+ 			p.tgtUnit = (u->curTarget.type == Target_Unit)? u->curTarget.unit: nullptr;
+ 			p.tgtId = (p.tgtUnit != nullptr)? p.tgtUnit->id: -1;
+-		}, 64);
++		}, 64, BrChunkMax(64));
+ 
+ 		long long nPar = 0;
+ 		static std::vector<int> tgtIds;
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 88be7d3..fcf67f9 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -522,7 +522,7 @@ void CUnitHandler::UpdateUnitLosStates()
+ 				const unsigned short cur = unit->losStatus[at];
+ 				newStatus[i * nat + at] = ((cur & LOS_ALL_MASK_BITS) == LOS_ALL_MASK_BITS)? cur: unit->CalcLosStatus(at);
+ 			}
+-		});
++		}, 1, BrChunkMax());
+ 
+ 		for (size_t i = 0; i < n; ++i) {
+ 			if ((n - i) > 8) __builtin_prefetch(&activeUnits[i + 8]->losStatus[0]);
+@@ -627,7 +627,7 @@ void CUnitHandler::UpdateUnitWeapons()
+ 		for_mt_chunk(0, activeUnits.size(), [&](const int idx) {
+ 			auto unit = activeUnits[idx];
+ 			unit->UpdateWeaponVectors();
+-		});
++		}, 1, BrChunkMax());
+ 	}
+ 	{
+ 		SCOPED_TIMER("Sim::Unit::Weapon");
+-- 
+2.53.0
+

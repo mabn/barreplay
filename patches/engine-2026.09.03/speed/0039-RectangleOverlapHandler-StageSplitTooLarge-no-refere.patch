@@ -1,0 +1,41 @@
+From ea5a81fdbd4e71513bbfe3165b92cb818d96400b Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 15:07:08 +0000
+Subject: [PATCH 39/43] RectangleOverlapHandler::StageSplitTooLarge: no
+ reference into the vector across push_back (use-after-free, heap corruption)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/System/Misc/RectangleOverlapHandler.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/rts/System/Misc/RectangleOverlapHandler.cpp b/rts/System/Misc/RectangleOverlapHandler.cpp
+index fbed31e..ffce835 100644
+--- a/rts/System/Misc/RectangleOverlapHandler.cpp
++++ b/rts/System/Misc/RectangleOverlapHandler.cpp
+@@ -133,8 +133,13 @@ void CRectangleOverlapHandler::StageOverlap()
+ void CRectangleOverlapHandler::StageSplitTooLarge()
+ {
+ 	// split too-large rects
++	// [barreplay] rect1 was a reference into <rectangles>, and push_back below
++	// can reallocate: the loop then kept writing (and reading the next split's
++	// size) through a dangling reference into the freed buffer, corrupting the
++	// heap and leaving garbage rectangles (z2 = 2553 on a 1536-row map). Work on
++	// a copy and store it back by index before every push_back.
+ 	for (size_t i = frontIdx; i < rectangles.size(); i++) {
+-		SRectangle& rect1 = rectangles[i];
++		SRectangle rect1 = rectangles[i];
+ 
+ 		int width  = rect1.GetWidth();
+ 		int height = rect1.GetHeight();
+@@ -150,6 +155,7 @@ void CRectangleOverlapHandler::StageSplitTooLarge()
+ 				rect2.z1 = (rect2.z1 + rect2.z2) / 2;
+ 			}
+ 
++			rectangles[i] = rect1;
+ 			rectangles.push_back(rect2);
+ 
+ 			width  = rect1.GetWidth();
+-- 
+2.53.0
+

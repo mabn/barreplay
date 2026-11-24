@@ -1,0 +1,33 @@
+From 7ed34e886acc63a8c306308465865fb2d8f57ced Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 15:39:49 +0000
+Subject: [PATCH 81/90] [barreplay] P1 v8: hover aircraft standing still in the
+ air (flying/hovering, not stopping or crashing) as parallel items (toggle
+ 0x80000000)
+
+---
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 4d803ee..a98db58 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -300,7 +300,13 @@ namespace BrParAir {
+ 				return (w = WHY_STATE, true);
+ 		}
+ 
+-		if (u->speed == ZeroVector)
++		// v8 (toggle 0x80000000): a hover aircraft standing still in the air
++		// takes the same paths as one moving (FLYING / HOVERING below): its
++		// script calls when it starts or stops moving and its RNG draws wait
++		// for every earlier item (SerialPoint), state changes there set only
++		// its own flags, and with collide off nothing reads another unit
++		const bool v8 = ((g_brToggles & 0x80000000u) != 0);
++		if (u->speed == ZeroVector && !(v8 && hover))
+ 			return (w = WHY_SPEED, false);
+ 
+ 		if (hover) {
+-- 
+2.53.0
+

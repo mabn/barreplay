@@ -1,0 +1,828 @@
+From 5fd42db34af0f75a8deab30cde0ebd25d50081b9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 12:17:56 +0000
+Subject: [PATCH 73/78] [barreplay] P5: the COB engine's thread ticks on
+ several threads, exactly sequential (toggle 0x10000000)
+
+---
+ rts/Sim/CMakeLists.txt                     |   1 +
+ rts/Sim/Units/Scripts/BrCobPar.cpp         | 518 +++++++++++++++++++++
+ rts/Sim/Units/Scripts/BrCobPar.h           |  61 +++
+ rts/Sim/Units/Scripts/CobEngine.cpp        |  49 ++
+ rts/Sim/Units/Scripts/CobEngine.h          |   7 +-
+ rts/Sim/Units/Scripts/CobThread.cpp        |  19 +
+ rts/Sim/Units/Scripts/CobThread.h          |   3 +
+ rts/Sim/Units/Scripts/UnitScriptEngine.cpp |  10 +
+ 8 files changed, 667 insertions(+), 1 deletion(-)
+ create mode 100644 rts/Sim/Units/Scripts/BrCobPar.cpp
+ create mode 100644 rts/Sim/Units/Scripts/BrCobPar.h
+
+diff --git a/rts/Sim/CMakeLists.txt b/rts/Sim/CMakeLists.txt
+index 569cfc5..a334354 100644
+--- a/rts/Sim/CMakeLists.txt
++++ b/rts/Sim/CMakeLists.txt
+@@ -115,6 +115,7 @@ add_library(engineSim STATIC
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Units/CommandAI/BuilderCaches.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Units/Scripts/CobDeferredCallin.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Units/Scripts/CobEngine.cpp"
++		"${CMAKE_CURRENT_SOURCE_DIR}/Units/Scripts/BrCobPar.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Units/Scripts/CobFile.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Units/Scripts/CobFileHandler.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Units/Scripts/CobInstance.cpp"
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.cpp b/rts/Sim/Units/Scripts/BrCobPar.cpp
+new file mode 100644
+index 0000000..8c3ddab
+--- /dev/null
++++ b/rts/Sim/Units/Scripts/BrCobPar.cpp
+@@ -0,0 +1,518 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++// [barreplay] P5: the COB engine's thread ticks on several threads, exactly
++// sequential. See BrCobPar.h.
++
++#include "BrCobPar.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cstdlib>
++#include <memory>
++#include <unordered_map>
++#include <immintrin.h>
++
++#include "CobEngine.h"
++#include "CobFile.h"
++#include "CobInstance.h"
++#include "CobOpCodes.h"
++#include "CobThread.h"
++#include "UnitScriptEngine.h"
++#include "Sim/Misc/GlobalSynced.h"
++#include "System/Log/ILog.h"
++#include "System/Threading/ThreadPool.h"
++
++namespace BrP5 {
++	thread_local bool deferring = false;
++
++	// ---- which functions a worker may run ----------------------------------
++	namespace {
++		enum : uint8_t { FS_UNKNOWN = 0, FS_SAFE = 1, FS_UNSAFE = 2, FS_VISITING = 3 };
++		std::unordered_map<const CCobFile*, std::vector<uint8_t>> fnMemo;
++
++		// GetUnitVal ids that only read (UnitScript.cpp; no writes, no logging),
++		// and LUA0..LUA9 (the thread's own luaArgs)
++		bool ReadId(int v) {
++			if (v >= 1 && v <= 18) return true; // ACTIVATION .. YARD_OPEN
++			if (v >= LUA0 && v <= LUA9) return true;
++			switch (v) {
++				case 20: case 28: case 29: case 32: case 34:                     // ARMORED IN_WATER CURRENT_SPEED VETERAN_LEVEL ON_ROAD
++				case 70: case 71: case 72: case 73: case 74: case 75: case 76:  // MAX_ID MY_ID UNIT_TEAM UNIT_BUILD_PERCENT_LEFT UNIT_ALLIED MAX_SPEED CLOAKED
++				case 77: case 78: case 79: case 82: case 83: case 84:           // WANT_CLOAK GROUND_WATER_HEIGHT UPRIGHT HEADING TARGET_ID LAST_ATTACKER_ID
++				case 85: case 86: case 87: case 88: case 89: case 90: case 91:  // the sensor radii
++				case 93: case 94: case 95: case 96: case 97: case 100:          // CURRENT_FUEL TRANSPORT_ID SHIELD_POWER STEALTH CRASHING COB_ID
++				case 131: case 132: case 133: case 134: case 135: case 136:     // COB_MIN COB_MAX ABS GAME_FRAME KSIN KCOS
++					return true;
++				default:
++					return false;
++			}
++		}
++		// SetUnitVal ids that write only the unit's own flags: INBUILDSTANCE, BUSY
++		bool SetId(int v) { return (v == 5 || v == 6); }
++
++		int OperandCount(int op) {
++			switch (op) {
++				case PUSH_CONSTANT: case PUSH_LOCAL_VAR: case PUSH_STATIC: case POP_LOCAL_VAR: case POP_STATIC:
++				case JUMP: case JUMP_NOT_EQUAL: case SHADE: case DONT_SHADE: case CACHE: case DONT_CACHE:
++				case EXPLODE: case PLAY_SOUND: case EMIT_SFX: case SCALE: case SCALE_NOW: case WAIT_SCALE:
++				case SHOW: case HIDE:
++					return 1;
++				case SPIN: case STOP_SPIN: case TURN: case MOVE: case MOVE_NOW: case TURN_NOW:
++				case WAIT_TURN: case WAIT_MOVE: case START: case CALL: case REAL_CALL: case LUA_CALL: case BATCH_LUA:
++					return 2;
++				case SLEEP: case RETURN: case CREATE_LOCAL_VAR: case POP_STACK:
++				case ADD: case SUB: case MUL: case DIV: case MOD:
++				case BITWISE_AND: case BITWISE_OR: case BITWISE_XOR: case BITWISE_NOT:
++				case SET_LESS: case SET_LESS_OR_EQUAL: case SET_GREATER: case SET_GREATER_OR_EQUAL: case SET_EQUAL: case SET_NOT_EQUAL:
++				case LOGICAL_AND: case LOGICAL_OR: case LOGICAL_XOR: case LOGICAL_NOT:
++				case RAND: case GET_UNIT_VALUE: case GET: case SIGNAL: case SET_SIGNAL_MASK: case SET: case ATTACH: case DROP:
++				case SIGNATURE_LUA:
++					return 0;
++				default:
++					return -1;
++			}
++		}
++
++		bool SafeOp(int op) {
++			switch (op) {
++				case PUSH_CONSTANT: case PUSH_LOCAL_VAR: case PUSH_STATIC: case CREATE_LOCAL_VAR:
++				case POP_LOCAL_VAR: case POP_STATIC: case POP_STACK:
++				case ADD: case SUB: case MUL: case DIV: case MOD:
++				case BITWISE_AND: case BITWISE_OR: case BITWISE_XOR: case BITWISE_NOT:
++				case SET_LESS: case SET_LESS_OR_EQUAL: case SET_GREATER: case SET_GREATER_OR_EQUAL: case SET_EQUAL: case SET_NOT_EQUAL:
++				case LOGICAL_AND: case LOGICAL_OR: case LOGICAL_XOR: case LOGICAL_NOT:
++				case JUMP: case JUMP_NOT_EQUAL: case RETURN:
++				case SLEEP: case WAIT_TURN: case WAIT_MOVE: case WAIT_SCALE:
++				case TURN: case MOVE: case SPIN: case STOP_SPIN: case SCALE: case TURN_NOW: case MOVE_NOW: case SCALE_NOW:
++				case HIDE: case SIGNAL: case SET_SIGNAL_MASK: case CACHE: case DONT_CACHE: case SHADE: case DONT_SHADE:
++				case START: case RAND: // serial points
++					return true;
++				default:
++					return false;
++			}
++		}
++
++		// (pops, pushes) of the operations a value can be computed by; false =
++		// anything else, which ends the backward search
++		bool StackEffect(int op, int& pops, int& pushes) {
++			switch (op) {
++				case PUSH_CONSTANT: case PUSH_LOCAL_VAR: case PUSH_STATIC: pops = 0; pushes = 1; return true;
++				case POP_LOCAL_VAR: case POP_STATIC: case POP_STACK: pops = 1; pushes = 0; return true;
++				case ADD: case SUB: case MUL: case DIV: case MOD: case BITWISE_AND: case BITWISE_OR: case BITWISE_XOR:
++				case SET_LESS: case SET_LESS_OR_EQUAL: case SET_GREATER: case SET_GREATER_OR_EQUAL: case SET_EQUAL: case SET_NOT_EQUAL:
++				case LOGICAL_AND: case LOGICAL_OR: case LOGICAL_XOR: case RAND:
++					pops = 2; pushes = 1; return true;
++				case BITWISE_NOT: case LOGICAL_NOT: case GET_UNIT_VALUE: pops = 1; pushes = 1; return true;
++				case GET: pops = 5; pushes = 1; return true;
++				default: return false;
++			}
++		}
++
++		// the constant pushed for the value <depth> deep under instruction j's
++		// operands (the unit-value id of a GET/SET), or -1
++		int ConstantBelow(const std::vector<int>& code, const std::vector<int>& ins, const std::vector<uint8_t>& isTarget, int beg, size_t j, int depth) {
++			int need = depth;
++			for (size_t i = j; i-- > 0; ) {
++				if (isTarget[ins[i + 1] - beg])
++					return -1; // control can arrive here from elsewhere
++				int pops = 0, pushes = 0;
++				const int op = code[ins[i]];
++				if (!StackEffect(op, pops, pushes))
++					return -1;
++				if (pushes >= need)
++					return (op == PUSH_CONSTANT && pushes == 1)? code[ins[i] + 1]: -1;
++				need = need - pushes + pops;
++			}
++			return -1;
++		}
++
++		uint8_t Analyze(const CCobFile* f, std::vector<uint8_t>& memo, int fn) {
++			if (fn < 0 || size_t(fn) >= f->scriptNames.size())
++				return FS_UNSAFE;
++			if (memo[fn] == FS_VISITING)
++				return FS_UNSAFE; // recursion: not worth proving
++			if (memo[fn] != FS_UNKNOWN)
++				return memo[fn];
++
++			memo[fn] = FS_VISITING;
++
++			const std::vector<int>& code = f->code;
++			const int beg = f->scriptOffsets[fn];
++			const int end = std::min<int>(beg + f->scriptLengths[fn], code.size());
++
++			std::vector<int> ins;
++			std::vector<uint8_t> isTarget(std::max(0, end - beg) + 1, 0);
++			uint8_t res = FS_SAFE;
++
++			for (int pc = beg; pc < end; ) {
++				const int n = OperandCount(code[pc]);
++				if (n < 0) { res = FS_UNSAFE; break; }
++				ins.push_back(pc);
++				if ((code[pc] == JUMP || code[pc] == JUMP_NOT_EQUAL) && pc + 1 < end) {
++					const int t = code[pc + 1];
++					if (t >= beg && t <= end)
++						isTarget[t - beg] = 1;
++				}
++				pc += 1 + n;
++			}
++			ins.push_back(end); // sentinel for isTarget[ins[i + 1]]
++
++			for (size_t j = 0; res == FS_SAFE && j + 1 < ins.size(); ++j) {
++				const int pc = ins[j];
++				const int op = code[pc];
++
++				switch (op) {
++					case CALL: case REAL_CALL: {
++						const int callee = code[pc + 1];
++						if (callee < 0 || size_t(callee) >= f->scriptNames.size() || f->scriptNames[callee].find("lua_") == 0 || Analyze(f, memo, callee) != FS_SAFE)
++							res = FS_UNSAFE;
++					} break;
++					case GET: {
++						if (!ReadId(ConstantBelow(code, ins, isTarget, beg, j, 5)))
++							res = FS_UNSAFE;
++					} break;
++					case GET_UNIT_VALUE: {
++						if (!ReadId(ConstantBelow(code, ins, isTarget, beg, j, 1)))
++							res = FS_UNSAFE;
++					} break;
++					case SET: {
++						if (!SetId(ConstantBelow(code, ins, isTarget, beg, j, 2)))
++							res = FS_UNSAFE;
++					} break;
++					default: {
++						if (!SafeOp(op))
++							res = FS_UNSAFE;
++					} break;
++				}
++			}
++
++			memo[fn] = res;
++			return res;
++		}
++	}
++
++	bool FunctionSafe(const CCobFile* f, int functionId)
++	{
++		if (f == nullptr)
++			return false;
++
++		std::vector<uint8_t>& memo = fnMemo[f];
++		if (memo.size() != f->scriptNames.size())
++			memo.assign(f->scriptNames.size(), FS_UNKNOWN);
++
++		return (Analyze(f, memo, functionId) == FS_SAFE);
++	}
++
++
++	// ---- the schedule ---------------------------------------------------------
++	namespace {
++		enum : uint8_t { OP_SLEEP, OP_REMOVE, OP_QREMOVE, OP_ANIM_ADD, OP_ANIM_DEL };
++		struct Op { uint8_t kind; int a; int b; CUnitScript* s; };
++
++		struct Item {
++			int id;
++			int prev;   // the unit's previous tick in this phase, or -1
++			bool par;   // may run on a worker
++			std::vector<Op> ops;
++		};
++
++		std::vector<Item> items;
++		std::unique_ptr<std::atomic<uint8_t>[]> done;
++		size_t doneCap = 0;
++
++		CCobEngine* engine = nullptr;
++		bool sleeperPhase = false;
++
++		// claim word: generation (16) | segment end (24) | next index (24)
++		std::atomic<uint64_t> claim{0};
++		std::atomic<int> frontier{0};
++		std::atomic<int> segEnd{0};
++		uint64_t generation = 0;
++		std::atomic<bool> quit{false};
++
++		thread_local Item* tlItem = nullptr;
++		thread_local int tlRank = -1;
++
++		int nWorkers = -1;
++		bool statsOn = false;
++		struct Stats { long long phases = 0, ticks = 0, par = 0, segs = 0, segTicks = 0, serialPoints = 0; int lastFrame = 0; } st;
++
++		constexpr int MIN_SEG = 6;
++
++		inline uint64_t Pack(uint64_t gen, uint64_t end, uint64_t idx) { return (gen << 48) | (end << 24) | idx; }
++		inline int IdxOf(uint64_t v) { return int(v & 0xFFFFFF); }
++		inline int EndOf(uint64_t v) { return int((v >> 24) & 0xFFFFFF); }
++
++		void AdvanceFrontier() {
++			int f = frontier.load(std::memory_order_seq_cst);
++			while (f < segEnd.load(std::memory_order_seq_cst) && done[f].load(std::memory_order_seq_cst)) {
++				frontier.compare_exchange_strong(f, f + 1, std::memory_order_seq_cst);
++				f = frontier.load(std::memory_order_seq_cst);
++			}
++		}
++
++		// the original TickThread, minus curThread (error messages only) and
++		// with the thread's removal from the registry buffered
++		void TickDeferred(CCobThread* t) {
++			if (!t->Tick()) {
++				const int id = t->GetID();
++				t->Stop(); // its callback (the unit's own weapon/state) and the unit's thread list, now
++				DeferRemoveThread(id);
++			}
++		}
++
++		void RunItem(int k, bool deferred) {
++			Item& it = items[k];
++
++			if (it.prev >= 0) {
++				while (!done[it.prev].load(std::memory_order_acquire))
++					_mm_pause();
++			}
++
++			CCobThread* t = engine->GetThread(it.id);
++
++			if (deferred) {
++				tlItem = &it;
++				tlRank = k;
++				deferring = true;
++
++				if (t != nullptr) {
++					if (!sleeperPhase) {
++						TickDeferred(t);
++					} else if (t->GetState() == CCobThread::Sleep) {
++						t->SetState(CCobThread::Run);
++						TickDeferred(t);
++					} else if (t->GetState() == CCobThread::Dead) {
++						DeferRemoveThread(it.id);
++					}
++				}
++
++				deferring = false;
++				tlItem = nullptr;
++				tlRank = -1;
++			} else {
++				// exactly the original loops' bodies
++				if (!sleeperPhase) {
++					engine->BrTickThread(t);
++				} else if (t != nullptr) {
++					switch (t->GetState()) {
++						case CCobThread::Sleep: {
++							t->SetState(CCobThread::Run);
++							engine->BrTickThread(t);
++						} break;
++						case CCobThread::Dead: {
++							engine->RemoveThread(t->GetID());
++						} break;
++						default: {
++							LOG_L(L_ERROR, "[COBEngine::%s] unknown state %d for thread %d", "WakeSleepingThreads", t->GetState(), t->GetID());
++						} break;
++					}
++				}
++			}
++
++			done[k].store(1, std::memory_order_seq_cst);
++		}
++
++		// claim the next index of the current segment, or -1
++		int Claim(uint64_t& seen) {
++			for (;;) {
++				uint64_t v = claim.load(std::memory_order_acquire);
++				seen = v >> 48;
++				if (IdxOf(v) >= EndOf(v))
++					return -1;
++				if (claim.compare_exchange_weak(v, v + 1, std::memory_order_acq_rel))
++					return IdxOf(v);
++			}
++		}
++
++		void WorkerLoop() {
++			uint64_t seen = 0;
++			while (!quit.load(std::memory_order_acquire)) {
++				const int k = Claim(seen);
++				if (k < 0) {
++					_mm_pause();
++					continue;
++				}
++				RunItem(k, true);
++				AdvanceFrontier();
++			}
++		}
++
++		void Flush(int a, int b) {
++			for (int k = a; k < b; ++k) {
++				for (const Op& op: items[k].ops) {
++					switch (op.kind) {
++						case OP_SLEEP:    { engine->BrPushSleeper(op.a, op.b); } break;
++						case OP_REMOVE:   { engine->RemoveThread(op.a); } break;
++						case OP_QREMOVE:  { engine->QueueRemoveThread(op.a); } break;
++						case OP_ANIM_ADD: { unitScriptEngine->AddInstance(op.s); } break;
++						case OP_ANIM_DEL: { unitScriptEngine->RemoveInstance(op.s); } break;
++					}
++				}
++				items[k].ops.clear();
++			}
++		}
++
++		auto workerFn = [](const int) { WorkerLoop(); };
++		std::shared_ptr<ForTaskGroup<decltype(workerFn)>> taskGroup;
++		bool workersUp = false;
++
++		void StartWorkers() {
++			if (workersUp)
++				return;
++			const int nw = std::min(nWorkers, ThreadPool::GetNumThreads() - 1);
++			if (nw <= 0)
++				return;
++			quit.store(false, std::memory_order_relaxed);
++			claim.store(Pack(++generation & 0xFFFF, 0, 0), std::memory_order_release);
++			static TaskPool<ForTaskGroup, decltype(workerFn)> pool;
++			taskGroup = pool.GetTaskGroup();
++			taskGroup->Enqueue(0, nw, 1, workerFn);
++			taskGroup->UpdateId();
++			for (int i = 1; i <= nw; ++i) {
++				taskGroup->wantedThread.store(i);
++				ThreadPool::PushTaskGroup(taskGroup);
++			}
++			ThreadPool::NotifyWorkerThreads(true, false);
++			workersUp = true;
++		}
++
++		void StopWorkers() {
++			if (!workersUp)
++				return;
++			quit.store(true, std::memory_order_release);
++			{
++				MultithreadedSection mtSection;
++				ThreadPool::WaitForFinished(taskGroup);
++			}
++			taskGroup.reset();
++			workersUp = false;
++		}
++	}
++
++	void DeferSleep(int threadID, int wakeTime) { tlItem->ops.push_back({OP_SLEEP, threadID, wakeTime, nullptr}); }
++	void DeferRemoveThread(int threadID) { tlItem->ops.push_back({OP_REMOVE, threadID, 0, nullptr}); }
++	void DeferQueueRemove(int threadID) { tlItem->ops.push_back({OP_QREMOVE, threadID, 0, nullptr}); }
++	void DeferAnimating(CUnitScript* script, bool add) { tlItem->ops.push_back({uint8_t(add? OP_ANIM_ADD: OP_ANIM_DEL), 0, 0, script}); }
++
++	void SerialPoint()
++	{
++		st.serialPoints++;
++		while (frontier.load(std::memory_order_seq_cst) < tlRank) {
++			AdvanceFrontier();
++			_mm_pause();
++		}
++	}
++
++	void RunPhase(CCobEngine* e, const std::vector<int>& ids, bool sleepers)
++	{
++		if (nWorkers < 0) {
++			nWorkers = 6;
++			if (const char* w = getenv("BARREPLAY_P5_WORKERS"))
++				nWorkers = std::max(0, atoi(w));
++			statsOn = (getenv("BARREPLAY_P5_STATS") != nullptr);
++			LOG("[barreplay] P5 parallel COB ticks: %d workers", nWorkers);
++		}
++
++		engine = e;
++		sleeperPhase = sleepers;
++		const int n = int(ids.size());
++		st.phases++;
++		st.ticks += n;
++
++		if (items.size() < size_t(n))
++			items.resize(n);
++		if (doneCap < size_t(n)) {
++			doneCap = size_t(n) * 2;
++			done.reset(new std::atomic<uint8_t>[doneCap]);
++		}
++
++		// classify, and chain each unit's ticks
++		std::unordered_map<const void*, int> lastOf;
++		lastOf.reserve(n);
++		for (int k = 0; k < n; ++k) {
++			Item& it = items[k];
++			it.id = ids[k];
++			it.prev = -1;
++			it.par = false;
++			it.ops.clear();
++			done[k].store(0, std::memory_order_relaxed);
++
++			const CCobThread* t = e->GetThread(it.id);
++			if (t == nullptr) {
++				it.par = true; // nothing to do either way
++				continue;
++			}
++
++			const void* key = t->cobInst;
++			if (key != nullptr) {
++				const auto p = lastOf.find(key);
++				if (p != lastOf.end())
++					it.prev = p->second;
++				lastOf[key] = k;
++			}
++
++			if (t->cobInst == nullptr || t->BrCallbackType() == CCobInstance::CBAimShield)
++				continue;
++
++			const auto state = t->GetState();
++			if (sleepers && state == CCobThread::Dead)
++				it.par = true;
++			else if ((!sleepers || state == CCobThread::Sleep) && t->BrStackSafe())
++				it.par = true;
++		}
++
++		// segments of worker-safe ticks between the others
++		const bool mt = ThreadPool::IsInMultiThreadedSection();
++		ThreadPool::SetInlineOnly(true);
++
++		for (int a = 0; a < n; ) {
++			int b = a;
++			while (b < n && items[b].par)
++				++b;
++
++			if ((b - a) >= MIN_SEG && nWorkers > 0) {
++				StartWorkers();
++				st.segs++;
++				st.segTicks += (b - a);
++				st.par += (b - a);
++				segEnd.store(b, std::memory_order_seq_cst);
++				frontier.store(a, std::memory_order_seq_cst);
++				generation = (generation + 1) & 0xFFFF;
++				claim.store(Pack(generation, b, a), std::memory_order_seq_cst);
++
++				uint64_t seen = 0;
++				for (int k; (k = Claim(seen)) >= 0; ) {
++					RunItem(k, true);
++					AdvanceFrontier();
++				}
++				while (frontier.load(std::memory_order_seq_cst) < b) {
++					AdvanceFrontier();
++					_mm_pause();
++				}
++				Flush(a, b);
++			} else {
++				for (int k = a; k < b; ++k)
++					RunItem(k, false);
++			}
++
++			if (b < n)
++				RunItem(b, false); // a tick only the main thread may run, alone
++			a = b + 1;
++		}
++
++		ThreadPool::SetInlineOnly(false);
++		(void) mt;
++
++		if (statsOn && (gs->frameNum - st.lastFrame) >= 900) {
++			st.lastFrame = gs->frameNum;
++			LOG("[BR_P5] f=%d phases=%lld ticks=%lld parallel=%lld (%.1f%%) segments=%lld (%.1f ticks each) serialPoints=%lld",
++				gs->frameNum, st.phases, st.ticks, st.par, 100.0 * st.par / std::max(1LL, st.ticks), st.segs, double(st.segTicks) / std::max(1LL, st.segs), st.serialPoints);
++		}
++	}
++
++	void EndTick()
++	{
++		StopWorkers();
++	}
++}
+diff --git a/rts/Sim/Units/Scripts/BrCobPar.h b/rts/Sim/Units/Scripts/BrCobPar.h
+new file mode 100644
+index 0000000..5f4b943
+--- /dev/null
++++ b/rts/Sim/Units/Scripts/BrCobPar.h
+@@ -0,0 +1,61 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_COB_PAR_H
++#define BR_COB_PAR_H
++
++// [barreplay] P5 (toggle 0x10000000): the COB engine's thread ticks on several
++// threads with EXACTLY the sequential result.
++//
++// A frame's ticks run in a known order (the running list, then the sleepers
++// due, which pop in (wake time, id) order whatever runs in between). Most
++// ticks touch nothing but their own unit: its script state, its pieces and
++// animations, and reads. A tick runs on a worker when every function its
++// thread can be executing (its call stack and everything those call) uses
++// only such operations, decided once per function from the bytecode
++// (FunctionSafe). Those ticks form segments between the others, which run
++// alone on the main thread, in order, exactly as before. Within a segment:
++//   - ticks start in order, and a unit's ticks keep their order;
++//   - RAND and START are serial points: the tick waits until every earlier
++//     tick has finished, then draws or starts in place (both are ordered
++//     global state: the synced RNG, the thread id counter);
++//   - the global bookkeeping a tick does (a sleep scheduled, a thread ended,
++//     a kill signalled, an instance entering or leaving the animation list)
++//     goes into the tick's buffer, applied in tick order when the segment
++//     ends. Nothing in a segment reads those structures, and the sleep queue
++//     is ordered by (wake time, id), so its pushes commute anyway.
++
++#include <vector>
++
++class CCobEngine;
++class CCobThread;
++class CCobFile;
++class CUnitScript;
++
++extern unsigned g_brToggles;
++
++namespace BrP5 {
++	// this thread is running a tick inside a segment
++	extern thread_local bool deferring;
++
++	inline bool Enabled() { return ((g_brToggles & 0x10000000) != 0); }
++
++	// the bookkeeping, buffered while deferring
++	void DeferSleep(int threadID, int wakeTime);
++	void DeferRemoveThread(int threadID);
++	void DeferQueueRemove(int threadID);
++	void DeferAnimating(CUnitScript* script, bool add);
++
++	// RAND and START inside a segment: wait for every earlier tick
++	void SerialPoint();
++
++	// every function a thread may run from here is worker-safe
++	bool FunctionSafe(const CCobFile* file, int functionId);
++
++	// one phase of the COB engine's tick: <ids> in order; sleepers = the
++	// thread is woken first (state Sleep -> Run), or removed if dead
++	void RunPhase(CCobEngine* engine, const std::vector<int>& ids, bool sleepers);
++	// the COB engine's tick is over: the workers go back to the pool
++	void EndTick();
++}
++
++#endif
+diff --git a/rts/Sim/Units/Scripts/CobEngine.cpp b/rts/Sim/Units/Scripts/CobEngine.cpp
+index 4f6e506..d46cc4a 100644
+--- a/rts/Sim/Units/Scripts/CobEngine.cpp
++++ b/rts/Sim/Units/Scripts/CobEngine.cpp
+@@ -2,6 +2,8 @@
+ 
+ 
+ #include "CobEngine.h"
++#include "BrCobPar.h"
++#include "System/Threading/ThreadPool.h"
+ 
+ #include "CobDeferredCallin.h"
+ #include "CobThread.h"
+@@ -88,10 +90,27 @@ void CCobEngine::ProcessQueuedThreads() {
+ 	tickAddedThreads.clear();
+ }
+ 
++void CCobEngine::QueueRemoveThread(int threadID)
++{
++	// [barreplay] P5: a kill signalled inside a segment is recorded in tick order
++	if (BrP5::deferring) {
++		BrP5::DeferQueueRemove(threadID);
++		return;
++	}
++	tickRemovedThreads.emplace_back(threadID);
++}
++
+ // a thread wants to continue running at a later time, and adds itself to the scheduler
+ void CCobEngine::ScheduleThread(const CCobThread* thread)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] P5: a sleep scheduled inside a segment is pushed when it ends
++	// (the queue is ordered by (wake time, id), so push order does not matter;
++	// a thread scheduled to RUN only comes from START, at a serial point)
++	if (BrP5::deferring && thread->GetState() == CCobThread::Sleep) {
++		BrP5::DeferSleep(thread->GetID(), thread->GetWakeTime());
++		return;
++	}
+ 	switch (thread->GetState()) {
+ 		case CCobThread::Run: {
+ 			waitingThreadIDs.push_back(thread->GetID());
+@@ -193,6 +212,36 @@ void CCobEngine::Tick(int deltaTime)
+ 	ZoneScoped;
+ 	currentTime += deltaTime;
+ 
++	if (BrP5::Enabled() && ThreadPool::HasThreads()) {
++		// [barreplay] P5: the same two loops, on several threads (BrCobPar.h)
++		BrP5::RunPhase(this, runningThreadIDs, false);
++		runningThreadIDs.clear();
++		std::swap(runningThreadIDs, waitingThreadIDs);
++		ProcessQueuedThreads();
++
++		// WakeSleepingThreads' pops, all at once: nothing a tick schedules can
++		// come due this tick (a sleep ends at currentTime or later), so the
++		// due set and its order are fixed before any of them runs
++		brDueThreadIDs.clear();
++		while (!sleepingThreadIDs.empty()) {
++			const CCobThread* zzzThread = GetThread((sleepingThreadIDs.top()).id);
++
++			if (zzzThread == nullptr) {
++				sleepingThreadIDs.pop();
++				continue;
++			}
++			if (zzzThread->GetWakeTime() >= currentTime)
++				break;
++
++			brDueThreadIDs.push_back(sleepingThreadIDs.top().id);
++			sleepingThreadIDs.pop();
++		}
++		BrP5::RunPhase(this, brDueThreadIDs, true);
++		ProcessQueuedThreads();
++		BrP5::EndTick();
++		return;
++	}
++
+ 	TickRunningThreads();
+ 	ProcessQueuedThreads();
+ 
+diff --git a/rts/Sim/Units/Scripts/CobEngine.h b/rts/Sim/Units/Scripts/CobEngine.h
+index a61a4c6..3ebe4fc 100644
+--- a/rts/Sim/Units/Scripts/CobEngine.h
++++ b/rts/Sim/Units/Scripts/CobEngine.h
+@@ -89,10 +89,14 @@ public:
+ 	int GenThreadID() { return (threadCounter++); }
+ 
+ 	void QueueAddThread(CCobThread&& thread) { tickAddedThreads.emplace_back(std::move(thread)); }
+-	void QueueRemoveThread(int threadID) { tickRemovedThreads.emplace_back(threadID); }
++	void QueueRemoveThread(int threadID);
+ 	void ProcessQueuedThreads();
+ 
+ 	void ScheduleThread(const CCobThread* thread);
++
++	// [barreplay] P5 (BrCobPar.h)
++	void BrTickThread(CCobThread* thread) { TickThread(thread); }
++	void BrPushSleeper(int threadID, int wakeTime) { sleepingThreadIDs.push(SleepingThread{threadID, wakeTime}); }
+ 	void SanityCheckThreads(const CCobInstance* owner);
+ 
+ 	const auto& GetThreadInstances() const { return threadInstances; }
+@@ -129,6 +133,7 @@ private:
+ 	// stores <id, waketime> pairs s.t. after waking up the ID can be checked
+ 	// for validity; thread owner might get removed while a thread is sleeping
+ 	std::priority_queue<SleepingThread, std::vector<SleepingThread>, CCobThreadComp> sleepingThreadIDs;
++	std::vector<int> brDueThreadIDs; // P5: the sleepers due this tick, popped in order
+ 
+ 	CCobThread* curThread = nullptr;
+ 
+diff --git a/rts/Sim/Units/Scripts/CobThread.cpp b/rts/Sim/Units/Scripts/CobThread.cpp
+index f392d42..da8f94c 100644
+--- a/rts/Sim/Units/Scripts/CobThread.cpp
++++ b/rts/Sim/Units/Scripts/CobThread.cpp
+@@ -2,6 +2,7 @@
+ 
+ 
+ #include "CobThread.h"
++#include "BrCobPar.h"
+ 
+ #include "CobDeferredCallin.h"
+ #include "CobFile.h"
+@@ -644,6 +645,10 @@ bool CCobThread::Tick()
+ 					break;
+ 
+ 
++				// [barreplay] P5: the thread id counter is ordered global state
++				if (BrP5::deferring)
++					BrP5::SerialPoint();
++
+ 				CCobThread t(cobInst);
+ 
+ 				t.SetID(cobEngine->GenThreadID());
+@@ -779,6 +784,9 @@ bool CCobThread::Tick()
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
++				// [barreplay] P5: the synced RNG is ordered global state
++				if (BrP5::deferring)
++					BrP5::SerialPoint();
+ 				r3 = gsRNG.NextInt(r2 - r1 + 1) + r1;
+ 				PushDataStack(r3);
+ 			} COB_NEXT();
+@@ -1164,3 +1172,14 @@ void CCobThread::AnimFinished(CUnitScript::AnimType type, int piece, int axis)
+ 	cobEngine->ScheduleThread(this);
+ }
+ 
++
++bool CCobThread::BrStackSafe() const
++{
++	if (cobInst == nullptr || cobFile == nullptr || callStack.empty())
++		return false;
++	for (const CallInfo& ci: callStack) {
++		if (!BrP5::FunctionSafe(cobFile, ci.functionId))
++			return false;
++	}
++	return true;
++}
+diff --git a/rts/Sim/Units/Scripts/CobThread.h b/rts/Sim/Units/Scripts/CobThread.h
+index 5f9d2f4..582d742 100644
+--- a/rts/Sim/Units/Scripts/CobThread.h
++++ b/rts/Sim/Units/Scripts/CobThread.h
+@@ -118,6 +118,9 @@ public:
+ 	// script instance that owns this thread
+ 	CCobInstance* cobInst = nullptr;
+ 	CCobFile* cobFile = nullptr;
++	// [barreplay] P5: every function on the call stack may run on a worker
++	bool BrStackSafe() const;
++	CCobInstance::ThreadCallbackType BrCallbackType() const { return cbType; }
+ 
+ protected:
+ 	struct CallInfo {
+diff --git a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+index f4f5373..7614483 100644
+--- a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
++++ b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+@@ -3,6 +3,7 @@
+ /* heavily based on CobEngine.cpp */
+ 
+ #include "UnitScriptEngine.h"
++#include "BrCobPar.h"
+ 
+ #include "CobEngine.h"
+ #include "CobFileHandler.h"
+@@ -109,6 +110,11 @@ void CUnitScriptEngine::ReloadScripts(const UnitDef* udef)
+ void CUnitScriptEngine::AddInstance(CUnitScript* instance)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] P5: the animation list's order is the order instances join it
++	if (BrP5::deferring) {
++		BrP5::DeferAnimating(instance, true);
++		return;
++	}
+ 	if (instance == currentScript)
+ 		return;
+ 
+@@ -118,6 +124,10 @@ void CUnitScriptEngine::AddInstance(CUnitScript* instance)
+ void CUnitScriptEngine::RemoveInstance(CUnitScript* instance)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	if (BrP5::deferring) {
++		BrP5::DeferAnimating(instance, false);
++		return;
++	}
+ 	if (instance == currentScript)
+ 		return;
+ 
+-- 
+2.53.0
+

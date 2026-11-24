@@ -1,0 +1,63 @@
+From 1e9f2e04d14521d4f6d9344b8268956a60303ff1 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 11:17:44 +0000
+Subject: [PATCH 095/108] [barreplay] H98: the unit loop prefetches the quad
+ bookkeeping of the units whose collision-map update runs this frame (toggle2
+ 0x800)
+
+perf annotate of MovedUnit (speed44 late window): its own time is not the
+VectorErase searches but three dependent cache misses per moved unit: the
+CUnit line holding the quads vector (0xea8), the vector's buffer, the Quad.
+Prefetched 8, 4 and 2 units ahead. Loads only.
+---
+ rts/Sim/Units/UnitHandler.cpp | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 2fed2c4..15c8688 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "UnitHandler.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
++#include "Sim/Misc/QuadField.h"
+ #include "BrRunAhead.h"
+ #include "Sim/MoveTypes/MoveType.h"
+ #include "Sim/Units/Scripts/UnitScript.h"
+@@ -621,6 +622,32 @@ void CUnitHandler::UpdateUnits()
+ 			if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + u4->id) % modInfo.unitQuadPositionUpdateRate) == 0)
+ 				__builtin_prefetch(u4->moveType);
+ 		}
++		// [barreplay] H98 (toggle2 0x800): MovedUnit's own time is three
++		// dependent cache misses per unit that changed position: the unit's
++		// line holding its quads vector, that vector's buffer, and the first
++		// Quad it names. Prefetch them for the units whose collision-map update
++		// runs this frame, 8, 4 and 2 units ahead. Loads only.
++		if ((g_brToggles2 & 0x800) != 0) {
++			const int rate = modInfo.unitQuadPositionUpdateRate;
++			if (i + 8 < activeUnitCount) {
++				const CUnit* u8 = activeUnits[i + 8];
++				if (((gs->frameNum + u8->id) % rate) == 0)
++					__builtin_prefetch(&u8->quads);
++			}
++			if (i + 4 < activeUnitCount) {
++				const CUnit* u4 = activeUnits[i + 4];
++				if (((gs->frameNum + u4->id) % rate) == 0 && !u4->quads.empty())
++					__builtin_prefetch(u4->quads.data());
++			}
++			if (i + 2 < activeUnitCount) {
++				const CUnit* u2 = activeUnits[i + 2];
++				if (((gs->frameNum + u2->id) % rate) == 0) {
++					const size_t nq = std::min<size_t>(u2->quads.size(), 2);
++					for (size_t k = 0; k < nq; ++k)
++						__builtin_prefetch(&quadField.GetQuad(u2->quads[k]));
++				}
++			}
++		}
+ 		CUnit* unit = activeUnits[i];
+ 
+ 		unit->SanityCheck();
+-- 
+2.53.0
+

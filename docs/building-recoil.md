@@ -138,6 +138,21 @@ go run ./cmd/publish-engine -data <BARdata>
 #    other replays (needed for a version with no default).
 ```
 
+**Sandboxed BAR builds.** On a game whose BAR build has the widget sandbox
+(2026.10.13 on — every game the 2026.09.03 engine runs) the two captures
+cannot be byte-identical, and the gate does not ask them to be. The sandbox
+hands user widgets a proxy handler, so on the stock engine the capture
+widget's hits name no attacker and its blasts are only inferred from unit
+deaths; the patched engine's event log (patch 0004) gives the same widget the
+real ones. `publish-engine` (`cmd/publish-engine/compare.go`) then accepts
+exactly that difference: every section but `M`, `H` and `W` byte-identical
+(frames, events, chat, facts, visibility, unit ends — the simulation), the
+meta equal apart from the sizes of `H` and `W` and the blast count, the same
+hits in the same order equal in every field but the attacker and weapon ones,
+with the stock capture naming no attacker on any of them, and every stock blast
+among the patched capture's. Anything else fails as before. It says which
+kind of pass it was ("identical" or "equivalent").
+
 `bringest -resim` then installs it on any host that lacks it
 (`engine.EnsurePatchedEngine`: download, check the SHA-256 against the pin,
 install beside the stock binary). A build already there is kept when it is the
@@ -224,6 +239,38 @@ on the same host simulated it in 78 s against the stock Windows release's
 116 s under the same Wine (1.5x; all three captures sha256 `1facff5b…`). It
 is `engines/2026.07.04/windows-amd64/spring-headless-patched-2026.7.4-barreplay.5.exe.gz`
 (37 MB, 12 MB gzipped, sha256 `9c33c520…`).
+
+### 2026.09.03, revision 1
+
+`2026.9.3-barreplay.1` is 2026.07.04's revision 5 rebased onto the 2026.09.03
+tag (`patches/engine-2026.09.03/`): the same 154 patches in the same order,
+148 byte-identical, six regenerated where upstream moved their context
+(`series` lists them), plus `windows/windows-series`. Same build as revision
+5: `-DSYNCCHECK=OFF`, generic x86-64, PGO+LTO, the switch words at their
+defaults. The profile was trained on the series itself (`pgo/build.sh` says
+on what).
+
+Upstream's 07.04 -> 09.03 changes in the files the series touches were read
+for anything a patch relies on: no new synced Lua read or control functions
+(P4's draining trampolines wrap every control function by macro anyway), the
+new NanoParticles system only runs with its GL4 shader, which a headless
+engine never has, and the rest (weapon muzzle and `TraceRay` range tests,
+`fireAtCrashing`, the mem pools, the CUnit resource functions removed) leave
+the patches' assumptions as they were.
+
+Gated 2026-11-23 on the 2026.09.03 gate replay `0488036b…` (a sandboxed BAR
+build, so the gate's "equivalent" pass, see "Sandboxed BAR builds" above),
+for both platforms:
+
+- Linux: `engines/2026.09.03/spring-headless-patched-2026.9.3-barreplay.1.gz`
+  (37 MB, 13 MB gzipped, sha256 `cbcbc25a…`);
+- Windows, under Wine against the stock Linux engine:
+  `engines/2026.09.03/windows-amd64/spring-headless-patched-2026.9.3-barreplay.1.exe.gz`
+  (38 MB, 12 MB gzipped, sha256 `15f8b24a…`).
+
+On the gate replay (12.7 minutes of game time, 22,770 frames), one run each
+on this host with a `bringest -resim` busy beside it: stock 1m59s (sim 1m32s,
+247 fps), revision 1 **1m08s (sim 43s, 523 fps)** — 2.1x in simulation.
 
 ### Versions
 

@@ -1,0 +1,54 @@
+From bd7b9c3af90472c1d0df1681fc53f997253a562b Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 23:24:57 +0000
+Subject: [PATCH] [barreplay] P8/P9: BARREPLAY_P8_MINUNITS /
+ BARREPLAY_P9_MINUNITS override the 2048-unit start (the gate runs them on
+ every frame)
+
+---
+ rts/Sim/Units/UnitHandler.cpp | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 6015d29..bacb7ad 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -614,6 +614,14 @@ extern unsigned g_brLuaWrites; // [barreplay] H101 (Lua/LuaUtils.cpp)
+ extern unsigned g_brDamageCalls, g_brKillCalls; // [barreplay] P8 measurement (Sim/Units/Unit.cpp)
+ extern unsigned g_brHeightMapVersion; // [barreplay] H88 (Map/ReadMap.h)
+ 
++// [barreplay] P8/P9: the unit count they start at (2048); BARREPLAY_P8_MINUNITS /
++// BARREPLAY_P9_MINUNITS override it (the gate sets 0 to run them on every frame)
++static size_t BrMinUnits(const char* var)
++{
++	const char* v = getenv(var);
++	return (v != nullptr)? size_t(atoi(v)): 2048;
++}
++
+ void CUnitHandler::UpdateUnits()
+ {
+ 	SCOPED_TIMER("Sim::Unit::Update");
+@@ -770,8 +778,9 @@ void CUnitHandler::UpdateUnits()
+ 	// the decision is a pure function of those inputs. From 2048 units.
+ 	struct BrP9Pre { const CUnit* unit; float3 pos; float3 old; float radius; uint32_t qver; int stamp; uint8_t res; };
+ 	static std::vector<BrP9Pre> brP9Pre;
++	static const size_t brP9Min = BrMinUnits("BARREPLAY_P9_MINUNITS");
+ 	const bool brP9 = (g_brToggles2 & 0x400000) != 0 && (g_brToggles & 0x400000) != 0
+-		&& activeUnitCount >= 2048 && ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection();
++		&& activeUnitCount >= brP9Min && ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection();
+ 	if (brP9) {
+ 		if (quadField.brQuadVer.size() != size_t(MaxUnits()))
+ 			quadField.brQuadVer.assign(MaxUnits(), 0);
+@@ -1012,7 +1021,8 @@ void CUnitHandler::UpdateUnitWeapons()
+ {
+ 	// [barreplay] P8 (toggle2 0x200000): the vectors computed by the workers
+ 	// while the weapon loop runs behind them (BrWeaponVectors.h); from 2048 units
+-	const bool brP8On = (g_brToggles2 & 0x200000) != 0 && activeUnits.size() >= 2048
++	static const size_t brP8Min = BrMinUnits("BARREPLAY_P8_MINUNITS");
++	const bool brP8On = (g_brToggles2 & 0x200000) != 0 && activeUnits.size() >= brP8Min
+ 		&& ThreadPool::HasThreads() && !ThreadPool::IsInMultiThreadedSection();
+ 	if (brP8On) {
+ 		BrP8::Begin(activeUnits);
+-- 
+2.53.0
+

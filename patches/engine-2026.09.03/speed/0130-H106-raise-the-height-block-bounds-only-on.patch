@@ -1,0 +1,35 @@
+From 70207be66b8d9b90d5ebc7aafa44e047614ad60c Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 18:31:09 +0000
+Subject: [PATCH] [barreplay] H106: raise the height-block bounds only on a
+ write that raises the corner
+
+The bound is at least the old height, so a lowering write (every crater)
+cannot raise it; doing the block lookup on every write added 2.3% main-thread
+instructions in the late window (speed61).
+---
+ rts/Map/ReadMap.h | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Map/ReadMap.h b/rts/Map/ReadMap.h
+index a6f5820..d2a0a86 100644
+--- a/rts/Map/ReadMap.h
++++ b/rts/Map/ReadMap.h
+@@ -330,9 +330,12 @@ extern MapDimensions mapDims;
+ inline float CReadMap::AddHeight(const int idx, const float a) { return SetHeight(idx, a, 1); }
+ inline float CReadMap::SetHeight(const int idx, const float h, const int add) {
+ 	++g_brHeightMapVersion; // [barreplay] H88: every synced corner-height write
++	const float oh = (*heightMapSyncedPtr)[idx];
+ 	const float nh = SetHeightValue((*heightMapSyncedPtr)[idx], idx, h, add);
+-	if (!g_brHeightBlockMax.empty())
+-		BrRaiseHeightBlocks(idx, nh); // [barreplay] H106
++	// [barreplay] H106: only a write that raises the corner can raise a block's
++	// bound (the bound is at least the old height); craters only lower it
++	if (nh > oh && !g_brHeightBlockMax.empty())
++		BrRaiseHeightBlocks(idx, nh);
+ 	return nh;
+ }
+ 
+-- 
+2.53.0
+

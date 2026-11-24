@@ -1,0 +1,289 @@
+From 4cd3003487a4cf37c548eb6f5d42c2ada9c84326 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 01:13:16 +0000
+Subject: [PATCH 20/43] P1 v2: non-colliding aircraft depend only on their
+ target (BAR: collide = false on all but four aircraft); no grid cells
+
+---
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h     |   2 +-
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 173 +++++++-----------
+ 2 files changed, 66 insertions(+), 109 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+index 9cc0de8..330dad9 100644
+--- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -42,7 +42,7 @@ namespace BrParAir {
+ 	};
+ 
+ 	struct Stats {
+-		std::atomic<long long> frames{0}, serialFrames{0}, items{0}, parallel{0}, serial{0}, replanned{0}, statics{0};
++		std::atomic<long long> frames{0}, serialFrames{0}, items{0}, parallel{0}, serial{0}, replanned{0}, statics{0}, targetEdges{0};
+ 		std::atomic<long long> serialPoints{0}, scriptCalls{0}, collisionWrites{0}, bigWrites{0}, oobKills{0};
+ 	};
+ 	extern Stats stats;
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 406b833..3645d6e 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -43,29 +43,26 @@ unsigned g_brToggles = BrReadTogglesEnv();
+ //
+ // The loop updates ~9000 move types a frame in the late game (5700 aircraft,
+ // the rest buildings' static move types, whose Update does nothing). With the
+-// sync checker compiled out (SYNCCHECK=OFF), a flying strafe aircraft's update
+-// touches only its own unit, a few units around it (the quad-field collision
+-// queries read their positions; an actual overlap moves the other unit too),
+-// the unit it targets, and the synced RNG (rarely, when it picks a loop-back
+-// maneuver). So:
++// sync checker compiled out (SYNCCHECK=OFF), the update of a flying strafe
++// aircraft that does not collide (BAR sets collide = false on every aircraft
++// but four flying fortresses, so its collision queries never run) reads and
++// writes nothing outside its own unit but the unit it targets (position, isDead,
++// def) and the synced RNG (rarely: picking a loop-back maneuver). So:
+ //
+-// - items START in loop order (each waits for the one before it to start), and
+-//   an item starts only once every earlier item touching a grid cell within R
+-//   of one of its own cells has FINISHED: its own position's cell and, if it has
+-//   a unit target, the target's (waiting for the last such item per cell is
+-//   enough: that one waited for the ones before it). Items that can see each
+-//   other's effects therefore run in loop order; items far apart overlap.
+-// - when its turn to start comes, an item checks again that it is a flying
+-//   strafe aircraft in the cell and with the target it was planned with:
+-//   anything run before it may have changed that (a crash explosion, a Lua
+-//   callin giving orders), and it is the first moment nothing later has started;
++// - items START in loop order (each waits for the one before it to start);
++// - an item that targets an EARLIER item of the loop starts after that item
++//   has finished, and an item targeted by earlier items starts after all of
++//   them have finished (they read its position before it moves);
++// - when its turn comes, an item checks again that it is still such an
++//   aircraft with the planned target: anything run before it may have changed
++//   that (a crash explosion, a Lua callin giving orders), and the in-order start
++//   makes it the first moment nothing later has started;
+ // - anything else is SERIAL: it waits for every earlier item to finish, nothing
+ //   later starts until it is done, and it runs on the main thread (a crashing
+-//   aircraft can die and explode; landing, take-off, hover aircraft,
+-//   script-controlled units, stunned or unfinished ones);
+-// - the RNG draw waits for every earlier item to finish first (SerialPoint),
+-//   so draws happen in loop order; neighbours' death-dependence lists are
+-//   updated under a lock (they are sorted, the order of insertions is moot).
++//   aircraft can die and explode; landing, take-off, hover and colliding
++//   aircraft, script-controlled units, stunned or unfinished ones);
++// - the RNG draw waits for every earlier item to finish first (SerialPoint), so
++//   draws happen in loop order.
+ //
+ // A static move type's Update is an empty function and the loop's out-of-bounds
+ // check cannot fire for a unit standing still, so those items are skipped.
+@@ -76,21 +73,19 @@ namespace BrParAir {
+ 
+ 	static std::vector<CUnit*> work;
+ 	static std::vector<uint8_t> isSerial;
+-	static std::vector<int> predBeg, preds, cell0, lastInCell;
++	static std::vector<int> predBeg, preds, rankOf;
++	static std::vector<std::pair<int, int>> edges; // (later item, earlier item it waits for)
+ 	static std::vector<const CUnit*> tgtUnit;
+ 	static std::vector<int> tgtType;
+ 	static std::unique_ptr<std::atomic<uint8_t>[]> done;
+ 	static size_t doneCap = 0;
+ 	static std::atomic<int> claim{0}, frontier{0}, nextStart{0}, handoff{-1};
+-	static int gridW = 0, gridH = 0;
+-	static float cellSize = 1024.0f;
+-	static int cellReach = 1;
+ 
+ 	int StatsLine(char* buf, int size) {
+ 		return snprintf(buf, size,
+-			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld statics=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld cell=%.0f reach=%d\n",
++			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld statics=%lld targetEdges=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld\n",
+ 			stats.frames.load(), stats.serialFrames.load(), stats.items.load(), stats.parallel.load(), stats.serial.load(), stats.replanned.load(), stats.statics.load(),
+-			stats.serialPoints.load(), stats.scriptCalls.load(), stats.collisionWrites.load(), stats.bigWrites.load(), stats.oobKills.load(), cellSize, cellReach);
++			stats.targetEdges.load(), stats.serialPoints.load(), stats.scriptCalls.load(), stats.collisionWrites.load(), stats.bigWrites.load(), stats.oobKills.load());
+ 	}
+ 
+ 	static void RunItem(CUnit* unit) {
+@@ -148,12 +143,6 @@ namespace BrParAir {
+ 		return true;
+ 	}
+ 
+-	static int CellOf(const float3& p) {
+-		const int cx = std::clamp(int(p.x / cellSize), 0, gridW - 1);
+-		const int cz = std::clamp(int(p.z / cellSize), 0, gridH - 1);
+-		return (cz * gridW + cx);
+-	}
+-
+ 	static bool ParallelSafe(const CUnit* u) {
+ 		const AMoveType* mt = u->moveType;
+ 
+@@ -161,11 +150,13 @@ namespace BrParAir {
+ 			return false;
+ 		if (u->UsingScriptMoveType() || mt->UseHeading())
+ 			return false;
+-		if (static_cast<const CStrafeAirMoveType*>(mt)->aircraftState != AAirMoveType::AIRCRAFT_FLYING)
++
++		const CStrafeAirMoveType* amt = static_cast<const CStrafeAirMoveType*>(mt);
++		if (amt->aircraftState != AAirMoveType::AIRCRAFT_FLYING || amt->collide)
+ 			return false;
+ 		if (u->IsStunned() || u->IsCrashing() || u->beingBuilt || u->UnderFirstPersonControl() || u->GetTransporter() != nullptr)
+ 			return false;
+-		if (u->speed.w > (MAX_UNIT_SPEED * 0.5f) || u->speed == ZeroVector || u->radius > 150.0f)
++		if (u->speed.w > (MAX_UNIT_SPEED * 0.5f) || u->speed == ZeroVector)
+ 			return false;
+ 
+ 		return true;
+@@ -175,7 +166,7 @@ namespace BrParAir {
+ 	static bool StillAsPlanned(int k) {
+ 		const CUnit* u = work[k];
+ 
+-		if (!ParallelSafe(u) || CellOf(u->pos) != cell0[k] || int(u->curTarget.type) != tgtType[k])
++		if (!ParallelSafe(u) || int(u->curTarget.type) != tgtType[k])
+ 			return false;
+ 		if (u->curTarget.type == Target_Unit && u->curTarget.unit != tgtUnit[k])
+ 			return false;
+@@ -239,51 +230,18 @@ namespace BrParAir {
+ 		}
+ 	}
+ 
+-	// Two items can only interact through a unit u one of them moves (it
+-	// overlaps u) and the other reads (u is listed in a quad its collision
+-	// query covers), or by one reading the other. With aircraft radius <= 150
+-	// (ParallelSafe) and every other mobile unit's <= 250 (a write to a bigger
+-	// one is counted), the moved unit is within 150 + 6 + 250 + 20 of the
+-	// mover, and a read one within 121 + 20 + 50 (query centre ahead of
+-	// midPos) + 200 (query radius) + 250 + a quad + the quad registration's
+-	// drift of the reader; the grid's R cells either side must cover the sum.
+-	static float SafeReach() {
+-		const float q = float(modInfo.quadFieldQuadSizeInElmos);
+-		const float drift = float(modInfo.unitQuadPositionUpdateRate) * 20.0f;
+-		const float read = 121.0f + 20.0f + 50.0f + 200.0f + 250.0f + q + drift;
+-		const float write = 150.0f + 6.0f + 250.0f + 20.0f;
+-		return (read + write);
+-	}
+-
+ 	// true if it ran the loop; false = run the plain sequential one
+ 	static bool Run(const std::vector<CUnit*>& order) {
+ 		if ((g_brToggles & 1) == 0 || !ThreadPool::HasThreads() || ThreadPool::GetNumThreads() < 2)
+ 			return false;
+-		if (order.size() < 64 || eventHandler.HasUnitMovedClients() || modInfo.allowUnitCollisionDamage)
++		if (order.size() < 64 || eventHandler.HasUnitMovedClients())
+ 			return false;
+ 
+-		{
+-			const unsigned cq = (g_brToggles >> 8) & 0xff;
+-			const unsigned cr = (g_brToggles >> 16) & 0xf;
+-			cellReach = (cr == 0)? 2: int(cr);
+-			cellSize = (cq == 0)? 0.0f: float(cq) * 128.0f;
+-			const float need = SafeReach();
+-			if (cellSize * cellReach < need)
+-				cellSize = std::ceil(need / cellReach / 128.0f) * 128.0f;
+-
+-			gridW = int(float3::maxxpos / cellSize) + 1;
+-			gridH = int(float3::maxzpos / cellSize) + 1;
+-			lastInCell.assign(size_t(gridW) * gridH, -1);
+-		}
+-
+ 		work.clear();
+ 		isSerial.clear();
+-		predBeg.clear();
+-		preds.clear();
+-		cell0.clear();
+ 		tgtUnit.clear();
+ 		tgtType.clear();
+-		predBeg.push_back(0);
++		edges.clear();
+ 
+ 		long long nPar = 0;
+ 
+@@ -297,55 +255,54 @@ namespace BrParAir {
+ 
+ 			const int k = int(work.size());
+ 			work.push_back(u);
++			if (rankOf.size() <= size_t(u->id))
++				rankOf.resize(u->id + 1024, -1);
++			rankOf[u->id] = k;
+ 
+-			const int c0 = CellOf(u->pos);
+-			cell0.push_back(c0);
+ 			tgtType.push_back(int(u->curTarget.type));
+ 			tgtUnit.push_back((u->curTarget.type == Target_Unit)? u->curTarget.unit: nullptr);
+ 
+-			if (!ParallelSafe(u)) {
+-				isSerial.push_back(1);
+-				predBeg.push_back(int(preds.size()));
+-				continue;
+-			}
+-
+-			isSerial.push_back(0);
+-			nPar += 1;
+-
+-			int cells[2] = {c0, -1};
+-			if (u->curTarget.type == Target_Unit && u->curTarget.unit != nullptr) {
+-				cells[1] = CellOf(u->curTarget.unit->pos);
+-				if (cells[1] == cells[0])
+-					cells[1] = -1;
+-			}
++			const bool par = ParallelSafe(u);
++			isSerial.push_back(!par);
++			nPar += par;
++		}
+ 
+-			for (const int c: cells) {
+-				if (c < 0)
+-					continue;
+-				const int cx = c % gridW;
+-				const int cz = c / gridW;
+-				for (int z = std::max(0, cz - cellReach); z <= std::min(gridH - 1, cz + cellReach); ++z) {
+-					for (int x = std::max(0, cx - cellReach); x <= std::min(gridW - 1, cx + cellReach); ++x) {
+-						const int j = lastInCell[z * gridW + x];
+-						if (j >= 0 && (preds.size() == size_t(predBeg.back()) || preds.back() != j))
+-							preds.push_back(j);
+-					}
+-				}
+-			}
+-			for (const int c: cells) {
+-				if (c >= 0)
+-					lastInCell[c] = k;
+-			}
++		// an item reads its target's position: if the target is an item of the
++		// loop the two run in loop order (a serial target already is)
++		const int n = int(work.size());
++		for (int k = 0; k < n; ++k) {
++			if (isSerial[k] || tgtUnit[k] == nullptr)
++				continue;
++			const int t = (size_t(tgtUnit[k]->id) < rankOf.size())? rankOf[tgtUnit[k]->id]: -1;
++			if (t < 0 || t == k || work[t] != tgtUnit[k] || isSerial[t])
++				continue;
++			if (t < k)
++				edges.emplace_back(k, t);
++			else
++				edges.emplace_back(t, k);
++		}
++		for (CUnit* u: work)
++			rankOf[u->id] = -1;
+ 
+-			predBeg.push_back(int(preds.size()));
++		predBeg.assign(n + 1, 0);
++		for (const auto& e: edges)
++			predBeg[e.first + 1] += 1;
++		for (int k = 0; k < n; ++k)
++			predBeg[k + 1] += predBeg[k];
++		preds.resize(edges.size());
++		{
++			static std::vector<int> fill;
++			fill.assign(predBeg.begin(), predBeg.end() - 1);
++			for (const auto& e: edges)
++				preds[fill[e.first]++] = e.second;
+ 		}
+ 
+ 		stats.frames++;
+-		stats.items += work.size();
++		stats.items += n;
+ 		stats.parallel += nPar;
+-		stats.serial += (work.size() - nPar);
++		stats.serial += (n - nPar);
++		stats.targetEdges += edges.size();
+ 
+-		const int n = int(work.size());
+ 		if (n == 0)
+ 			return true;
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,87 @@
+From a08d20c4ad2f35137a4a98434a205dde629532d1 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 23:44:33 +0000
+Subject: [PATCH 148/149] [barreplay] P12 v2: a Lua write to one unit marks
+ that unit, not everything (toggle3 0x10000)
+
+speed63's counters: 93% of the synced pass's projectiles would act on nothing,
+but only 34% were skipped, 59% finding a cell of their query marked: every Lua
+write but rules params and team resources marked everything, and a hit's damage
+reaches gadgets that write. Inside the pass, a write to ONE unit (SetUnit*,
+AddUnit*, UseUnit*, GiveOrder[Array]ToUnit with a unit id first) now marks
+that unit's cells and its shields' before the call and again after it (a
+volume or mid position it changed), the after-mark also on a Lua error (Lua is
+built as C++, its errors unwind). What reaches further marks through its own
+hooks: a death and its blast, a feature, a unit or shield changing quads
+(which marks everything).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Lua/LuaUtils.cpp | 41 ++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index e69ee6b..feb524d 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -10,19 +10,54 @@
+ #include "Sim/Misc/BrLosOverlap.h"
+ #include "Sim/Units/BrWeaponVectors.h"
+ #include "Sim/Projectiles/BrPreCollide.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
++#include "Sim/Units/UnitHandler.h"
+ 
+ // [barreplay] H101: how many calls of a Lua function that writes simulation
+ // state there have been (the functions entered through the two trampolines)
+ unsigned g_brLuaWrites = 0;
+ 
++// [barreplay] P12 v2 (toggle3 0x10000): inside P12's collision pass, a write
++// to ONE unit (SetUnit*, AddUnit*, UseUnit*, GiveOrder[Array]ToUnit, the unit's
++// id first) marks that unit's cells and its shields' before and after the call
++// instead of everything: its effects on what a collision check reads stay with
++// that unit (its volume, pieces, flags, health, shields), and what reaches
++// further marks by its own hooks (a death and its blast, a feature, a unit or
++// shield changing quads, which marks everything). The after-mark runs on a Lua
++// error too: Lua is built as C++, so its errors unwind.
++static const CUnit* BrP12WriteTarget(lua_State* L, const char* name)
++{
++	if (name == nullptr || (g_brToggles3 & 0x10000) == 0)
++		return nullptr;
++	if (std::strncmp(name, "SetUnit", 7) != 0 && std::strncmp(name, "AddUnit", 7) != 0 && std::strncmp(name, "UseUnit", 7) != 0
++		&& std::strcmp(name, "GiveOrderToUnit") != 0 && std::strcmp(name, "GiveOrderArrayToUnit") != 0)
++		return nullptr;
++	if (lua_type(L, 1) != LUA_TNUMBER)
++		return nullptr;
++	return unitHandler.GetUnit(lua_toint(L, 1));
++}
++namespace {
++	struct BrP12After {
++		const CUnit* u;
++		~BrP12After() { if (u != nullptr) BrP12MarkUnit(u); }
++	};
++}
++
+ int BrLuaDrainingCall(lua_State* L)
+ {
+ 	++g_brLuaWrites;
++	const char* brName = static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2)));
+ 	// [barreplay] P8: Lua can change anything a weapon vector reads
+-	BrP8::LuaWrite(static_cast<const char*>(lua_touserdata(L, lua_upvalueindex(2))), lua_toboolean(L, lua_upvalueindex(3)));
++	BrP8::LuaWrite(brName, lua_toboolean(L, lua_upvalueindex(3)));
+ 	// [barreplay] P12: any write but rules params and team resources
+-	if (!lua_toboolean(L, lua_upvalueindex(3)))
+-		BrP12Global();
++	BrP12After brAfter{nullptr};
++	if (!lua_toboolean(L, lua_upvalueindex(3)) && g_brP12Active) {
++		brAfter.u = BrP12WriteTarget(L, brName);
++		if (brAfter.u != nullptr)
++			BrP12MarkUnit(brAfter.u);
++		else
++			BrP12Global();
++	}
+ 	BrP4::Drain(BrP4::DR_LUA);
+ 	// [barreplay] P7: a Lua write in the script tick can change any LOS input
+ 	BrP7::MarkAll();
+-- 
+2.53.0
+

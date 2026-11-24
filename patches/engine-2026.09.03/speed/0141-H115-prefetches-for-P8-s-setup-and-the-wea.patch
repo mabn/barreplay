@@ -1,0 +1,63 @@
+From f77e0a49ef9600b3bb386bbcd00331c9dbf2ba1e Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:42:07 +0000
+Subject: [PATCH 141/149] [barreplay] H115: prefetches for P8's setup and the
+ weapon loop (toggle3 0x200)
+
+speed62's late window, the weapon loop's own time (2.5% of the main thread):
+P8's setup filled its id map reading every unit's id (third line) in turn with
+nothing prefetched (18%); P8's per-unit Ensure read the id again (25% with its
+lookups); prefetching the first weapon loaded its pointer from the weapons
+vector's buffer, which nothing had fetched (13%); CanUpdateWeapons tested
+stunned, in the unit's last line (9%). H115 prefetches the id 16 ahead in the
+setup, the id and the last line 8 ahead in the loop and the weapons buffer 6
+ahead. Loads only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/UnitHandler.cpp | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 1810742..afbbfbf 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -1037,8 +1037,15 @@ namespace BrP8 {
+ 			state[k].store(0, std::memory_order_relaxed);
+ 		if (idxOf.size() != size_t(unitHandler.MaxUnits()))
+ 			idxOf.assign(unitHandler.MaxUnits(), -1);
+-		for (size_t k = 0; k < n; ++k)
++		// [barreplay] H115 (toggle3 0x200): each id is in its unit's third line,
++		// which nothing has touched yet this frame: prefetch 16 ahead so the
++		// misses overlap
++		const bool brH115 = (g_brToggles3 & 0x200) != 0;
++		for (size_t k = 0; k < n; ++k) {
++			if (brH115 && k + 16 < n)
++				__builtin_prefetch(&units[k + 16]->id);
+ 			idxOf[units[k]->id] = int(k);
++		}
+ 		numChunks = int((n + CHUNK - 1) / CHUNK);
+ 		nextChunk.store(0, std::memory_order_relaxed);
+ 
+@@ -1122,7 +1129,18 @@ void CUnitHandler::UpdateUnitWeapons()
+ 			if (ahead + 8 < activeUnits.size()) {
+ 				__builtin_prefetch(&activeUnits[ahead + 8]->onTempHoldFire);
+ 				__builtin_prefetch(&activeUnits[ahead + 8]->weapons);
++				// [barreplay] H115 (toggle3 0x200): and its id (P8's Ensure reads
++				// it) and its last line (stunned, which CanUpdateWeapons tests)
++				if ((g_brToggles3 & 0x200) != 0) {
++					const CUnit* u8 = activeUnits[ahead + 8];
++					__builtin_prefetch(&u8->id);
++					__builtin_prefetch(reinterpret_cast<const char*>(u8) + sizeof(CUnit) - 1);
++				}
+ 			}
++			// [barreplay] H115: the weapons vector's buffer 6 ahead (its line 8
++			// ahead, above), so the first weapon's pointer is there 4 ahead
++			if ((g_brToggles3 & 0x200) != 0 && ahead + 6 < activeUnits.size() && !activeUnits[ahead + 6]->weapons.empty())
++				__builtin_prefetch(activeUnits[ahead + 6]->weapons.data());
+ 			if (ahead + 4 < activeUnits.size()) {
+ 				const std::vector<CWeapon*>& ws = activeUnits[ahead + 4]->weapons;
+ 				if ((g_brToggles & 0x100) != 0) {
+-- 
+2.53.0
+

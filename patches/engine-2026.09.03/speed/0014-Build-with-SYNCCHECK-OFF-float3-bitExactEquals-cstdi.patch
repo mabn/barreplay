@@ -1,0 +1,39 @@
+From 5644e9b687f6b51eab878649cf06928cf0b175d2 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 20:22:40 +0000
+Subject: [PATCH 14/43] Build with SYNCCHECK=OFF: float3::bitExactEquals,
+ <cstdint> in BuildingMaskMap.h
+
+---
+ rts/Sim/Misc/BuildingMaskMap.h | 1 +
+ rts/System/float3.h            | 2 ++
+ 2 files changed, 3 insertions(+)
+
+diff --git a/rts/Sim/Misc/BuildingMaskMap.h b/rts/Sim/Misc/BuildingMaskMap.h
+index 89351a3..b06b30f 100644
+--- a/rts/Sim/Misc/BuildingMaskMap.h
++++ b/rts/Sim/Misc/BuildingMaskMap.h
+@@ -3,6 +3,7 @@
+ #ifndef BUILDINGMASKMAP_H
+ #define BUILDINGMASKMAP_H
+ 
++#include <cstdint>
+ #include <vector>
+ 
+ #include "System/creg/creg_cond.h"
+diff --git a/rts/System/float3.h b/rts/System/float3.h
+index e827f2c..46f8a05 100644
+--- a/rts/System/float3.h
++++ b/rts/System/float3.h
+@@ -332,6 +332,8 @@ public:
+ 	 * @see operator==
+ 	 */
+ 	bool equals(const float3& f, const float3& eps = float3(cmp_eps(), cmp_eps(), cmp_eps())) const;
++	// same comparison as SyncedFloat3::bitExactEquals (SYNCCHECK=OFF builds use float3 there)
++	bool bitExactEquals(const float3& f) const { return (x == f.x) && (y == f.y) && (z == f.z); }
+ 
+ 
+ 	/**
+-- 
+2.53.0
+

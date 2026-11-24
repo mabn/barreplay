@@ -1,0 +1,93 @@
+From d78eff25e52bf7403a85cea076aebd56759fbee9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 23:44:33 +0000
+Subject: [PATCH 149/149] [barreplay] H122: the ground move type hands its
+ ground height to H88's cache (toggle3 0x20000)
+
+UpdatePhysicalState's GetHeightReal was still 0.9% of the main thread in
+speed62's late window: ground units that moved miss H88's cache. Their move
+type's AdjustPosToWaterLine has just read GetHeightReal under the position the
+unit ends its move at (only y changes after it), the very call
+UpdatePhysicalState makes later this frame; it now stores that value in the
+cache, keyed by x, z and the height-map version like every H88 entry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/MoveTypes/GroundMoveType.cpp | 13 +++++++++++--
+ rts/Sim/Units/Unit.cpp               |  9 +++++++++
+ rts/Sim/Units/Unit.h                 |  5 +++++
+ 3 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/GroundMoveType.cpp b/rts/Sim/MoveTypes/GroundMoveType.cpp
+index 8790ce9..bfb71cc 100644
+--- a/rts/Sim/MoveTypes/GroundMoveType.cpp
++++ b/rts/Sim/MoveTypes/GroundMoveType.cpp
+@@ -3279,6 +3279,8 @@ float CGroundMoveType::GetGroundHeight(const float3& p) const
+ 	return gh;
+ }
+ 
++extern unsigned g_brToggles3; // [barreplay] H122
++
+ void CGroundMoveType::AdjustPosToWaterLine()
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+@@ -3288,11 +3290,18 @@ void CGroundMoveType::AdjustPosToWaterLine()
+ 		return;
+ 
+ 	if (modInfo.allowGroundUnitGravity) {
++		// [barreplay] H122 (toggle3 0x20000): the height read here, under the
++		// position the unit ends its move at (only y changes below), is the one
++		// its UpdatePhysicalState reads later this frame: hand it to H88's cache
++		const float brX = owner->pos.x, brZ = owner->pos.z;
++		const float brH = CGround::GetHeightReal(brX, brZ);
++		if ((g_brToggles3 & 0x20000) != 0)
++			owner->BrNotePhysGround(brX, brZ, brH);
+ 		if (owner->FloatOnWater()) {
+ 			MoveDef *md = owner->moveDef;
+-			owner->Move(UpVector * (std::max(CGround::GetHeightReal(owner->pos.x, owner->pos.z), -md->waterline) - owner->pos.y), true);
++			owner->Move(UpVector * (std::max(brH, -md->waterline) - owner->pos.y), true);
+ 		} else {
+-			owner->Move(UpVector * (std::max(CGround::GetHeightReal(owner->pos.x, owner->pos.z), owner->pos.y) - owner->pos.y), true);
++			owner->Move(UpVector * (std::max(brH, owner->pos.y) - owner->pos.y), true);
+ 		}
+ 	} else {
+ 		owner->Move(UpVector * (GetGroundHeight(owner->pos) - owner->pos.y), true);
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 5e76c1c..6090009 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -1968,6 +1968,15 @@ void CUnit::BrUpdateFinish(uint8_t bits)
+ 	}
+ }
+ 
++void CUnit::BrNotePhysGround(float x, float z, float h)
++{
++	brPhysX = x;
++	brPhysZ = z;
++	brPhysHmv = g_brHeightMapVersion;
++	brPhysGround = h;
++	brPhysValid = true;
++}
++
+ void CUnit::UpdatePhysicalState(float eps)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index a00daac..ac9060e 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -559,6 +559,11 @@ public:
+ 	mutable size_t customIconIndex = size_t(-1); // icon::INVALID_ICON_INDEX;
+ 
+ 	bool drawIcon = true;
++
++	// [barreplay] H122: a caller that has just read the synced ground height
++	// under (x, z) hands it to H88's cache below (the very value
++	// UpdatePhysicalState would read there at this height-map version)
++	void BrNotePhysGround(float x, float z, float h);
+ private:
+ 	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
+ 	bool stunned = false;
+-- 
+2.53.0
+

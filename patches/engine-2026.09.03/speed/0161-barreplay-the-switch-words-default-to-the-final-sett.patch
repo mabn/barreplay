@@ -1,0 +1,60 @@
+From f0431ff1732b6d0e0099e1680739db14f29e20a6 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 11:55:00 +0000
+Subject: [PATCH] [barreplay] the switch words default to the final setting of
+ the speed work
+
+A published build runs t=d4d87abf t2=9bae383f t3=6ffffff (N3 off) when the
+environment sets no word; each word is still read from the environment
+first, and 0 switches its changes off.
+---
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index e23936b..257df16 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -40,27 +40,35 @@ using namespace MoveTypes;
+ 
+ extern AAirMoveType::EmitCrashTrailFunc amtEmitCrashTrailFuncs[2];
+ 
++// [barreplay] The switch words a run gets when the environment sets none: the
++// final setting of the speed work (barreplay's docs/engine-speed-plan.md), which
++// is what a published build runs. Each word is still read from the environment
++// first, and an explicit 0 switches every change in that word off.
++static constexpr unsigned BR_DEFAULT_TOGGLES  = 0xd4d87abfu;
++static constexpr unsigned BR_DEFAULT_TOGGLES2 = 0x9bae383fu;
++static constexpr unsigned BR_DEFAULT_TOGGLES3 = 0x06ffffffu; // N3 (0x1000000) off
++
+ static unsigned BrReadTogglesEnv() {
+ 	const char* s = std::getenv("BARREPLAY_TOGGLES");
+-	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): 0u;
++	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): BR_DEFAULT_TOGGLES;
+ }
+ unsigned g_brToggles = BrReadTogglesEnv();
+ 
+ // the second word (BARREPLAY_TOGGLES2, go file "t2=<hex>"): the first is full
+ static unsigned BrReadToggles2Env() {
+ 	const char* s = std::getenv("BARREPLAY_TOGGLES2");
+-	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): 0u;
++	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): BR_DEFAULT_TOGGLES2;
+ }
+ unsigned g_brToggles2 = BrReadToggles2Env();
+ 
+ // the third word (BARREPLAY_TOGGLES3, go file "t3=<hex>"): the second is full too
+ static unsigned BrReadToggles3Env() {
+ 	const char* s = std::getenv("BARREPLAY_TOGGLES3");
+-	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): 0u;
++	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): BR_DEFAULT_TOGGLES3;
+ }
+ unsigned g_brToggles3 = BrReadToggles3Env();
+ 
+-// [barreplay] H109 (toggle3 0x4, from BARREPLAY_TOGGLES3 at engine start only,
++// [barreplay] H109 (toggle3 0x4, from BARREPLAY_TOGGLES3 or its default at engine start only,
+ // never from park.go): the unit, feature and projectile drawers take no events
+ // in a headless run, so they hold nothing and nothing is added to or removed
+ // from them as units, features and projectiles come and go. Nothing synced
+-- 
+2.53.0
+

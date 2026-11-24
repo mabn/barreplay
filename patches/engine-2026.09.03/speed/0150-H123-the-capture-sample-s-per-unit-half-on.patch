@@ -1,0 +1,138 @@
+From 7311ae05f1ea44c3934a951b9166a690606cd780 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Wed, 21 Oct 2026 00:22:30 +0000
+Subject: [PATCH 150/156] [barreplay] H123: the capture sample's per-unit half
+ on all threads (toggle3 0x40000)
+
+Spring.GetUnitSampleDelta (W6) was 0.83% of the main thread in speed62's late
+window, 0.65% of it its own loop over ~10,000 units every sample (two
+dynamic_casts and a miss or more per unit). Each unit reads only itself and
+writes only its own predictor entries, keyed by its unique id, so the loop
+runs as for_mt_chunk from 1024 units; what each unit found goes into the
+output arrays afterwards, in GetAllUnits' order, by the main thread alone.
+The values are the same float operations as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Lua/LuaEngineEventLog.cpp | 61 +++++++++++++++++++++++++++--------
+ 1 file changed, 48 insertions(+), 13 deletions(-)
+
+diff --git a/rts/Lua/LuaEngineEventLog.cpp b/rts/Lua/LuaEngineEventLog.cpp
+index 74257f0..dad7ed1 100644
+--- a/rts/Lua/LuaEngineEventLog.cpp
++++ b/rts/Lua/LuaEngineEventLog.cpp
+@@ -21,6 +21,7 @@
+ #include "Sim/Weapons/WeaponDef.h"
+ #include "System/EventClient.h"
+ #include "System/EventHandler.h"
++#include "System/Threading/ThreadPool.h"
+ 
+ #include <vector>
+ 
+@@ -415,6 +416,7 @@ int LuaEngineEventLog::GetUnitSampleData(lua_State* L)
+  *
+  * @function Spring.GetUnitSampleDelta
+  */
++extern unsigned g_brToggles3; // [barreplay] (Sim/MoveTypes/GeneralMoveSystem.cpp)
+ namespace {
+ 	struct BrSamplePrev {
+ 		float x = 0.0f, z = 0.0f, dvx = 0.0f, dvz = 0.0f, hp = 0.0f, maxhp = 0.0f, b = 0.0f, def = 0.0f, team = 0.0f, t = 0.0f;
+@@ -505,14 +507,26 @@ int LuaEngineEventLog::GetUnitSampleDelta(lua_State* L)
+ 	for (auto* v: {&cid, &cdef, &cteam, &cx, &cz, &chp, &cmax, &cdvx, &cdvz, &cb, &ct, &dead, &sid, &sdef, &vid, &vlo, &vhi})
+ 		v->clear();
+ 
+-	for (const CUnit* u: units) {
++	// [barreplay] H123 (toggle3 0x40000): the per-unit half on all threads.
++	// Each unit reads only itself and writes only its own predictor entries
++	// (brPrev/brVisPrev by its id, ids being unique), so the order the units
++	// are visited in changes nothing; what it found is put into the output
++	// arrays afterwards, in GetAllUnits' order, by the main thread alone.
++	struct BrSampleOut {
++		float qx, qz, qhp, qmax, qdvx, qdvz, qb, qdef, qteam, qt, lo, hi;
++		uint8_t changed, shield, vis;
++	};
++	static std::vector<BrSampleOut> brOut;
++	brOut.resize(units.size());
++	auto perUnit = [&](const int i) {
++		const CUnit* u = units[i];
++		BrSampleOut& o = brOut[i];
+ 		float buildee = 0.0f;
+ 		if (const CBuilder* b = dynamic_cast<const CBuilder*>(u); b != nullptr && b->curBuild) {
+ 			buildee = b->curBuild->id;
+ 		} else if (const CFactory* f = dynamic_cast<const CFactory*>(u); f != nullptr && f->curBuild) {
+ 			buildee = f->curBuild->id;
+ 		}
+-		const float unitID = u->id;
+ 
+ 		float qx = BrQ(u->pos.x);
+ 		if (qx > 32767.0f) qx = 32767.0f; else if (qx < -32768.0f) qx = -32768.0f;
+@@ -543,20 +557,19 @@ int LuaEngineEventLog::GetUnitSampleDelta(lua_State* L)
+ 			&& p.hp == qhp && p.maxhp == qmax && p.b == qb
+ 			&& p.def == qdef && p.team == qteam && p.t == qt) {
+ 			p.x = qx; p.z = qz; p.f = frame;
++			o.changed = 0;
+ 		} else {
+-			cid.push_back(unitID); cdef.push_back(qdef); cteam.push_back(qteam);
+-			cx.push_back(qx); cz.push_back(qz); chp.push_back(qhp); cmax.push_back(qmax);
+-			cdvx.push_back(qdvx); cdvz.push_back(qdvz); cb.push_back(qb); ct.push_back(qt);
++			o.qx = qx; o.qz = qz; o.qhp = qhp; o.qmax = qmax; o.qdvx = qdvx; o.qdvz = qdvz;
++			o.qb = qb; o.qdef = qdef; o.qteam = qteam; o.qt = qt;
++			o.changed = 1;
+ 			p.x = qx; p.z = qz; p.dvx = qdvx; p.dvz = qdvz;
+ 			p.hp = qhp; p.maxhp = qmax; p.def = qdef; p.team = qteam; p.b = qb; p.t = qt; p.f = frame;
+ 			p.live = true;
+ 		}
+ 
+-		if (u->id <= 65535 && u->unitDef->id >= 0 && size_t(u->unitDef->id) < shieldDef.size() && shieldDef[u->unitDef->id]) {
+-			sid.push_back(unitID);
+-			sdef.push_back(defID);
+-		}
++		o.shield = (u->id <= 65535 && u->unitDef->id >= 0 && size_t(u->unitDef->id) < shieldDef.size() && shieldDef[u->unitDef->id]) ? 1 : 0;
+ 
++		o.vis = 0;
+ 		if (doVis && u->id <= 65535) {
+ 			float lo = 0.0f, hi = 0.0f, scale = 1.0f;
+ 			for (int a = 1; a <= nva; ++a) {
+@@ -572,13 +585,35 @@ int LuaEngineEventLog::GetUnitSampleDelta(lua_State* L)
+ 			BrVisPrev& v = brVisPrev[u->id];
+ 			if (!v.live) {
+ 				v.lo = lo; v.hi = hi; v.f = frame; v.live = true;
+-				vid.push_back(unitID); vlo.push_back(lo); vhi.push_back(hi);
++				o.vis = 1;
+ 			} else {
+-				if (keyframe || v.lo != lo || v.hi != hi) {
+-					vid.push_back(unitID); vlo.push_back(lo); vhi.push_back(hi);
+-				}
++				if (keyframe || v.lo != lo || v.hi != hi)
++					o.vis = 1;
+ 				v.lo = lo; v.hi = hi; v.f = frame;
+ 			}
++			o.lo = lo; o.hi = hi;
++		}
++	};
++	if ((g_brToggles3 & 0x40000) != 0 && units.size() >= 1024) {
++		for_mt_chunk(0, int(units.size()), perUnit, 64);
++	} else {
++		for (int i = 0; i < int(units.size()); ++i)
++			perUnit(i);
++	}
++	for (size_t i = 0; i < units.size(); ++i) {
++		const BrSampleOut& o = brOut[i];
++		const float unitID = units[i]->id;
++		if (o.changed) {
++			cid.push_back(unitID); cdef.push_back(o.qdef); cteam.push_back(o.qteam);
++			cx.push_back(o.qx); cz.push_back(o.qz); chp.push_back(o.qhp); cmax.push_back(o.qmax);
++			cdvx.push_back(o.qdvx); cdvz.push_back(o.qdvz); cb.push_back(o.qb); ct.push_back(o.qt);
++		}
++		if (o.shield) {
++			sid.push_back(unitID);
++			sdef.push_back(float(units[i]->unitDef->id));
++		}
++		if (o.vis) {
++			vid.push_back(unitID); vlo.push_back(o.lo); vhi.push_back(o.hi);
+ 		}
+ 	}
+ 
+-- 
+2.53.0
+
