@@ -3,7 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>barreplay viewer</title>
+<!-- The page's title, description, canonical URL and share preview. The
+     worker rewrites everything between the seo markers per page
+     (src/worker/seo.ts: a replay's map, size, date and players); what is
+     here is the home page's, for a page served without the worker. -->
+<!--seo-->
+<title>BAR Replays: watch Beyond All Reason replays online | barreplay</title>
+<meta name="description" content="Watch Beyond All Reason (BAR) replays in your browser: every unit on the map, the chat, and a game summary of the battles and turning points. Thousands of recent BAR games.">
+<!--/seo-->
 <!-- Deliberately NOT fingerprinted, unlike the subresources below: a browser
      asks for the tab icon at a fixed path of its own accord, so the name
      cannot carry a content hash (public/_headers caps it at a day instead). -->
@@ -148,7 +155,7 @@
        this is for middle-click / open-in-new-tab. -->
   <!-- On a replay page the brand link gives way to #backlink, the way back
        to the list, leading the replay's own title like a breadcrumb. -->
-  <h1><a href="/" id="homelink" title="All replays">barreplay</a><a href="/" id="backlink" title="Back to all replays"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4 L6 10 L12 16"/></svg>Replays</a><span class="sub" id="subtitle">replay state viewer</span></h1>
+  <h1><a href="/" id="homelink" title="All replays">barreplay</a><a href="/" id="backlink" title="Back to all replays"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4 L6 10 L12 16"/></svg>Replays</a><span class="sub" id="subtitle">Beyond All Reason replays</span></h1>
   <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
        (their captures predate the GAME record's recorder fields) and it cannot
        be derived after the fact, so it is marked by hand here. Shown only in

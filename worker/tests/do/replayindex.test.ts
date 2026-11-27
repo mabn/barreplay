@@ -2176,3 +2176,17 @@ test("lobbyMisses lists unnamed games with their nearby observations", async () 
     expect([n.lobbyId, n.name, n.mapOk, n.timeOk, n.overlapOk, n.common]).toEqual([9, "Rotato | 8v8", false, true, true, 2]);
   });
 });
+
+test("sitemapRows lists one id shard's published replays, placeholders left out", async () => {
+  const out = await inIndex((index, sql) => {
+    index.upsert(replay("a1000000000000000000000000000000"));
+    index.upsert(replay("a2000000000000000000000000000000"));
+    index.upsert(replay("b1000000000000000000000000000000"));
+    index.upsert(replay("a3000000000000000000000000000000"));
+    sql.exec(`UPDATE replays SET placeholder = 1 WHERE id = 'a3000000000000000000000000000000'`);
+    return { a: index.sitemapRows("a"), bad: index.sitemapRows("zz") };
+  });
+  expect(out.a.map((r) => r.id)).toEqual(["a1000000000000000000000000000000", "a2000000000000000000000000000000"]);
+  expect(out.a[0].updatedUnix).toBeGreaterThan(0);
+  expect(out.bad).toEqual([]);
+});

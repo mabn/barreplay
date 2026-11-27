@@ -4237,6 +4237,10 @@ function renderReplayTitle() {
   el.innerHTML = `<b class="maptitle">${escapeHtml(data.mapName || data.gameId || 'Replay')}</b>` +
     `<span class="facts">${facts.filter(Boolean).map(escapeHtml).join(' · ')}</span>`;
   el.title = data.gameId ? 'Game ' + data.gameId : '';
+  // The worker wrote the same into the page's <title> on a direct load
+  // (src/worker/seo.ts); this keeps it right after in-page navigation.
+  const head = [data.mapName, sizeLabel(spec)].filter(Boolean).join(' ') || 'Game';
+  document.title = `${head}${data.startUnix ? ', ' + new Date(data.startUnix * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : ''}: Beyond All Reason replay | barreplay`;
 }
 
 // SPEC_NAMES_SHOWN: spectators named on the card's last line before "+N"
@@ -5573,7 +5577,9 @@ function showHome() {
   document.body.classList.add('home');
   document.getElementById('home').style.display = '';
   document.getElementById('rail').style.display = '';
-  document.getElementById('subtitle').textContent = 'replay state viewer';
+  document.getElementById('subtitle').textContent = 'Beyond All Reason replays';
+  // The landing page's <title>, as index.html and src/worker/seo.ts write it.
+  document.title = 'BAR Replays: watch Beyond All Reason replays online | barreplay';
   document.getElementById('subtitle').title = '';
   document.getElementById('viewmark').style.display = 'none';
   renderHome();

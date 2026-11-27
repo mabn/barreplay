@@ -1338,6 +1338,23 @@ export class ReplayIndex extends DurableObject<Env> {
    * through a one-minute in-memory copy, so the recurring cost is one row a
    * minute however often the landing page loads; the facets() this replaces
    * ran DISTINCT scans over the whole catalog on every call. */
+  /** sitemapRows lists the published replays whose game id starts with one
+   * hex digit, for that shard of the sitemap (seo.ts): a range over the
+   * primary key, so it reads the shard's own rows (~1/16 of the catalog) and
+   * nothing else. The route caches the answer at the edge for hours, so this
+   * runs a few times a day per shard, never per page view. */
+  sitemapRows(shard: string): { id: string; updatedUnix: number | null }[] {
+    if (!/^[0-9a-f]$/.test(shard)) return [];
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT id, updated_unix FROM replays WHERE id >= ? AND id < ? AND placeholder = 0 ORDER BY id`,
+        shard,
+        shard + "\uffff",
+      )
+      .toArray()
+      .map((r) => ({ id: r.id as string, updatedUnix: (r.updated_unix as number | null) ?? null }));
+  }
+
   mapNames(): string[] {
     if (this.mapsCache !== null && Date.now() - this.mapsCache.at < MAPS_CACHE_MS) {
       return this.mapsCache.maps;

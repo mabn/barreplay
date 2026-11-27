@@ -2648,6 +2648,25 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           a /setup.html URL with a 307 to /setup — so rewriting the path fed that
                           bounce back into the same route and shipped /setup as an INFINITE
                           REDIRECT LOOP.
+                          SEARCH ENGINES (src/worker/seo.ts, tests/seo.test.ts): every page is
+                          the same index.html, so serveEntry REWRITES its <!--seo-->..<!--/seo-->
+                          block per page — title, description, canonical (always
+                          https://replay.fogofwar.dev), Open Graph, and WebSite JSON-LD on the
+                          home page. A replay page's head is read off its catalog row (one
+                          list() seek by id per page load; a failed lookup serves the generic
+                          head): "<map> <size>, <date>: Beyond All Reason replay", the players in
+                          the description, the map's terrain (via /api/bar) as og:image; revision
+                          paths canonicalize to /replays/<gameId>; a game with no row or a
+                          placeholder is noindex, as are /queue and /sqlstats; the workers.dev
+                          hostname answers x-robots-tag: noindex. /robots.txt and /sitemap.xml
+                          have routes (the asset layer's SPA fallback answered both with
+                          index.html); robots keeps /api/ OPEN because Google renders the page
+                          and reads /api/replays. The sitemap is an index of /sitemaps/pages.xml
+                          and 16 /sitemaps/replays-<hex>.xml shards, one per first hex digit of
+                          the game id (ReplayIndex.sitemapRows, a primary-key range, ~1/16 of the
+                          catalog), each kept in the edge cache (caches.default) for 6 h so
+                          crawlers cost no SQL in between. app.js keeps document.title right
+                          after in-page navigation.
                           ROW BUDGET (the constraint behind half the SQL above): the DO's
                           SQLite is billed by ROWS READ — every row a query scans, index
                           entries included — and the Workers Free plan allows 5 million a DAY
