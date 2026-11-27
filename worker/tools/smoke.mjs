@@ -212,6 +212,24 @@ try {
     ico.status === 200 && !ico.headers.get("content-type")?.includes("text/html"),
     `${ico.status} ${ico.headers.get("content-type")}`);
 
+  // What search engines read (src/worker/seo.ts). The head is written into
+  // the asset layer's index.html, so this is the one place that proves the
+  // built page still carries the markers and the layer still labels it HTML;
+  // robots.txt and the sitemap were answered with index.html before they had
+  // routes, which is exactly the fallback this harness exists to catch.
+  const homeHtml = (await get(base, "/")).body;
+  check("the home page has its own title and canonical URL",
+    /<title>BAR Replays:/.test(homeHtml) && homeHtml.includes('<link rel="canonical" href="https://replay.fogofwar.dev/">'),
+    homeHtml.slice(0, 300));
+  const robots = await get(base, "/robots.txt");
+  const robotsText = robots.body;
+  check("GET /robots.txt is text naming the sitemap",
+    robots.status === 200 && robots.headers.get("content-type")?.startsWith("text/plain") && robotsText.includes("Sitemap:"),
+    `${robots.status} ${robots.headers.get("content-type")}`);
+  const sitemap = await get(base, "/sitemap.xml");
+  check("GET /sitemap.xml is a sitemap index",
+    sitemap.status === 200 && sitemap.body.includes("<sitemapindex"), String(sitemap.status));
+
   // The game summary other sites import() at runtime (lavabalance). The
   // stable name must revalidate so a deploy reaches them at once, the module
   // it forwards to is immutable, and BOTH need CORS — a cross-origin module

@@ -36,6 +36,9 @@ import { DAEMON_KINDS, parseInstallId, parseJobErrorKind, parseJobProgress, pars
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { isBrp, scanBrpHead } from "./brphead";
+import { gameIdOfPage, homeHead, injectHead, replayHead, robotsTxt, sectionHead, sitemapIndex, sitemapPages, sitemapReplays, sitemapXml } from "./seo";
+import type { PageHead } from "./seo";
+import type { ReplayEntry } from "./replayentry";
 import { isEmptyFilter, isReplayFolder, monthFolder, parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream inside Worker memory. Real
@@ -1149,7 +1152,7 @@ app.get("/api/streams/:month/:gameId/:file", async (c) => {
 // Registered before the wildcard so it wins for one-segment paths.
 app.on(["GET", "HEAD"], "/replays/:id", (c) => {
   const id = c.req.param("id");
-  if (!id.includes(".")) return serveEntry(c);
+  if (!id.includes(".")) return serveReplayPage(c, id);
   return serveR2(c.env.BUCKET, c.req.path.slice(1), c.req.raw, true);
 });
 // /replays/<YYYY-MM>/<rid name> with no extension is a page too: the link
@@ -1157,7 +1160,7 @@ app.on(["GET", "HEAD"], "/replays/:id", (c) => {
 // replays/<rid>/c<n>, also has no dot, but its first segment is a game id,
 // never a month, which is the whole dispatch.
 app.on(["GET", "HEAD"], "/replays/:folder/:id", (c) => {
-  if (isReplayFolder(c.req.param("folder")) && !c.req.param("id").includes(".")) return serveEntry(c);
+  if (isReplayFolder(c.req.param("folder")) && !c.req.param("id").includes(".")) return serveReplayPage(c, c.req.param("id"));
   return serveR2(c.env.BUCKET, c.req.path.slice(1), c.req.raw, true);
 });
 app.on(["GET", "HEAD"], "/replays/*", (c) => {
@@ -1209,21 +1212,88 @@ app.put("/replays/*", async (c) => {
 // content hash (/app.js?v=…, stamped by the Vite asset-rev plugin), so a
 // revalidated index.html is all a UI deploy needs to reach every browser —
 // the hashed js/css URLs change and get refetched automatically.
-const serveEntry = async (c: { env: Env; req: { raw: Request } }) => {
+//
+// It also writes the page's own <title>, description, canonical URL and share
+// preview into the entry (seo.ts): the same index.html serves every page, and
+// without this all of them told a search engine "barreplay viewer" and
+// nothing else.
+type EntryCtx = { env: Env; req: { raw: Request } };
+const serveEntry = async (c: EntryCtx, head?: PageHead) => {
   const r = await c.env.ASSETS.fetch(c.req.raw);
   const h = new Headers(r.headers);
   h.set("cache-control", "no-cache");
-  return new Response(r.body, { status: r.status, headers: h });
+  // The same viewer answers on the workers.dev hostname; only the public
+  // origin should be indexed (the canonical link says so too).
+  if (new URL(c.req.raw.url).hostname.endsWith(".workers.dev")) h.set("x-robots-tag", "noindex");
+  const type = h.get("content-type") ?? "";
+  if (!head || !r.ok || !type.includes("text/html") || c.req.raw.method === "HEAD") {
+    return new Response(r.body, { status: r.status, headers: h });
+  }
+  const html = injectHead(await r.text(), head);
+  h.delete("content-length");
+  h.delete("etag");
+  return new Response(html, { status: r.status, headers: h });
 };
-app.get("/", serveEntry);
-app.get("/index.html", serveEntry);
+
+// A replay page's head names its map, size, date and players, read off the
+// game's catalog row: one primary-key seek per page load. A lookup that fails
+// still serves the page, with the generic head.
+const serveReplayPage = async (c: EntryCtx, segment: string) => {
+  const gameId = gameIdOfPage(segment);
+  if (!gameId) return serveEntry(c, { ...homeHead(PUBLIC_ORIGIN), index: false });
+  let entry: ReplayEntry | null = null;
+  try {
+    const filter = parseReplayFilter(new URLSearchParams({ id: gameId }));
+    if (typeof filter !== "string") {
+      entry = (await indexStub(c.env).list(filter, 1, 0)).find((e) => e.id === gameId) ?? null;
+    }
+  } catch (err) {
+    console.error("replay page head lookup failed", err);
+    return serveEntry(c, { ...homeHead(PUBLIC_ORIGIN), canonical: `${PUBLIC_ORIGIN}/replays/${gameId}`, jsonLd: undefined });
+  }
+  return serveEntry(c, replayHead(PUBLIC_ORIGIN, gameId, entry));
+};
+
+app.get("/", (c) => serveEntry(c, homeHead(PUBLIC_ORIGIN)));
+app.get("/index.html", (c) => serveEntry(c, homeHead(PUBLIC_ORIGIN)));
 // The landing page's sections live at paths now (/queue, /games, /sqlstats —
 // app.js routes on the pathname), so a direct load or refresh of one must
 // serve the SPA entry exactly like "/". The replay page path (/replays/<id>)
 // is handled above, where it shares a prefix with the data pieces.
-app.get("/queue", serveEntry);
-app.get("/games", serveEntry);
-app.get("/sqlstats", serveEntry);
+app.get("/queue", (c) => serveEntry(c, sectionHead(PUBLIC_ORIGIN, "queue")));
+app.get("/games", (c) => serveEntry(c, sectionHead(PUBLIC_ORIGIN, "games")));
+app.get("/sqlstats", (c) => serveEntry(c, sectionHead(PUBLIC_ORIGIN, "sqlstats")));
+
+// robots.txt and the sitemaps. Before these routes the asset layer's
+// single-page fallback answered both paths with the viewer's HTML.
+app.get("/robots.txt", (c) =>
+  c.text(robotsTxt(PUBLIC_ORIGIN), 200, { "cache-control": "public, max-age=86400" }));
+app.get("/sitemap.xml", () =>
+  xmlResponse(sitemapIndex(PUBLIC_ORIGIN), SITEMAP_PAGES_SEC));
+app.get("/sitemaps/pages.xml", () =>
+  xmlResponse(sitemapXml(sitemapPages(PUBLIC_ORIGIN)), SITEMAP_PAGES_SEC));
+// One shard of the replay sitemap: the published replays whose id starts
+// with one hex digit. Its DO read is a few thousand rows, so the answer is
+// kept in the edge cache for SITEMAP_REPLAYS_SEC: a crawler (or anybody)
+// asking again within that costs no SQL at all.
+app.get("/sitemaps/:file", async (c) => {
+  const m = /^replays-([0-9a-f])\.xml$/.exec(c.req.param("file"));
+  if (!m) return c.text("not found", 404);
+  const cache = typeof caches !== "undefined" ? (caches as unknown as { default?: Cache }).default : undefined;
+  const key = new Request(`${PUBLIC_ORIGIN}/sitemaps/replays-${m[1]}.xml`);
+  const hit = await cache?.match(key);
+  if (hit) return hit;
+  const rows = await indexStub(c.env).sitemapRows(m[1]);
+  const res = xmlResponse(sitemapXml(sitemapReplays(PUBLIC_ORIGIN, rows)), SITEMAP_REPLAYS_SEC);
+  if (cache) c.executionCtx.waitUntil(cache.put(key, res.clone()));
+  return res;
+});
+const SITEMAP_PAGES_SEC = 86400;
+const SITEMAP_REPLAYS_SEC = 6 * 3600;
+const xmlResponse = (body: string, maxAge: number) =>
+  new Response(body, {
+    headers: { "content-type": "application/xml; charset=utf-8", "cache-control": `public, max-age=${maxAge}` },
+  });
 
 // The FogOfWar.exe download page (public/setup.html), linked from the landing page's
 // dropzone. The asset layer resolves the extensionless /setup to setup.html on

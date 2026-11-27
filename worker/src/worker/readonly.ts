@@ -39,6 +39,7 @@
 export const READ_METHODS: ReadonlySet<string> = new Set([
   "list",
   "mapNames",
+  "sitemapRows",
   "gameStartUnix",
   "gamesPage",
   "gamesByIds",
